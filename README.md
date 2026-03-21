@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/banner.svg" alt="foehn" width="600">
+  <img src="https://raw.githubusercontent.com/kayhendriksen/foehn/main/assets/banner.svg" alt="foehn" width="600">
 </h1>
 
 <p align="center">
