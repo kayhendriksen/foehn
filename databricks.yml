@@ -1,0 +1,179 @@
+# Declarative Automation Bundle — foehn
+#
+# Defines two jobs:
+#   foehn_daily      — downloads recent data daily at 13:30 UTC, then ingests to Delta
+#   foehn_historical — full historical backfill, paused by default (run manually or on Jan 1)
+#
+# Deploy:
+#   databricks bundle validate
+#   databricks bundle deploy -t dev
+#   databricks bundle deploy -t prod
+#
+# Run manually:
+#   databricks bundle run foehn_daily -t prod
+#   databricks bundle run foehn_historical -t prod
+
+bundle:
+  name: foehn
+
+workspace:
+  host: ${var.host}
+
+variables:
+  host:
+    description: "Databricks workspace URL (e.g. https://adb-xxx.azuredatabricks.net)"
+  catalog:
+    description: "Unity Catalog catalog name"
+    default: main
+  schema:
+    description: "Unity Catalog schema name"
+    default: meteoswiss
+  volume:
+    description: "Unity Catalog volume name (landing zone)"
+    default: landing
+  node_type:
+    description: "VM type — Standard_D4ds_v5 (Azure) | m5.xlarge (AWS) | n2-standard-4 (GCP)"
+    default: Standard_D4ds_v5
+  spark_version:
+    default: "17.3.x-scala2.13"
+
+# ── Targets (environments) ────────────────────────────────────────────────────
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: dev           # isolated catalog for dev runs
+
+  prod:
+    mode: production
+    variables:
+      catalog: main
+
+# ── Shared cluster template ───────────────────────────────────────────────────
+# Single-node: download + Polars conversion don't need distributed Spark.
+# The ingest step uses local Spark (spark.master=local[*]) which is fine for
+# writing Delta tables from pre-built Parquet files.
+
+_worker: &worker
+  job_cluster_key: worker
+  new_cluster:
+    spark_version: ${var.spark_version}
+    node_type_id: ${var.node_type}
+    num_workers: 0                        # single-node
+    spark_conf:
+      spark.master: "local[*]"
+      spark.databricks.delta.schema.autoMerge.enabled: "true"
+    azure_attributes:
+      availability: SPOT_WITH_FALLBACK    # cost savings; remove for AWS/GCP
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+
+resources:
+  jobs:
+
+    # ── Daily: recent data ────────────────────────────────────────────────────
+    foehn_daily:
+      name: "[foehn] Daily ingest"
+      description: >
+        Downloads MeteoSwiss recent data (Jan 1 → yesterday) and refreshes
+        Delta tables. Runs daily at 13:30 UTC — 90 min after MeteoSwiss
+        publishes the daily update at 12:00 UTC.
+
+      schedule:
+        quartz_cron_expression: "0 30 13 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      job_clusters:
+        - job_cluster_key: worker
+          <<: *worker
+
+      tasks:
+        - task_key: download
+          description: "foehn --recent → Parquet files written to Unity Catalog Volume"
+          job_cluster_key: worker
+          python_wheel_task:
+            package_name: foehn
+            entry_point: foehn
+            parameters:
+              - "--data-dir"
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
+          libraries:
+            - whl: ./dist/foehn-*.whl
+
+        - task_key: ingest
+          description: "Parquet → Delta tables in ${var.catalog}.${var.schema}"
+          depends_on:
+            - task_key: download
+          job_cluster_key: worker
+          spark_python_task:
+            python_file: ./scripts/ingest_delta.py
+            parameters:
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+              - "--volume"
+              - "${var.volume}"
+          libraries:
+            - whl: ./dist/foehn-*.whl
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}    # set via env: BUNDLE_VAR_alert_email
+
+    # ── Historical: full archive backfill ─────────────────────────────────────
+    foehn_historical:
+      name: "[foehn] Historical backfill"
+      description: >
+        Downloads the full historical MeteoSwiss archive (start of measurement
+        → Dec 31 last year). Paused by default — trigger manually for first run
+        or after a gap. Scheduled to run automatically on Jan 1 each year to
+        pick up the newly released historical slice.
+
+      schedule:
+        quartz_cron_expression: "0 0 3 1 1 ?"   # 03:00 UTC on Jan 1
+        timezone_id: UTC
+        pause_status: PAUSED                     # remove PAUSED for annual auto-run
+
+      job_clusters:
+        - job_cluster_key: worker
+          <<: *worker
+
+      tasks:
+        - task_key: download_historical
+          description: "foehn --historical → Parquet files in Unity Catalog Volume"
+          job_cluster_key: worker
+          python_wheel_task:
+            package_name: foehn
+            entry_point: foehn
+            parameters:
+              - "--historical"
+              - "--full-refresh"
+              - "--data-dir"
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
+          libraries:
+            - whl: ./dist/foehn-*.whl
+
+        - task_key: ingest_historical
+          description: "Parquet → Delta tables (mergeSchema handles new columns)"
+          depends_on:
+            - task_key: download_historical
+          job_cluster_key: worker
+          spark_python_task:
+            python_file: ./scripts/ingest_delta.py
+            parameters:
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+              - "--volume"
+              - "${var.volume}"
+          libraries:
+            - whl: ./dist/foehn-*.whl
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}

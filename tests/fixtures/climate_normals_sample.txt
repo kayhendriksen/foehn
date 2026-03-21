@@ -1,0 +1,11 @@
+Federal Department of Home Affairs FDHA
+Federal Office of Meteorology and Climatology
+MeteoSwiss
+
+Creation date: 01.01.2026 / As at: cf. creation date
+
+Monthly values Wind speed scalar / meter/second / Normals 1991-2020
+
+Station	Altitude [m asl]	CH coordinates	Reference period	Jan	Feb	Mar	Apr	May	Jun	Jul	Aug	Sep	Oct	Nov	Dec	Year
+Testdorf / Station-A	539	2710000 / 1259000	01.1991-12.2020	1.7	1.7	1.8	1.6	1.6	1.5	1.5	1.3	1.3	1.3	1.4	1.7	1.5
+Testberg B	1321	2609000 / 1148000	01.1991-12.2020	1.8	2.0	2.2	2.2	2.2	2.2	2.1	1.9	1.8	1.7	1.8	1.9	2.0
