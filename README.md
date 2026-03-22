@@ -28,7 +28,7 @@ foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) c
 ## Why foehn?
 
 - **20+ collections in one command** — weather stations, radar, hail maps, forecasts, climate scenarios, and more
-- **5–10× smaller on disk** — columnar Parquet with Zstd compression vs. raw CSVs
+- **Significantly smaller on disk** — columnar Parquet with Snappy compression vs. raw CSVs
 - **Incremental by default** — only re-downloads files that changed since your last run, tracked via `_last_run.json`
 - **No Spark required locally** — download + conversion uses Polars only; Spark is optional for Delta ingestion
 - **Ships a Declarative Automation Bundle** — ready-to-deploy daily job and historical backfill, no pipeline config needed
