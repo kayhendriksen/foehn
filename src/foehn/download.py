@@ -6,6 +6,7 @@ import json
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -16,6 +17,17 @@ from foehn.collections import (
     STAC_API_BASE,
 )
 from foehn.stac import get_collection_items, get_collection_metadata
+
+_ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss"}
+
+
+def _validate_href(href: str) -> str:
+    """Raise ValueError if *href* points outside the trusted MeteoSwiss domains."""
+    parsed = urlparse(href)
+    if parsed.hostname not in _ALLOWED_DOMAINS:
+        raise ValueError(f"Untrusted download domain: {parsed.hostname}")
+    return href
+
 
 # --- State files (ETags + last-run timestamp) ---
 
@@ -120,7 +132,8 @@ def download_collection(
     downloaded = 0
     skipped = 0
     for i, (href, _asset_info) in enumerate(csv_assets, 1):
-        filename = href.split("/")[-1]
+        _validate_href(href)
+        filename = href.split("?")[0].split("/")[-1]
         filepath = out_dir / filename
 
         # Use ETag to skip files that haven't changed
@@ -174,9 +187,9 @@ def download_metadata(collection_key: str, output_dir: Path):
         href = asset_info.get("href", "")
         if not href.endswith(".csv"):
             continue
-        filename = href.split("/")[-1]
+        _validate_href(href)
+        filename = href.split("?")[0].split("/")[-1]
         filepath = out_dir / filename
-
         resp = requests.get(href, timeout=60)
         resp.raise_for_status()
         try:
@@ -241,6 +254,7 @@ def download_grib2(
         if filepath.exists():
             continue
 
+        _validate_href(href)
         with requests.get(href, stream=True, timeout=120) as resp:
             resp.raise_for_status()
             with filepath.open("wb") as f:
@@ -281,6 +295,7 @@ def download_netcdf(collection_key: str, output_dir: Path):
             filepath = out_dir / filename
             if filepath.exists():
                 continue
+            _validate_href(href)
             with requests.get(href, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
                 with filepath.open("wb") as f:
@@ -315,5 +330,10 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False):
     print(f"  Downloaded: normwerte.zip ({len(resp.content) / 1024:.0f} KB)", flush=True)
 
     with zipfile.ZipFile(filepath, "r") as zf:
+        resolved_out_dir = out_dir.resolve()
+        for member in zf.infolist():
+            target = (resolved_out_dir / member.filename).resolve()
+            if not str(target).startswith(str(resolved_out_dir) + "/"):
+                raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
         zf.extractall(out_dir)
         print(f"  Extracted {len(zf.namelist())} files", flush=True)

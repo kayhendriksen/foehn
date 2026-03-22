@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import requests
 
 from foehn.collections import STAC_API_BASE
+
+_ALLOWED_DOMAINS = {"data.geo.admin.ch"}
+
+
+def _validate_url(url: str) -> str:
+    """Raise ValueError if *url* points outside the trusted STAC API domain."""
+    parsed = urlparse(url)
+    if parsed.hostname not in _ALLOWED_DOMAINS:
+        raise ValueError(f"Untrusted STAC URL domain: {parsed.hostname}")
+    return url
 
 
 def get_collection_items(
@@ -47,10 +59,11 @@ def get_collection_items(
                     )
                 return items
 
-        url = next(
+        next_href = next(
             (link["href"] for link in data.get("links", []) if link.get("rel") == "next"),
             None,
         )
+        url = _validate_url(next_href) if next_href else None
 
     return items
 
