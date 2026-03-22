@@ -1,6 +1,6 @@
 """foehn — Download MeteoSwiss Open Government Data and convert to Parquet."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from foehn.api import convert, fetch, list_collections
 from foehn.collections import discover

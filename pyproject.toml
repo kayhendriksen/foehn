@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "foehn"
-version = "0.1.1"
+version = "0.2.0"
 description = "Download MeteoSwiss Open Government Data and convert to Parquet / Delta tables"
 readme = "README.md"
 license = "MIT"
