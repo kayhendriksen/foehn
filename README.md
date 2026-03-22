@@ -108,10 +108,10 @@ foehn.list_collections()
 # [{'category': 'CSV', 'key': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn'}, ...]
 
 # Download a single collection
-foehn.download("smn", data_dir="./data/meteoswiss")
+foehn.fetch("smn", data_dir="./data/meteoswiss")
 
 # Download with specific time slices
-foehn.download("smn", data_types=["historical", "recent"])
+foehn.fetch("smn", data_types=["historical", "recent"])
 
 # Convert downloaded CSVs to Parquet
 foehn.convert("smn", data_dir="./data/meteoswiss")

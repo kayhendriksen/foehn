@@ -22,7 +22,7 @@ def list_collections() -> list[dict[str, str]]:
     return discover()
 
 
-def download(
+def fetch(
     key: str,
     *,
     data_dir: Path | str | None = None,

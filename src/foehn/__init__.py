@@ -2,7 +2,7 @@
 
 __version__ = "0.1.1"
 
-from foehn.api import convert, download, list_collections
+from foehn.api import convert, fetch, list_collections
 from foehn.collections import discover
 
-__all__ = ["__version__", "convert", "discover", "download", "list_collections"]
+__all__ = ["__version__", "convert", "discover", "fetch", "list_collections"]
