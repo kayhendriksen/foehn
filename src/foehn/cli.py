@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from foehn.collections import (
     COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
+    discover,
 )
 from foehn.convert import convert_climate_normals_to_parquet, convert_to_parquet
 from foehn.download import (
@@ -72,6 +74,11 @@ Output:
     )
     output_group = parser.add_argument_group("output")
     output_group.add_argument(
+        "--list",
+        action="store_true",
+        help="List available collections and exit",
+    )
+    output_group.add_argument(
         "--grids",
         action="store_true",
         help="Also download grid/binary data: ICON GRIB2, radar HDF5, NetCDF, GeoTIFF",
@@ -84,10 +91,25 @@ Output:
     output_group.add_argument(
         "--data-dir",
         type=Path,
-        default=Path.cwd() / "data" / "meteoswiss",
-        help="Root data directory (default: ./data/meteoswiss)",
+        default=None,
+        help="Root data directory (default: $FOEHN_DATA_DIR or ./data/meteoswiss)",
     )
     args = parser.parse_args()
+
+    # Resolve defaults: CLI flags > env vars > built-in defaults
+    if args.data_dir is None:
+        env_dir = os.environ.get("FOEHN_DATA_DIR")
+        args.data_dir = Path(env_dir) if env_dir else Path.cwd() / "data" / "meteoswiss"
+    if not args.full_refresh:
+        args.full_refresh = os.environ.get("FOEHN_FULL_REFRESH", "").lower() in ("1", "true", "yes")
+
+    if args.list:
+        rows = discover()
+        print(f"{'Category':<16} {'Key':<30} Collection ID")
+        print("-" * 90)
+        for row in rows:
+            print(f"{row['category']:<16} {row['key']:<30} {row['collection_id']}")
+        return
 
     raw_dir = args.data_dir / "raw"
     parquet_dir = args.data_dir / "parquet"

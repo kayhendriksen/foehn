@@ -5,6 +5,7 @@ from foehn.collections import (
     FORECAST_CSV_COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
+    discover,
 )
 
 
@@ -32,3 +33,13 @@ def test_routing_sets_are_mutually_exclusive():
 def test_collection_ids_are_unique():
     ids = list(COLLECTIONS.values())
     assert len(ids) == len(set(ids)), "Duplicate STAC collection IDs found"
+
+
+def test_discover_returns_all_collections():
+    rows = discover()
+    assert len(rows) == len(COLLECTIONS)
+
+
+def test_discover_dict_keys():
+    for row in discover():
+        assert set(row.keys()) == {"category", "key", "collection_id"}

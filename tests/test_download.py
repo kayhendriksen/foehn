@@ -51,7 +51,7 @@ def test_load_etags_missing_file_returns_empty(tmp_path):
 
 
 def test_save_and_load_etags_roundtrip(tmp_path):
-    etags = {"https://example.com/file.csv": '"abc123"'}
+    etags = {"https://data.geo.admin.ch/file.csv": '"abc123"'}
     save_etags(tmp_path, etags)
     assert load_etags(tmp_path) == etags
 
@@ -95,7 +95,7 @@ def test_save_last_run_is_recent(tmp_path):
 @patch("foehn.download.get_collection_items")
 @patch("foehn.download.requests.get")
 def test_download_collection_saves_csv(mock_get, mock_items, tmp_path):
-    url = "https://example.com/ogd-smn_tst_d_recent.csv"
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n")
 
@@ -107,7 +107,7 @@ def test_download_collection_saves_csv(mock_get, mock_items, tmp_path):
 @patch("foehn.download.get_collection_items")
 @patch("foehn.download.requests.get")
 def test_download_collection_re_encodes_to_utf8(mock_get, mock_items, tmp_path):
-    url = "https://example.com/ogd-smn_tst_d_recent.csv"
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     # Windows-1252 encoded content (ä = 0xe4)
     mock_get.return_value = _csv_response(b"col\n\xe4\n")
@@ -121,7 +121,7 @@ def test_download_collection_re_encodes_to_utf8(mock_get, mock_items, tmp_path):
 @patch("foehn.download.get_collection_items")
 @patch("foehn.download.requests.get")
 def test_download_collection_saves_etag(mock_get, mock_items, tmp_path):
-    url = "https://example.com/ogd-smn_tst_d_recent.csv"
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(etag='"v1"')
 
@@ -134,7 +134,7 @@ def test_download_collection_saves_etag(mock_get, mock_items, tmp_path):
 @patch("foehn.download.get_collection_items")
 @patch("foehn.download.requests.get")
 def test_download_collection_sends_if_none_match(mock_get, mock_items, tmp_path):
-    url = "https://example.com/ogd-smn_tst_d_recent.csv"
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
 
     # Pre-seed an ETag and create the file so the cache path is taken
@@ -154,7 +154,7 @@ def test_download_collection_sends_if_none_match(mock_get, mock_items, tmp_path)
 @patch("foehn.download.get_collection_items")
 @patch("foehn.download.requests.get")
 def test_download_collection_skips_304(mock_get, mock_items, tmp_path):
-    url = "https://example.com/ogd-smn_tst_d_recent.csv"
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(status_code=304)
 
@@ -168,7 +168,7 @@ def test_download_collection_skips_304(mock_get, mock_items, tmp_path):
 @patch("foehn.download.requests.get")
 def test_download_collection_since_filter(mock_get, mock_items, tmp_path):
     """Items older than `since` should be skipped without any HTTP call."""
-    url = "https://example.com/ogd-smn_tst_d_recent.csv"
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url, updated="2025-06-01T00:00:00Z")]
     mock_get.return_value = _csv_response()
 
@@ -183,7 +183,7 @@ def test_download_collection_since_filter(mock_get, mock_items, tmp_path):
 @patch("foehn.download.get_collection_metadata")
 @patch("foehn.download.requests.get")
 def test_download_metadata_saves_csv(mock_get, mock_meta, tmp_path):
-    mock_meta.return_value = {"assets": {"stations": {"href": "https://example.com/stations.csv"}}}
+    mock_meta.return_value = {"assets": {"stations": {"href": "https://data.geo.admin.ch/stations.csv"}}}
     mock_get.return_value = _csv_response(b"id;name\nTST;Test Station\n")
 
     download_metadata("smn", tmp_path / "raw")
@@ -194,7 +194,7 @@ def test_download_metadata_saves_csv(mock_get, mock_meta, tmp_path):
 @patch("foehn.download.get_collection_metadata")
 @patch("foehn.download.requests.get")
 def test_download_metadata_skips_non_csv_assets(mock_get, mock_meta, tmp_path):
-    mock_meta.return_value = {"assets": {"readme": {"href": "https://example.com/README.pdf"}}}
+    mock_meta.return_value = {"assets": {"readme": {"href": "https://data.geo.admin.ch/README.pdf"}}}
 
     download_metadata("smn", tmp_path / "raw")
 
@@ -257,7 +257,9 @@ def test_download_grib2_saves_binary(mock_get, tmp_path):
     items_resp = MagicMock()
     items_resp.raise_for_status = MagicMock()
     items_resp.json.return_value = {
-        "features": [{"id": "f1", "assets": {"data": {"href": "https://example.com/forecast.grib2"}}, "properties": {}}]
+        "features": [
+            {"id": "f1", "assets": {"data": {"href": "https://data.geo.admin.ch/forecast.grib2"}}, "properties": {}}
+        ]
     }
     file_resp = _stream_response(chunks=(b"GRIB", b"data"))
 
@@ -273,7 +275,9 @@ def test_download_grib2_skips_existing_file(mock_get, tmp_path):
     items_resp = MagicMock()
     items_resp.raise_for_status = MagicMock()
     items_resp.json.return_value = {
-        "features": [{"id": "f1", "assets": {"data": {"href": "https://example.com/forecast.grib2"}}, "properties": {}}]
+        "features": [
+            {"id": "f1", "assets": {"data": {"href": "https://data.geo.admin.ch/forecast.grib2"}}, "properties": {}}
+        ]
     }
     mock_get.return_value = items_resp
 
@@ -294,7 +298,7 @@ def test_download_grib2_skips_existing_file(mock_get, tmp_path):
 @patch("foehn.download.requests.get")
 def test_download_netcdf_saves_nc_file(mock_get, mock_items, tmp_path):
     mock_items.return_value = [
-        {"id": "g1", "assets": {"data": {"href": "https://example.com/grid.nc"}}, "properties": {}}
+        {"id": "g1", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     ]
     mock_get.return_value = _stream_response(chunks=(b"\x89HDF",))
 
@@ -307,7 +311,7 @@ def test_download_netcdf_saves_nc_file(mock_get, mock_items, tmp_path):
 @patch("foehn.download.requests.get")
 def test_download_netcdf_skips_existing_file(mock_get, mock_items, tmp_path):
     mock_items.return_value = [
-        {"id": "g1", "assets": {"data": {"href": "https://example.com/grid.nc"}}, "properties": {}}
+        {"id": "g1", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     ]
 
     out_dir = tmp_path / "raw" / "surface_derived_grid"

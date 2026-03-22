@@ -32,7 +32,7 @@ def _mock_get(*pages):
 
 @patch("foehn.stac.requests.get")
 def test_get_collection_items_single_page(mock_get):
-    items = [_item("https://example.com/data.csv")]
+    items = [_item("https://data.geo.admin.ch/data.csv")]
     mock_get.side_effect = _mock_get(_page(items)).side_effect
 
     result = get_collection_items("ch.test.collection", verbose=False)
@@ -43,8 +43,8 @@ def test_get_collection_items_single_page(mock_get):
 
 @patch("foehn.stac.requests.get")
 def test_get_collection_items_pagination(mock_get):
-    page1 = _page([_item("https://example.com/a.csv")], next_url="https://example.com/page2")
-    page2 = _page([_item("https://example.com/b.csv")])
+    page1 = _page([_item("https://data.geo.admin.ch/a.csv")], next_url="https://data.geo.admin.ch/page2")
+    page2 = _page([_item("https://data.geo.admin.ch/b.csv")])
     mock_get.side_effect = _mock_get(page1, page2).side_effect
 
     result = get_collection_items("ch.test.collection", verbose=False)
@@ -56,8 +56,8 @@ def test_get_collection_items_pagination(mock_get):
 @patch("foehn.stac.requests.get")
 def test_get_collection_items_stops_early_when_no_csv(mock_get):
     """require_csv=True should stop after first page when no .csv assets found."""
-    item_no_csv = {"id": "item-nc", "assets": {"data": {"href": "https://example.com/grid.nc"}}, "properties": {}}
-    page1 = _page([item_no_csv], next_url="https://example.com/page2")
+    item_no_csv = {"id": "item-nc", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
+    page1 = _page([item_no_csv], next_url="https://data.geo.admin.ch/page2")
     mock_get.side_effect = _mock_get(page1).side_effect
 
     result = get_collection_items("ch.test.collection", require_csv=True, verbose=False)
@@ -68,8 +68,8 @@ def test_get_collection_items_stops_early_when_no_csv(mock_get):
 
 @patch("foehn.stac.requests.get")
 def test_get_collection_items_require_csv_false_follows_next(mock_get):
-    item_nc = {"id": "item-nc", "assets": {"data": {"href": "https://example.com/grid.nc"}}, "properties": {}}
-    page1 = _page([item_nc], next_url="https://example.com/page2")
+    item_nc = {"id": "item-nc", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
+    page1 = _page([item_nc], next_url="https://data.geo.admin.ch/page2")
     page2 = _page([item_nc])
     mock_get.side_effect = _mock_get(page1, page2).side_effect
 

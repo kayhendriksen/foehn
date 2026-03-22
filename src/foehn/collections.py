@@ -144,6 +144,26 @@ NETCDF_COLLECTIONS = {
     "climate_scenarios_indoor",
 }
 
+
+def discover() -> list[dict[str, str]]:
+    """Return metadata about all available collections.
+
+    Returns a list of dicts with keys: ``category``, ``key``, ``collection_id``.
+    """
+    result = []
+    for key, collection_id in COLLECTIONS.items():
+        if key in GRIB2_COLLECTIONS:
+            category = "GRIB2"
+        elif key in NETCDF_COLLECTIONS:
+            category = "NetCDF"
+        elif key in FORECAST_CSV_COLLECTIONS:
+            category = "CSV (forecast)"
+        else:
+            category = "CSV"
+        result.append({"category": category, "key": key, "collection_id": collection_id})
+    return result
+
+
 # C6 climate normals — separate ZIP from opendata.swiss (not on STAC API).
 # Contains 112 TXT files (tab-separated, Latin-1 encoding) with monthly/yearly
 # station normals for periods 1961-1990 and 1991-2020. Converted to Parquet.

@@ -36,6 +36,25 @@ def _run(args, tmp_path):
     return mocks
 
 
+def _run_without_data_dir(args, tmp_path):
+    """Like _run but without --data-dir, so env var can take effect."""
+    mocks = {}
+    patchers = [patch(t) for t in _PATCHES]
+    started = [p.start() for p in patchers]
+    for name, mock in zip(_PATCHES, started, strict=True):
+        mocks[name.split(".")[-1]] = mock
+    mocks["load_last_run"].return_value = None
+
+    try:
+        with patch("sys.argv", ["foehn", *args]):
+            main()
+    finally:
+        for p in patchers:
+            p.stop()
+
+    return mocks
+
+
 # --- data_types assembly ---
 
 
@@ -128,3 +147,43 @@ def test_default_skips_grids(tmp_path):
     mocks = _run([], tmp_path)
     mocks["download_grib2"].assert_not_called()
     mocks["download_netcdf"].assert_not_called()
+
+
+# --- --list ---
+
+
+def test_list_flag_prints_collections_and_exits(tmp_path, capsys):
+    mocks = _run(["--list"], tmp_path)
+    out = capsys.readouterr().out
+    assert "smn" in out
+    assert "ch.meteoschweiz.ogd-smn" in out
+    mocks["download_collection"].assert_not_called()
+
+
+# --- env vars ---
+
+
+def test_env_data_dir_used_when_no_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path / "env-dir"))
+    mocks = _run_without_data_dir([], tmp_path)
+    calls = mocks["download_collection"].call_args_list
+    assert calls
+    # raw_dir should be under the env var path
+    raw_dir = calls[0][0][1]
+    assert str(tmp_path / "env-dir") in str(raw_dir)
+
+
+def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path / "env-dir"))
+    mocks = _run([], tmp_path)  # _run passes --data-dir explicitly
+    calls = mocks["download_collection"].call_args_list
+    assert calls
+    raw_dir = calls[0][0][1]
+    assert str(tmp_path) in str(raw_dir)
+    assert "env-dir" not in str(raw_dir)
+
+
+def test_env_full_refresh_truthy(tmp_path, monkeypatch):
+    monkeypatch.setenv("FOEHN_FULL_REFRESH", "1")
+    mocks = _run([], tmp_path)
+    mocks["load_last_run"].assert_not_called()

@@ -96,6 +96,29 @@ Requires Python ≥ 3.10.
 
 ---
 
+## Python API
+
+Use foehn directly from notebooks or scripts:
+
+```python
+import foehn
+
+# List all available collections
+foehn.list_collections()
+# [{'category': 'CSV', 'key': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn'}, ...]
+
+# Download a single collection
+foehn.download("smn", data_dir="./data/meteoswiss")
+
+# Download with specific time slices
+foehn.download("smn", data_types=["historical", "recent"])
+
+# Convert downloaded CSVs to Parquet
+foehn.convert("smn", data_dir="./data/meteoswiss")
+```
+
+---
+
 ## CLI reference
 
 ```
@@ -122,11 +145,23 @@ foehn [options]
 
 | Flag | Description |
 |---|---|
+| `--list` | List available collections and exit |
 | `--grids` | Also fetch GRIB2, radar HDF5, NetCDF, GeoTIFF (large) |
 | `--no-parquet` | Skip conversion, keep raw CSVs only |
 | `--data-dir PATH` | Output root (default: `./data/meteoswiss`) |
 
 Parquet files land in `<data-dir>/parquet/<collection>/`.
+
+---
+
+## Environment variables
+
+Settings can also be configured via environment variables. CLI flags always take precedence.
+
+| Variable | Equivalent | Description |
+|---|---|---|
+| `FOEHN_DATA_DIR` | `--data-dir` | Root data directory |
+| `FOEHN_FULL_REFRESH` | `--full-refresh` | Set to `1`, `true`, or `yes` to ignore incremental tracking |
 
 ---
 
