@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
@@ -19,6 +21,26 @@ from foehn.collections import (
 from foehn.stac import get_collection_items, get_collection_metadata
 
 _ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss"}
+
+
+def _retry_session(
+    retries: int = 3,
+    backoff_factor: float = 1.0,
+    status_forcelist: tuple[int, ...] = (500, 502, 503, 504),
+) -> requests.Session:
+    """Return a requests session with automatic retry on transient errors."""
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 def _validate_href(href: str) -> str:
@@ -142,7 +164,7 @@ def download_collection(
         if old_etag and filepath.exists():
             headers["If-None-Match"] = old_etag
 
-        resp = requests.get(href, headers=headers, timeout=60)
+        resp = _retry_session().get(href, headers=headers, timeout=60)
         if resp.status_code == 304:
             skipped += 1
             continue
@@ -190,7 +212,7 @@ def download_metadata(collection_key: str, output_dir: Path):
         _validate_href(href)
         filename = href.split("?")[0].split("/")[-1]
         filepath = out_dir / filename
-        resp = requests.get(href, timeout=60)
+        resp = _retry_session().get(href, timeout=60)
         resp.raise_for_status()
         try:
             content = resp.content.decode("windows-1252")
@@ -224,7 +246,7 @@ def download_grib2(
 
     # Only fetch first page — forecast/radar data is ephemeral
     url = f"{STAC_API_BASE}/collections/{collection_id}/items?limit=100"
-    resp = requests.get(url, timeout=30)
+    resp = _retry_session().get(url, timeout=30)
     resp.raise_for_status()
     items = resp.json().get("features", [])
     print(f"  Found {len(items)} items (latest page)", flush=True)
@@ -255,7 +277,7 @@ def download_grib2(
             continue
 
         _validate_href(href)
-        with requests.get(href, stream=True, timeout=120) as resp:
+        with _retry_session().get(href, stream=True, timeout=120) as resp:
             resp.raise_for_status()
             with filepath.open("wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
@@ -296,7 +318,7 @@ def download_netcdf(collection_key: str, output_dir: Path):
             if filepath.exists():
                 continue
             _validate_href(href)
-            with requests.get(href, stream=True, timeout=120) as resp:
+            with _retry_session().get(href, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
                 with filepath.open("wb") as f:
                     for chunk in resp.iter_content(chunk_size=65536):
@@ -324,7 +346,7 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False):
     print("Climate normals (C6): downloading from opendata.swiss", flush=True)
     print(f"{'=' * 60}", flush=True)
 
-    resp = requests.get(CLIMATE_NORMALS_ZIP_URL, timeout=120)
+    resp = _retry_session().get(CLIMATE_NORMALS_ZIP_URL, timeout=120)
     resp.raise_for_status()
     filepath.write_bytes(resp.content)
     print(f"  Downloaded: normwerte.zip ({len(resp.content) / 1024:.0f} KB)", flush=True)

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import polars as pl
+
+_COL_RE = re.compile(r"at column '([^']+)'")
 
 
 def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
@@ -37,28 +40,35 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
 
         print(f"  [{i}/{total}] {csv_path.name}...", end="", flush=True)
         try:
-            lf = pl.scan_csv(
+            df = pl.read_csv(
                 csv_path,
                 separator=";",
-                infer_schema_length=10000,
+                infer_schema_length=100,
                 try_parse_dates=True,
             )
-            lf.sink_parquet(parquet_path, compression="snappy")
+            df.write_parquet(parquet_path, compression="zstd")
             converted += 1
-            print(" Converted", flush=True)
-        except (pl.exceptions.ComputeError, pl.exceptions.SchemaError):
-            # Integer column has float values beyond the inference window —
-            # re-read with full schema scan (slower but correct)
+            print(" OK", flush=True)
+        except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
+            # A column was inferred as Int but has float values beyond the
+            # inference window (e.g. rre150z0 = 0,0,…,0.2 at row 1096).
+            # Promote only that specific column to Float64 and retry.
+            m = _COL_RE.search(str(e))
+            if not m:
+                print(f" FAIL: {e}", flush=True)
+                continue
+            col_name = m.group(1)
             try:
-                lf = pl.scan_csv(
+                df = pl.read_csv(
                     csv_path,
                     separator=";",
-                    infer_schema_length=None,
+                    infer_schema_length=100,
                     try_parse_dates=True,
+                    schema_overrides={col_name: pl.Float64},
                 )
-                lf.sink_parquet(parquet_path, compression="snappy")
+                df.write_parquet(parquet_path, compression="zstd")
                 converted += 1
-                print(" Converted (retry)", flush=True)
+                print(f" OK ({col_name}→float)", flush=True)
             except Exception as e2:
                 print(f" FAIL: {e2}", flush=True)
         except Exception as e:
