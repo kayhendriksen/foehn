@@ -93,8 +93,9 @@ def test_save_last_run_is_recent(tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_collection_saves_csv(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_collection_saves_csv(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n")
@@ -105,8 +106,9 @@ def test_download_collection_saves_csv(mock_get, mock_items, tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_collection_re_encodes_to_utf8(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_collection_re_encodes_to_utf8(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     # Windows-1252 encoded content (ä = 0xe4)
@@ -119,8 +121,9 @@ def test_download_collection_re_encodes_to_utf8(mock_get, mock_items, tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_collection_saves_etag(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_collection_saves_etag(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(etag='"v1"')
@@ -132,8 +135,9 @@ def test_download_collection_saves_etag(mock_get, mock_items, tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_collection_sends_if_none_match(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_collection_sends_if_none_match(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
 
@@ -152,8 +156,9 @@ def test_download_collection_sends_if_none_match(mock_get, mock_items, tmp_path)
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_collection_skips_304(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_collection_skips_304(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(status_code=304)
@@ -165,9 +170,10 @@ def test_download_collection_skips_304(mock_get, mock_items, tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_collection_since_filter(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
     """Items older than `since` should be skipped without any HTTP call."""
+    mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     mock_items.return_value = [_stac_item(url, updated="2025-06-01T00:00:00Z")]
     mock_get.return_value = _csv_response()
@@ -181,8 +187,9 @@ def test_download_collection_since_filter(mock_get, mock_items, tmp_path):
 
 
 @patch("foehn.download.get_collection_metadata")
-@patch("foehn.download.requests.get")
-def test_download_metadata_saves_csv(mock_get, mock_meta, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_metadata_saves_csv(mock_retry, mock_meta, tmp_path):
+    mock_get = mock_retry.return_value.get
     mock_meta.return_value = {"assets": {"stations": {"href": "https://data.geo.admin.ch/stations.csv"}}}
     mock_get.return_value = _csv_response(b"id;name\nTST;Test Station\n")
 
@@ -192,8 +199,9 @@ def test_download_metadata_saves_csv(mock_get, mock_meta, tmp_path):
 
 
 @patch("foehn.download.get_collection_metadata")
-@patch("foehn.download.requests.get")
-def test_download_metadata_skips_non_csv_assets(mock_get, mock_meta, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_metadata_skips_non_csv_assets(mock_retry, mock_meta, tmp_path):
+    mock_get = mock_retry.return_value.get
     mock_meta.return_value = {"assets": {"readme": {"href": "https://data.geo.admin.ch/README.pdf"}}}
 
     download_metadata("smn", tmp_path / "raw")
@@ -212,8 +220,9 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-@patch("foehn.download.requests.get")
-def test_download_climate_normals_zip_extracts_files(mock_get, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
+    mock_get = mock_retry.return_value.get
     zip_bytes = _make_zip({"sample.txt": b"data"})
     mock_get.return_value = _csv_response(content=zip_bytes)
 
@@ -223,8 +232,9 @@ def test_download_climate_normals_zip_extracts_files(mock_get, tmp_path):
     assert (tmp_path / "raw" / "climate_normals" / "sample.txt").exists()
 
 
-@patch("foehn.download.requests.get")
-def test_download_climate_normals_zip_skips_if_exists(mock_get, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
+    mock_get = mock_retry.return_value.get
     out_dir = tmp_path / "raw" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "normwerte.zip").write_bytes(b"existing")
@@ -234,8 +244,9 @@ def test_download_climate_normals_zip_skips_if_exists(mock_get, tmp_path):
     mock_get.assert_not_called()
 
 
-@patch("foehn.download.requests.get")
-def test_download_climate_normals_zip_force_redownloads(mock_get, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
+    mock_get = mock_retry.return_value.get
     out_dir = tmp_path / "raw" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "normwerte.zip").write_bytes(b"old")
@@ -252,8 +263,9 @@ def test_download_climate_normals_zip_force_redownloads(mock_get, tmp_path):
 # --- download_grib2 ---
 
 
-@patch("foehn.download.requests.get")
-def test_download_grib2_saves_binary(mock_get, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_grib2_saves_binary(mock_retry, tmp_path):
+    mock_get = mock_retry.return_value.get
     items_resp = MagicMock()
     items_resp.raise_for_status = MagicMock()
     items_resp.json.return_value = {
@@ -270,8 +282,9 @@ def test_download_grib2_saves_binary(mock_get, tmp_path):
     assert (tmp_path / "raw" / "forecast_icon_ch1" / "forecast.grib2").exists()
 
 
-@patch("foehn.download.requests.get")
-def test_download_grib2_skips_existing_file(mock_get, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_grib2_skips_existing_file(mock_retry, tmp_path):
+    mock_get = mock_retry.return_value.get
     items_resp = MagicMock()
     items_resp.raise_for_status = MagicMock()
     items_resp.json.return_value = {
@@ -295,8 +308,9 @@ def test_download_grib2_skips_existing_file(mock_get, tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_netcdf_saves_nc_file(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_netcdf_saves_nc_file(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     mock_items.return_value = [
         {"id": "g1", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     ]
@@ -308,8 +322,9 @@ def test_download_netcdf_saves_nc_file(mock_get, mock_items, tmp_path):
 
 
 @patch("foehn.download.get_collection_items")
-@patch("foehn.download.requests.get")
-def test_download_netcdf_skips_existing_file(mock_get, mock_items, tmp_path):
+@patch("foehn.download._retry_session")
+def test_download_netcdf_skips_existing_file(mock_retry, mock_items, tmp_path):
+    mock_get = mock_retry.return_value.get
     mock_items.return_value = [
         {"id": "g1", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     ]

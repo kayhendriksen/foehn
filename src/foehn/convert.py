@@ -52,25 +52,35 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
         except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
             # A column was inferred as Int but has float values beyond the
             # inference window (e.g. rre150z0 = 0,0,…,0.2 at row 1096).
-            # Promote only that specific column to Float64 and retry.
-            m = _COL_RE.search(str(e))
-            if not m:
-                print(f" FAIL: {e}", flush=True)
-                continue
-            col_name = m.group(1)
-            try:
-                df = pl.read_csv(
-                    csv_path,
-                    separator=";",
-                    infer_schema_length=100,
-                    try_parse_dates=True,
-                    schema_overrides={col_name: pl.Float64},
-                )
-                df.write_parquet(parquet_path, compression="zstd")
-                converted += 1
-                print(f" OK ({col_name}→float)", flush=True)
-            except Exception as e2:
-                print(f" FAIL: {e2}", flush=True)
+            # Accumulate Float64 overrides and retry until no new columns fail.
+            overrides: dict[str, pl.DataType] = {}
+            last_err = e
+            while True:
+                m = _COL_RE.search(str(last_err))
+                if not m:
+                    break
+                overrides[m.group(1)] = pl.Float64
+                try:
+                    df = pl.read_csv(
+                        csv_path,
+                        separator=";",
+                        infer_schema_length=100,
+                        try_parse_dates=True,
+                        schema_overrides=overrides,
+                    )
+                    df.write_parquet(parquet_path, compression="zstd")
+                    converted += 1
+                    fixed = ", ".join(f"{c}→float" for c in overrides)
+                    print(f" OK ({fixed})", flush=True)
+                    last_err = None
+                    break
+                except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e2:
+                    last_err = e2
+                except Exception as e2:
+                    last_err = e2
+                    break
+            if last_err is not None:
+                print(f" FAIL: {last_err}", flush=True)
         except Exception as e:
             print(f" FAIL: {e}", flush=True)
 
