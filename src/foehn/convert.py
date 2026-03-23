@@ -23,6 +23,7 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
     if not csv_files:
         return
 
+    print(f"Converting {collection_key} to Parquet:", flush=True)
     converted = 0
     skipped = 0
     total = len(csv_files)
@@ -36,28 +37,28 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
 
         print(f"  [{i}/{total}] {csv_path.name}...", end="", flush=True)
         try:
-            df = pl.read_csv(
+            lf = pl.scan_csv(
                 csv_path,
                 separator=";",
                 infer_schema_length=10000,
                 try_parse_dates=True,
             )
-            df.write_parquet(parquet_path, compression="snappy")
+            lf.sink_parquet(parquet_path, compression="snappy")
             converted += 1
-            print(" OK", flush=True)
+            print(" Converted", flush=True)
         except (pl.exceptions.ComputeError, pl.exceptions.SchemaError):
             # Integer column has float values beyond the inference window —
             # re-read with full schema scan (slower but correct)
             try:
-                df = pl.read_csv(
+                lf = pl.scan_csv(
                     csv_path,
                     separator=";",
                     infer_schema_length=None,
                     try_parse_dates=True,
                 )
-                df.write_parquet(parquet_path, compression="snappy")
+                lf.sink_parquet(parquet_path, compression="snappy")
                 converted += 1
-                print(" OK (retry)", flush=True)
+                print(" Converted (retry)", flush=True)
             except Exception as e2:
                 print(f" FAIL: {e2}", flush=True)
         except Exception as e:
@@ -83,6 +84,7 @@ def convert_climate_normals_to_parquet(raw_dir: Path, parquet_dir: Path):
     if not txt_files:
         return
 
+    print("Converting climate_normals to Parquet:", flush=True)
     converted = 0
     skipped = 0
     total = len(txt_files)
@@ -106,7 +108,7 @@ def convert_climate_normals_to_parquet(raw_dir: Path, parquet_dir: Path):
             )
             df.write_parquet(parquet_path, compression="snappy")
             converted += 1
-            print(" OK", flush=True)
+            print(" Converted", flush=True)
         except Exception as e:
             print(f" FAIL: {e}", flush=True)
 
