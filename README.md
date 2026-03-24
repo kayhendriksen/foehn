@@ -28,7 +28,7 @@ foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) c
 ## Why foehn?
 
 - **20+ collections in one command** — weather stations, radar, hail maps, forecasts, climate scenarios, and more
-- **Significantly smaller on disk** — columnar Parquet with Snappy compression vs. raw CSVs
+- **Significantly smaller on disk** — columnar Parquet with Zstandard compression vs. raw CSVs
 - **Incremental by default** — only re-downloads files that changed since your last run, tracked via `_last_run.json`
 - **No Spark required locally** — download + conversion uses Polars only; Spark is optional for Delta ingestion
 - **Ships a Declarative Automation Bundle** — ready-to-deploy daily job and historical backfill, no pipeline config needed
@@ -48,28 +48,80 @@ Recent data (Jan 1 → yesterday) is downloaded and converted to Parquet under `
 
 ## Collections
 
+MeteoSwiss organises its open data into five categories. Category **B** (atmosphere measurements — radio soundings, ceilometer, ozone, etc.) is **not yet released** (B1 radio soundings expected first half of 2026).
+
+### A — Ground-based measurements
+
+Station-level time series in CSV, split into time slices (`historical`, `recent`, `now`). Converted to Parquet.
+
+| Key | ID | Description | Granularities | Stations | Parameters |
+|---|---|---|---|---|---|
+| `smn` | A1 | **Automatic weather stations** — the core SwissMetNet network. ~160 stations across Switzerland measuring temperature, humidity, pressure, precipitation, wind, radiation, sunshine, soil temperature, and dew point. | 10-min, hourly, daily, monthly, yearly | 158 | 181 |
+| `smn_precip` | A2 | **Automatic precipitation stations** — rain-gauge-only network. Reports precipitation totals at multiple granularities. | 10-min, hourly, daily, monthly, yearly | 141 | 6 |
+| `smn_tower` | A3 | **Tower stations** — tall mast measurements for temperature, humidity, wind (scalar + gusts), radiation, and sunshine at tower height. | 10-min, hourly, daily, monthly, yearly | 4 | 46 |
+| `nime` | A5 | **Manual precipitation stations** — observer-read gauges reporting daily precipitation, plus fresh snow depth and snow cover. | daily, monthly, yearly | 273 | 17 |
+| `tot` | A6 | **Totaliser precipitation** — remote alpine rain gauges read once per year, reporting precipitation reduced to hydrological year (Oct 1 – Sep 30). | yearly | 57 | 1 |
+| `pollen` | A7 | **Pollen stations** — airborne pollen concentrations for 7 taxa: alder, birch, hazel, beech, ash, oak, and grasses (_Poaceae_). | hourly, daily, yearly | 16 | 28 |
+| `obs` | A8 | **Visual / meteorological observations** — human-observed daily cloud cover, counts of days with rain, snowfall, hail, fog, and snow coverage. | daily, monthly, yearly | 20 | 27 |
+| `phenology` | A9 | **Phenological observations** — day-of-year for lifecycle events (leaf unfolding, flowering, fruit maturity, leaf colouring, leaf drop) across 26 plant species including horse chestnut, beech, cherry, apple, grape vine, and larch. | yearly | 175 | 71 |
+### C — Climate data
+
+| Key | ID | Description | Format |
+|---|---|---|---|
+| `nbcn` | C1 | **Homogeneous climate stations** — break-adjusted series for temperature, pressure, precipitation, sunshine, and cloud cover (29 stations). Used for long-term trend analysis. | CSV → Parquet |
+| `nbcn_precip` | C2 | **Homogeneous precipitation** — break-adjusted precipitation series (46 stations). | CSV → Parquet |
+| `surface_derived_grid` | C3 | **Ground-based spatial analyses** — gridded fields of precipitation, temperature, and sunshine duration derived from station interpolation. | NetCDF (opt-in) |
+| `satellite_derived_grid` | C4 | **Satellite-based spatial analyses** — gridded radiation, cloud cover, and land surface temperature derived from satellite. | NetCDF (opt-in) |
+| `climate_normals` | C6 | **Station normals** — 30-year reference averages for 1961–1990 and 1991–2020. Monthly values per station. | TXT → Parquet |
+| `climate_normals_*` | C7 | **Spatial normals** — gridded 30-year reference maps for precipitation, sunshine, and temperature (both reference periods). | NetCDF / GeoTIFF (opt-in) |
+| `climate_scenarios` | C8 | **CH2025 local scenarios** — station-level climate projections. | CSV → Parquet |
+| `climate_scenarios_grid` | C9 | **CH2025 gridded scenarios** — spatially gridded climate projections. | NetCDF (opt-in) |
+
+### D — Radar data
+
+| Key | ID | Description | Format |
+|---|---|---|---|
+| `radar_precip` | D1 | **Precipitation radar** — composite precipitation grids at 5–10 min intervals. | HDF5 (opt-in) |
+| `radar_hail` | D3 | **Hail radar** — probability-of-hail grids at 5 min intervals. | HDF5 (opt-in) |
+
+Radar collections are large and require `--grids` to download.
+
+### E — Forecast data
+
+| Key | ID | Description | Format |
+|---|---|---|---|
+| `forecast_icon_ch1` | E2 | **ICON-CH1-EPS** — 1 km ensemble forecast model over Switzerland. | GRIB2 (opt-in) |
+| `forecast_icon_ch2` | E3 | **ICON-CH2-EPS** — 2.1 km ensemble forecast model. | GRIB2 (opt-in) |
+| `forecast_local` | E4 | **Local point forecasts** — forecasts for ~5,600 points (stations + postal codes) covering temperature, precipitation, wind, radiation, and more (32 parameters). | CSV → Parquet |
+
+GRIB2 forecast collections are large and require `--grids` to download.
+
+### Hail hazard maps
+
+Static spatial reference grids showing expected hail grain size (cm) at different return periods. These are **not categorised under A–E** because they are static hazard assessments, not measured or forecasted time series — they represent probabilistic climatological analyses published as fixed reference maps.
+
 | Key | Description | Format |
 |---|---|---|
-| `smn` | Automatic weather stations (A1) | CSV → Parquet |
-| `smn_precip` | Automatic precipitation stations (A2) | CSV → Parquet |
-| `smn_tower` | Tower stations (A3) | CSV → Parquet |
-| `nime` | Manual precipitation stations (A5) | CSV → Parquet |
-| `tot` | Totaliser precipitation (A6) | CSV → Parquet |
-| `obs` | Visual observations (A8) | CSV → Parquet |
-| `pollen` | Pollen stations (A7) | CSV → Parquet |
-| `phenology` | Phenological observations (A9) | CSV → Parquet |
-| `nbcn` | Homogeneous climate stations (C1) | CSV → Parquet |
-| `nbcn_precip` | Homogeneous precipitation (C2) | CSV → Parquet |
-| `climate_normals` | Station normals 1961–1990 / 1991–2020 (C6) | TXT → Parquet |
-| `climate_normals_*` | Spatial normals (C7) | NetCDF / GeoTIFF |
-| `surface_derived_grid` | Spatial analyses — precip, temp, sunshine (C3/C4) | NetCDF |
-| `satellite_derived_grid` | Spatial analyses — radiation, clouds (C5) | NetCDF |
-| `climate_scenarios` | CH2025 local scenarios (C8) | CSV → Parquet |
-| `climate_scenarios_grid` | CH2025 gridded scenarios (C9) | NetCDF |
-| `hail_hazard_*` | Hail hazard maps | NetCDF / ZIP |
-| `forecast_local` | Local point forecasts (E4) | CSV → Parquet |
-| `forecast_icon_ch1/ch2` | ICON-CH1/CH2-EPS (E2/E3) | GRIB2 (opt-in) |
-| `radar_precip/hail` | Precipitation + hail radar (D1/D3) | HDF5 (opt-in) |
+| `hail_hazard_10y` | Hail grain size — 10-year return period | NetCDF / GeoTIFF (opt-in) |
+| `hail_hazard_20y` | Hail grain size — 20-year return period | NetCDF / GeoTIFF (opt-in) |
+| `hail_hazard_50y` | Hail grain size — 50-year return period | NetCDF / GeoTIFF (opt-in) |
+| `hail_hazard_100y` | Hail grain size — 100-year return period | NetCDF / GeoTIFF (opt-in) |
+
+---
+
+## Time slices
+
+MeteoSwiss splits CSV data into three time slices, encoded in the filename:
+
+| Slice | Range | Update frequency | Granularities |
+|---|---|---|---|
+| `recent` | Jan 1 this year → yesterday | Daily at 12:00 UTC | 10-min, hourly, daily, monthly |
+| `historical` | Start of measurement → Dec 31 last year | Once per year (early January) | 10-min, hourly, daily, monthly |
+| `now` | Yesterday 12:00 UTC → now | Every 10 minutes | 10-min, hourly only |
+
+Some collections (phenology, totaliser, yearly aggregates) don't use time slices — they publish a single file per station.
+
+All timestamps are UTC. For 10-min and hourly data the timestamp marks the **end** of the interval (16:00 = 15:50:01–16:00:00). For daily, monthly, and yearly data the timestamp marks the **start** (2023-06-01 = the whole of June).
 
 ---
 
