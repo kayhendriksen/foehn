@@ -20,7 +20,7 @@ from foehn.collections import (
 )
 from foehn.stac import get_collection_items, get_collection_metadata
 
-_ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss"}
+_ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss", "rgw.cscs.ch"}
 
 
 def _retry_session(
