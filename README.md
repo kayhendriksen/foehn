@@ -39,7 +39,7 @@ foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) c
 
 ```bash
 pip install foehn
-foehn
+foehn download
 ```
 
 Recent data (Jan 1 → yesterday) is downloaded and converted to Parquet under `./data/meteoswiss/`.
@@ -185,34 +185,63 @@ foehn.convert("smn", data_dir="./data/meteoswiss")
 
 ## CLI reference
 
-```
-foehn [options]
+The CLI uses subcommands that mirror the Python API:
+
+### `foehn list`
+
+List all available datasets.
+
+```bash
+foehn list
 ```
 
-**Time range** — recent (Jan 1 this year → yesterday) is always included; flags extend it:
+### `foehn download [KEY...]`
+
+Download datasets. Without keys, downloads all CSV collections. Specify one or more keys to download specific datasets.
+
+```bash
+foehn download              # all CSV collections
+foehn download smn pollen   # specific datasets only
+```
 
 | Flag | Description |
 |---|---|
-| *(none)* | Recent only — Jan 1 this year → yesterday, updated daily at 12 UTC |
-| `--historical` | Also fetch full archive — start of measurement → Dec 31 last year |
-| `--now` | Also fetch realtime slice — yesterday 12 UTC → now, 10-min updates |
-| `--all` | All three slices: historical + recent + now |
-
-**Behaviour:**
-
-| Flag | Description |
-|---|---|
+| `--historical` | Include historical time slice |
+| `--now` | Include realtime 'now' time slice |
+| `--all` | Include all time slices (historical + recent + now) |
 | `--full-refresh` | Ignore incremental tracking, re-download everything |
-| `--convert-only` | Convert existing CSVs to Parquet without downloading |
+| `--grids` | Include grid/binary datasets (GRIB2, NetCDF) |
+| `--no-parquet` | Skip CSV → Parquet conversion |
+| `--data-dir PATH` | Output root (default: `./data/meteoswiss`) |
 
-**Output:**
+### `foehn convert [KEY...]`
+
+Convert downloaded CSVs to Parquet. Without keys, converts all collections.
+
+```bash
+foehn convert               # all collections
+foehn convert smn           # single dataset
+```
 
 | Flag | Description |
 |---|---|
-| `--list` | List available collections and exit |
-| `--grids` | Also fetch GRIB2, radar HDF5, NetCDF, GeoTIFF (large) |
-| `--no-parquet` | Skip conversion, keep raw CSVs only |
-| `--data-dir PATH` | Output root (default: `./data/meteoswiss`) |
+| `--data-dir PATH` | Root data directory |
+
+### `foehn load KEY`
+
+Load a dataset from the API and print a preview (no files written to disk).
+
+```bash
+foehn load smn --station BER --granularity d
+foehn load smn --station BER ZUR --granularity d h -n 50
+```
+
+| Flag | Description |
+|---|---|
+| `--station` | Filter by station(s) |
+| `--granularity` | Filter by granularity (t, h, d, m, y) |
+| `--data-types` | Time slices to include (default: recent) |
+| `-n` | Number of rows to show (default: 20) |
 
 Parquet files land in `<data-dir>/parquet/<collection>/`.
 

@@ -17,7 +17,7 @@ _PATCHES = [
 ]
 
 
-def _run(args, tmp_path):
+def _run(subcommand, args, tmp_path):
     """Invoke main() with patched sys.argv and all I/O mocked."""
     mocks = {}
     patchers = [patch(t) for t in _PATCHES]
@@ -27,7 +27,7 @@ def _run(args, tmp_path):
     mocks["load_last_run"].return_value = None
 
     try:
-        with patch("sys.argv", ["foehn", "--data-dir", str(tmp_path), *args]):
+        with patch("sys.argv", ["foehn", subcommand, "--data-dir", str(tmp_path), *args]):
             main()
     finally:
         for p in patchers:
@@ -36,7 +36,7 @@ def _run(args, tmp_path):
     return mocks
 
 
-def _run_without_data_dir(args, tmp_path):
+def _run_without_data_dir(subcommand, args, tmp_path):
     """Like _run but without --data-dir, so env var can take effect."""
     mocks = {}
     patchers = [patch(t) for t in _PATCHES]
@@ -46,7 +46,7 @@ def _run_without_data_dir(args, tmp_path):
     mocks["load_last_run"].return_value = None
 
     try:
-        with patch("sys.argv", ["foehn", *args]):
+        with patch("sys.argv", ["foehn", subcommand, *args]):
             main()
     finally:
         for p in patchers:
@@ -59,7 +59,7 @@ def _run_without_data_dir(args, tmp_path):
 
 
 def test_default_uses_recent_only(tmp_path):
-    mocks = _run([], tmp_path)
+    mocks = _run("download", [], tmp_path)
     calls = mocks["download_collection"].call_args_list
     assert calls, "download_collection should be called"
     data_types = calls[0][1]["data_types"]
@@ -67,7 +67,7 @@ def test_default_uses_recent_only(tmp_path):
 
 
 def test_now_flag_adds_now(tmp_path):
-    mocks = _run(["--now"], tmp_path)
+    mocks = _run("download", ["--now"], tmp_path)
     calls = mocks["download_collection"].call_args_list
     data_types = calls[0][1]["data_types"]
     assert "now" in data_types
@@ -75,7 +75,7 @@ def test_now_flag_adds_now(tmp_path):
 
 
 def test_historical_flag_prepends_historical(tmp_path):
-    mocks = _run(["--historical"], tmp_path)
+    mocks = _run("download", ["--historical"], tmp_path)
     calls = mocks["download_collection"].call_args_list
     data_types = calls[0][1]["data_types"]
     assert data_types[0] == "historical"
@@ -83,38 +83,33 @@ def test_historical_flag_prepends_historical(tmp_path):
 
 
 def test_all_time_slices(tmp_path):
-    mocks = _run(["--now", "--historical"], tmp_path)
+    mocks = _run("download", ["--now", "--historical"], tmp_path)
     calls = mocks["download_collection"].call_args_list
     data_types = calls[0][1]["data_types"]
     assert set(data_types) == {"historical", "recent", "now"}
 
 
-# --- convert-only ---
+# --- convert subcommand ---
 
 
-def test_convert_only_skips_downloads(tmp_path):
-    mocks = _run(["--convert-only"], tmp_path)
+def test_convert_skips_downloads(tmp_path):
+    mocks = _run("convert", [], tmp_path)
     mocks["download_collection"].assert_not_called()
     mocks["download_metadata"].assert_not_called()
     mocks["convert_to_parquet"].assert_called()
-
-
-def test_convert_only_skips_save_last_run(tmp_path):
-    mocks = _run(["--convert-only"], tmp_path)
-    mocks["save_last_run"].assert_not_called()
 
 
 # --- no-parquet ---
 
 
 def test_no_parquet_skips_conversion(tmp_path):
-    mocks = _run(["--no-parquet"], tmp_path)
+    mocks = _run("download", ["--no-parquet"], tmp_path)
     mocks["convert_to_parquet"].assert_not_called()
     mocks["convert_climate_normals_to_parquet"].assert_not_called()
 
 
 def test_default_runs_conversion(tmp_path):
-    mocks = _run([], tmp_path)
+    mocks = _run("download", [], tmp_path)
     mocks["convert_to_parquet"].assert_called()
     mocks["convert_climate_normals_to_parquet"].assert_called()
 
@@ -123,14 +118,12 @@ def test_default_runs_conversion(tmp_path):
 
 
 def test_full_refresh_ignores_last_run(tmp_path):
-    mocks = _run(["--full-refresh"], tmp_path)
-    # load_last_run is never called when --full-refresh is set
+    mocks = _run("download", ["--full-refresh"], tmp_path)
     mocks["load_last_run"].assert_not_called()
 
 
 def test_incremental_passes_since_to_download(tmp_path):
-    mocks = _run([], tmp_path)
-    # load_last_run was called (returns None in our mock, so since=None)
+    mocks = _run("download", [], tmp_path)
     mocks["load_last_run"].assert_called_once()
 
 
@@ -138,22 +131,22 @@ def test_incremental_passes_since_to_download(tmp_path):
 
 
 def test_grids_flag_enables_grib2_and_netcdf(tmp_path):
-    mocks = _run(["--grids"], tmp_path)
+    mocks = _run("download", ["--grids"], tmp_path)
     mocks["download_grib2"].assert_called()
     mocks["download_netcdf"].assert_called()
 
 
 def test_default_skips_grids(tmp_path):
-    mocks = _run([], tmp_path)
+    mocks = _run("download", [], tmp_path)
     mocks["download_grib2"].assert_not_called()
     mocks["download_netcdf"].assert_not_called()
 
 
-# --- --list ---
+# --- list subcommand ---
 
 
-def test_list_flag_prints_collections_and_exits(tmp_path, capsys):
-    mocks = _run(["--list"], tmp_path)
+def test_list_prints_collections(tmp_path, capsys):
+    mocks = _run("list", [], tmp_path)
     out = capsys.readouterr().out
     assert "smn" in out
     assert "ch.meteoschweiz.ogd-smn" in out
@@ -165,17 +158,16 @@ def test_list_flag_prints_collections_and_exits(tmp_path, capsys):
 
 def test_env_data_dir_used_when_no_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path / "env-dir"))
-    mocks = _run_without_data_dir([], tmp_path)
+    mocks = _run_without_data_dir("download", [], tmp_path)
     calls = mocks["download_collection"].call_args_list
     assert calls
-    # raw_dir should be under the env var path
     raw_dir = calls[0][0][1]
     assert str(tmp_path / "env-dir") in str(raw_dir)
 
 
 def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path / "env-dir"))
-    mocks = _run([], tmp_path)  # _run passes --data-dir explicitly
+    mocks = _run("download", [], tmp_path)
     calls = mocks["download_collection"].call_args_list
     assert calls
     raw_dir = calls[0][0][1]
@@ -185,5 +177,5 @@ def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
 
 def test_env_full_refresh_truthy(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_FULL_REFRESH", "1")
-    mocks = _run([], tmp_path)
+    mocks = _run("download", [], tmp_path)
     mocks["load_last_run"].assert_not_called()
