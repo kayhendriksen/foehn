@@ -9,6 +9,40 @@ import polars as pl
 
 _COL_RE = re.compile(r"at column '([^']+)'")
 
+_DTYPE_MAP: dict[str, pl.DataType] = {
+    "float": pl.Float64,
+    "integer": pl.Int64,
+}
+
+
+def _load_metadata_types(csv_dir: Path) -> dict[str, pl.DataType]:
+    """Build a parameter→Polars dtype mapping from a *_meta_parameters.csv file.
+
+    Returns an empty dict if no metadata file is found or if the expected
+    columns (``parameter_shortname``, ``parameter_datatype``) are missing.
+    """
+    meta_files = list(csv_dir.glob("*_meta_parameters.csv"))
+    if not meta_files:
+        return {}
+
+    meta_path = meta_files[0]
+    try:
+        meta = pl.read_csv(meta_path, separator=";", infer_schema_length=0)
+    except Exception:
+        return {}
+
+    if "parameter_shortname" not in meta.columns or "parameter_datatype" not in meta.columns:
+        return {}
+
+    type_map: dict[str, pl.DataType] = {}
+    for row in meta.select("parameter_shortname", "parameter_datatype").iter_rows():
+        shortname, datatype = row
+        if shortname and datatype:
+            dtype = _DTYPE_MAP.get(datatype.strip().lower())
+            if dtype is not None:
+                type_map[shortname] = dtype
+    return type_map
+
 
 def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
     """Convert all CSVs in a collection's raw folder to Parquet.
@@ -26,11 +60,19 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
     if not csv_files:
         return
 
+    # Load parameter type info from metadata once for the whole collection.
+    metadata_types = _load_metadata_types(csv_dir)
+
     print(f"Converting {collection_key} to Parquet:", flush=True)
     converted = 0
     skipped = 0
     total = len(csv_files)
     for i, csv_path in enumerate(csv_files, 1):
+        # Skip metadata files – they are not data CSVs.
+        if "_meta_" in csv_path.name:
+            total -= 1
+            continue
+
         parquet_path = out_dir / csv_path.with_suffix(".parquet").name
 
         # Skip if parquet is already newer than csv
@@ -39,21 +81,32 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
             continue
 
         print(f"  [{i}/{total}] {csv_path.name}...", end="", flush=True)
+
+        # Build per-file overrides by matching CSV columns to metadata types.
+        overrides: dict[str, pl.DataType] = {}
+        if metadata_types:
+            try:
+                header = pl.read_csv(csv_path, separator=";", n_rows=0, infer_schema_length=0).columns
+                for col in header:
+                    if col in metadata_types:
+                        overrides[col] = metadata_types[col]
+            except Exception:
+                pass
+
         try:
             df = pl.read_csv(
                 csv_path,
                 separator=";",
                 infer_schema_length=100,
                 try_parse_dates=True,
+                schema_overrides=overrides or None,
             )
             df.write_parquet(parquet_path, compression="zstd")
             converted += 1
             print(" OK", flush=True)
         except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
-            # A column was inferred as Int but has float values beyond the
-            # inference window (e.g. rre150z0 = 0,0,…,0.2 at row 1096).
-            # Accumulate Float64 overrides and retry until no new columns fail.
-            overrides: dict[str, pl.DataType] = {}
+            # Fallback: accumulate Float64 overrides and retry until no new
+            # columns fail (e.g. a type not covered by metadata).
             last_err = e
             while True:
                 m = _COL_RE.search(str(last_err))
