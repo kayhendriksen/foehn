@@ -1,11 +1,12 @@
 """Tests for collections constants and routing sets."""
 
+from foehn.api import list_datasets
 from foehn.collections import (
+    COLLECTION_META,
     COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
-    discover,
 )
 
 
@@ -35,11 +36,25 @@ def test_collection_ids_are_unique():
     assert len(ids) == len(set(ids)), "Duplicate STAC collection IDs found"
 
 
-def test_discover_returns_all_collections():
-    rows = discover()
+def test_list_datasets_returns_all():
+    rows = list_datasets()
     assert len(rows) == len(COLLECTIONS)
 
 
-def test_discover_dict_keys():
-    for row in discover():
-        assert set(row.keys()) == {"category", "key", "collection_id"}
+def test_list_datasets_dict_keys():
+    expected = {
+        "key",
+        "collection_id",
+        "category",
+        "subcategory",
+        "description",
+        "format",
+        "granularities",
+        "time_slices",
+    }
+    for row in list_datasets():
+        assert set(row.keys()) == expected
+
+
+def test_collection_meta_covers_all_keys():
+    assert set(COLLECTION_META.keys()) == set(COLLECTIONS.keys())

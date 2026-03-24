@@ -6,14 +6,8 @@ import argparse
 import os
 from pathlib import Path
 
-from foehn.collections import (
-    COLLECTIONS,
-    GRIB2_COLLECTIONS,
-    NETCDF_COLLECTIONS,
-    discover,
-)
-from foehn.convert import convert_climate_normals_to_parquet, convert_to_parquet
-from foehn.download import (
+from foehn.api import list_datasets
+from foehn.client import (
     download_climate_normals_zip,
     download_collection,
     download_grib2,
@@ -22,6 +16,12 @@ from foehn.download import (
     load_last_run,
     save_last_run,
 )
+from foehn.collections import (
+    COLLECTIONS,
+    GRIB2_COLLECTIONS,
+    NETCDF_COLLECTIONS,
+)
+from foehn.convert import convert_climate_normals_to_parquet, convert_to_parquet
 
 
 def main():
@@ -76,7 +76,7 @@ Output:
     output_group.add_argument(
         "--list",
         action="store_true",
-        help="List available collections and exit",
+        help="List available datasets and exit",
     )
     output_group.add_argument(
         "--grids",
@@ -104,7 +104,7 @@ Output:
         args.full_refresh = os.environ.get("FOEHN_FULL_REFRESH", "").lower() in ("1", "true", "yes")
 
     if args.list:
-        rows = discover()
+        rows = list_datasets()
         print(f"{'Category':<16} {'Key':<30} Collection ID")
         print("-" * 90)
         for row in rows:

@@ -5,7 +5,7 @@ import zipfile
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from foehn.download import (
+from foehn.client import (
     download_climate_normals_zip,
     download_collection,
     download_grib2,
@@ -92,8 +92,8 @@ def test_save_last_run_is_recent(tmp_path):
 # --- download_collection ---
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_saves_csv(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -105,8 +105,8 @@ def test_download_collection_saves_csv(mock_retry, mock_items, tmp_path):
     assert (tmp_path / "raw" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_re_encodes_to_utf8(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -120,8 +120,8 @@ def test_download_collection_re_encodes_to_utf8(mock_retry, mock_items, tmp_path
     assert "ä" in content
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_saves_etag(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -134,8 +134,8 @@ def test_download_collection_saves_etag(mock_retry, mock_items, tmp_path):
     assert etags.get(url) == '"v1"'
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_sends_if_none_match(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -155,8 +155,8 @@ def test_download_collection_sends_if_none_match(mock_retry, mock_items, tmp_pat
     assert kwargs["headers"].get("If-None-Match") == '"old"'
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_skips_304(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -169,8 +169,8 @@ def test_download_collection_skips_304(mock_retry, mock_items, tmp_path):
     assert not (tmp_path / "raw" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
     """Items older than `since` should be skipped without any HTTP call."""
     mock_get = mock_retry.return_value.get
@@ -186,8 +186,8 @@ def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
 # --- download_metadata ---
 
 
-@patch("foehn.download.get_collection_metadata")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_metadata")
+@patch("foehn.client._retry_session")
 def test_download_metadata_saves_csv(mock_retry, mock_meta, tmp_path):
     mock_get = mock_retry.return_value.get
     mock_meta.return_value = {"assets": {"stations": {"href": "https://data.geo.admin.ch/stations.csv"}}}
@@ -198,8 +198,8 @@ def test_download_metadata_saves_csv(mock_retry, mock_meta, tmp_path):
     assert (tmp_path / "raw" / "smn" / "stations.csv").exists()
 
 
-@patch("foehn.download.get_collection_metadata")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_metadata")
+@patch("foehn.client._retry_session")
 def test_download_metadata_skips_non_csv_assets(mock_retry, mock_meta, tmp_path):
     mock_get = mock_retry.return_value.get
     mock_meta.return_value = {"assets": {"readme": {"href": "https://data.geo.admin.ch/README.pdf"}}}
@@ -220,7 +220,7 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-@patch("foehn.download._retry_session")
+@patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
     zip_bytes = _make_zip({"sample.txt": b"data"})
@@ -232,7 +232,7 @@ def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
     assert (tmp_path / "raw" / "climate_normals" / "sample.txt").exists()
 
 
-@patch("foehn.download._retry_session")
+@patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
     out_dir = tmp_path / "raw" / "climate_normals"
@@ -244,7 +244,7 @@ def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
     mock_get.assert_not_called()
 
 
-@patch("foehn.download._retry_session")
+@patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
     out_dir = tmp_path / "raw" / "climate_normals"
@@ -263,7 +263,7 @@ def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
 # --- download_grib2 ---
 
 
-@patch("foehn.download._retry_session")
+@patch("foehn.client._retry_session")
 def test_download_grib2_saves_binary(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
     items_resp = MagicMock()
@@ -282,7 +282,7 @@ def test_download_grib2_saves_binary(mock_retry, tmp_path):
     assert (tmp_path / "raw" / "forecast_icon_ch1" / "forecast.grib2").exists()
 
 
-@patch("foehn.download._retry_session")
+@patch("foehn.client._retry_session")
 def test_download_grib2_skips_existing_file(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
     items_resp = MagicMock()
@@ -307,8 +307,8 @@ def test_download_grib2_skips_existing_file(mock_retry, tmp_path):
 # --- download_netcdf ---
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_netcdf_saves_nc_file(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     mock_items.return_value = [
@@ -321,8 +321,8 @@ def test_download_netcdf_saves_nc_file(mock_retry, mock_items, tmp_path):
     assert (tmp_path / "raw" / "surface_derived_grid" / "grid.nc").exists()
 
 
-@patch("foehn.download.get_collection_items")
-@patch("foehn.download._retry_session")
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_netcdf_skips_existing_file(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     mock_items.return_value = [

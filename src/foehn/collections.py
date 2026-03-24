@@ -108,6 +108,256 @@ COLLECTIONS = {
     # E1 — Short-term forecast (nowcasting)                       NOT YET RELEASED
 }
 
+# Per-collection metadata: description, MeteoSwiss category, format, granularities,
+# and available time slices.  Used by list_datasets() to expose a rich catalog.
+COLLECTION_META: dict[str, dict] = {
+    # ── A: Ground-based measurements ─────────────────────────────────────────
+    "smn": {
+        "category": "A",
+        "subcategory": "A1",
+        "description": "Automatic weather stations",
+        "format": "CSV",
+        "granularities": ["t", "h", "d", "m"],
+        "time_slices": ["historical", "recent", "now"],
+    },
+    "smn_precip": {
+        "category": "A",
+        "subcategory": "A2",
+        "description": "Automatic precipitation stations",
+        "format": "CSV",
+        "granularities": ["t", "h", "d", "m"],
+        "time_slices": ["historical", "recent", "now"],
+    },
+    "smn_tower": {
+        "category": "A",
+        "subcategory": "A3",
+        "description": "Automatic tower stations",
+        "format": "CSV",
+        "granularities": ["t", "h", "d", "m"],
+        "time_slices": ["historical", "recent", "now"],
+    },
+    "nime": {
+        "category": "A",
+        "subcategory": "A5",
+        "description": "Manual precipitation stations",
+        "format": "CSV",
+        "granularities": ["d", "m", "y"],
+        "time_slices": ["historical", "recent"],
+    },
+    "tot": {
+        "category": "A",
+        "subcategory": "A6",
+        "description": "Totaliser precipitation",
+        "format": "CSV",
+        "granularities": ["y"],
+        "time_slices": [],
+    },
+    "obs": {
+        "category": "A",
+        "subcategory": "A8",
+        "description": "Meteorological visual observations",
+        "format": "CSV",
+        "granularities": ["t", "m", "y"],
+        "time_slices": ["historical", "recent", "now"],
+    },
+    "pollen": {
+        "category": "A",
+        "subcategory": "A7",
+        "description": "Pollen stations",
+        "format": "CSV",
+        "granularities": ["h", "d"],
+        "time_slices": ["historical", "recent", "now"],
+    },
+    "phenology": {
+        "category": "A",
+        "subcategory": "A9",
+        "description": "Phenological observations",
+        "format": "CSV",
+        "granularities": ["y"],
+        "time_slices": [],
+    },
+    # ── C: Climate data ──────────────────────────────────────────────────────
+    "nbcn": {
+        "category": "C",
+        "subcategory": "C1",
+        "description": "Climate stations, homogeneous",
+        "format": "CSV",
+        "granularities": ["d", "m"],
+        "time_slices": ["historical", "recent"],
+    },
+    "nbcn_precip": {
+        "category": "C",
+        "subcategory": "C2",
+        "description": "Climate precipitation, homogeneous",
+        "format": "CSV",
+        "granularities": ["m"],
+        "time_slices": ["historical", "recent"],
+    },
+    "surface_derived_grid": {
+        "category": "C",
+        "subcategory": "C3/C4",
+        "description": "Precipitation, temperature, sunshine grids",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "satellite_derived_grid": {
+        "category": "C",
+        "subcategory": "C5",
+        "description": "Radiation, clouds grids",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_normals_precip_9120": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Precipitation normals (1991-2020)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_normals_sun_9120": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Sunshine normals (1991-2020)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_normals_temp_9120": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Temperature normals (1991-2020)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_normals_precip_6190": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Precipitation normals (1961-1990)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_normals_sun_6190": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Sunshine normals (1961-1990)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_normals_temp_6190": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Temperature normals (1961-1990)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_scenarios": {
+        "category": "C",
+        "subcategory": "C8",
+        "description": "Climate scenarios CH2025 local",
+        "format": "CSV",
+        "granularities": ["y"],
+        "time_slices": [],
+    },
+    "climate_scenarios_grid": {
+        "category": "C",
+        "subcategory": "C9",
+        "description": "Climate scenarios CH2025 gridded",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    # ── Hail hazard maps ─────────────────────────────────────────────────────
+    "hail_hazard_10y": {
+        "category": "C",
+        "subcategory": "C",
+        "description": "Hail hazard map (10-year return period)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "hail_hazard_20y": {
+        "category": "C",
+        "subcategory": "C",
+        "description": "Hail hazard map (20-year return period)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "hail_hazard_50y": {
+        "category": "C",
+        "subcategory": "C",
+        "description": "Hail hazard map (50-year return period)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "hail_hazard_100y": {
+        "category": "C",
+        "subcategory": "C",
+        "description": "Hail hazard map (100-year return period)",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "climate_scenarios_indoor": {
+        "category": "C",
+        "subcategory": "C",
+        "description": "Indoor climate scenarios",
+        "format": "NetCDF",
+        "granularities": [],
+        "time_slices": [],
+    },
+    # ── D: Radar data ────────────────────────────────────────────────────────
+    "radar_precip": {
+        "category": "D",
+        "subcategory": "D1",
+        "description": "Precipitation radar",
+        "format": "GRIB2",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "radar_hail": {
+        "category": "D",
+        "subcategory": "D3",
+        "description": "Hail radar",
+        "format": "GRIB2",
+        "granularities": [],
+        "time_slices": [],
+    },
+    # ── E: Forecast data ─────────────────────────────────────────────────────
+    "forecast_icon_ch1": {
+        "category": "E",
+        "subcategory": "E2",
+        "description": "ICON-CH1-EPS 1km",
+        "format": "GRIB2",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "forecast_icon_ch2": {
+        "category": "E",
+        "subcategory": "E3",
+        "description": "ICON-CH2-EPS 2.1km",
+        "format": "GRIB2",
+        "granularities": [],
+        "time_slices": [],
+    },
+    "forecast_local": {
+        "category": "E",
+        "subcategory": "E4",
+        "description": "Local point forecasts",
+        "format": "CSV",
+        "granularities": [],
+        "time_slices": [],
+    },
+}
+
 # These sets control how each collection is downloaded and processed.
 # A collection belongs to at most one of these sets.
 # Everything not in any set is treated as a CSV collection (downloaded + Parquet).
@@ -115,6 +365,11 @@ COLLECTIONS = {
 # CSV collections that DON'T use "recent"/"historical"/"now" filename suffixes.
 # These get all CSVs regardless of data_types filter. Only latest item is kept.
 FORECAST_CSV_COLLECTIONS = {"forecast_local"}
+
+# Collections whose CSV filenames do NOT follow the standard
+# ogd-{key}_{station}_{granularity}[_{timeslice}].csv pattern.
+# Granularity filtering is not supported for these.
+NO_GRANULARITY_COLLECTIONS = {"forecast_local", "climate_scenarios"}
 
 # Binary grid collections (HDF5/GRIB2). Large, opt-in via --grids flag.
 # Downloaded as binary blobs, NOT converted to Parquet.
@@ -143,25 +398,6 @@ NETCDF_COLLECTIONS = {
     "hail_hazard_100y",
     "climate_scenarios_indoor",
 }
-
-
-def discover() -> list[dict[str, str]]:
-    """Return metadata about all available collections.
-
-    Returns a list of dicts with keys: ``category``, ``key``, ``collection_id``.
-    """
-    result = []
-    for key, collection_id in COLLECTIONS.items():
-        if key in GRIB2_COLLECTIONS:
-            category = "GRIB2"
-        elif key in NETCDF_COLLECTIONS:
-            category = "NetCDF"
-        elif key in FORECAST_CSV_COLLECTIONS:
-            category = "CSV (forecast)"
-        else:
-            category = "CSV"
-        result.append({"category": category, "key": key, "collection_id": collection_id})
-    return result
 
 
 # C6 climate normals — separate ZIP from opendata.swiss (not on STAC API).

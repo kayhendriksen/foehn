@@ -155,15 +155,27 @@ Use foehn directly from notebooks or scripts:
 ```python
 import foehn
 
-# List all available collections
-foehn.list_collections()
-# [{'category': 'CSV', 'key': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn'}, ...]
+# List all available datasets
+foehn.list_datasets()
+# [{'key': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn', 'category': 'A',
+#   'subcategory': 'A1', 'description': 'Automatic weather stations',
+#   'format': 'CSV', 'granularities': ['t', 'h', 'd', 'm'],
+#   'time_slices': ['historical', 'recent', 'now']}, ...]
 
-# Download a single collection
-foehn.fetch("smn", data_dir="./data/meteoswiss")
+# Load data directly into a Polars DataFrame (nothing written to disk)
+df = foehn.load("smn", station="BER", granularity="d")
+
+# Filter by multiple stations and granularities
+df = foehn.load("smn", station=["BER", "ZUR"], granularity=["d", "h"])
+
+# Include historical data
+df = foehn.load("smn", station="BER", granularity="d", data_types=["historical", "recent"])
+
+# Download a single dataset to disk
+foehn.download("smn", data_dir="./data/meteoswiss")
 
 # Download with specific time slices
-foehn.fetch("smn", data_types=["historical", "recent"])
+foehn.download("smn", data_types=["historical", "recent"])
 
 # Convert downloaded CSVs to Parquet
 foehn.convert("smn", data_dir="./data/meteoswiss")

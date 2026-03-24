@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 from pathlib import Path
 
@@ -15,19 +16,16 @@ _DTYPE_MAP: dict[str, pl.DataType] = {
 }
 
 
-def _load_metadata_types(csv_dir: Path) -> dict[str, pl.DataType]:
-    """Build a parameter→Polars dtype mapping from a *_meta_parameters.csv file.
+def _parse_metadata_types(content: bytes | str) -> dict[str, pl.DataType]:
+    """Build a parameter→Polars dtype mapping from metadata CSV content.
 
-    Returns an empty dict if no metadata file is found or if the expected
-    columns (``parameter_shortname``, ``parameter_datatype``) are missing.
+    Works with both raw bytes (in-memory) and string content.
+    Returns an empty dict if the expected columns are missing.
     """
-    meta_files = list(csv_dir.glob("*_meta_parameters.csv"))
-    if not meta_files:
-        return {}
-
-    meta_path = meta_files[0]
     try:
-        meta = pl.read_csv(meta_path, separator=";", infer_schema_length=0)
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        meta = pl.read_csv(io.BytesIO(content), separator=";", infer_schema_length=0)
     except Exception:
         return {}
 
@@ -42,6 +40,85 @@ def _load_metadata_types(csv_dir: Path) -> dict[str, pl.DataType]:
             if dtype is not None:
                 type_map[shortname] = dtype
     return type_map
+
+
+def _load_metadata_types(csv_dir: Path) -> dict[str, pl.DataType]:
+    """Build a parameter→Polars dtype mapping from a *_meta_parameters.csv file.
+
+    Returns an empty dict if no metadata file is found or if the expected
+    columns (``parameter_shortname``, ``parameter_datatype``) are missing.
+    """
+    meta_files = list(csv_dir.glob("*_meta_parameters.csv"))
+    if not meta_files:
+        return {}
+
+    meta_path = meta_files[0]
+    try:
+        return _parse_metadata_types(meta_path.read_bytes())
+    except Exception:
+        return {}
+
+
+def parse_csv_bytes(
+    content: bytes,
+    metadata_types: dict[str, pl.DataType] | None = None,
+    _fallback_overrides: dict[str, pl.DataType] | None = None,
+) -> pl.DataFrame:
+    """Parse CSV bytes into a Polars DataFrame, applying metadata type overrides.
+
+    Args:
+        content: Raw CSV bytes (UTF-8 encoded).
+        metadata_types: Optional parameter→dtype mapping from metadata.
+        _fallback_overrides: If provided, any Float64 fallback overrides applied
+            during error recovery will be written into this dict (for diagnostics).
+
+    Returns:
+        Parsed Polars DataFrame.
+    """
+    buf = io.BytesIO(content)
+
+    # Build per-file overrides by matching CSV columns to metadata types.
+    overrides: dict[str, pl.DataType] = {}
+    if metadata_types:
+        try:
+            header = pl.read_csv(io.BytesIO(content), separator=";", n_rows=0, infer_schema_length=0).columns
+            for col in header:
+                if col in metadata_types:
+                    overrides[col] = metadata_types[col]
+        except Exception:
+            pass
+
+    try:
+        return pl.read_csv(
+            buf,
+            separator=";",
+            infer_schema_length=100,
+            try_parse_dates=True,
+            schema_overrides=overrides or None,
+        )
+    except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
+        # Fallback: accumulate Float64 overrides for problematic columns.
+        last_err = e
+        while True:
+            m = _COL_RE.search(str(last_err))
+            if not m:
+                break
+            overrides[m.group(1)] = pl.Float64
+            if _fallback_overrides is not None:
+                _fallback_overrides[m.group(1)] = pl.Float64
+            try:
+                return pl.read_csv(
+                    io.BytesIO(content),
+                    separator=";",
+                    infer_schema_length=100,
+                    try_parse_dates=True,
+                    schema_overrides=overrides,
+                )
+            except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e2:
+                last_err = e2
+            except Exception:
+                raise
+        raise last_err from None
 
 
 def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
@@ -82,58 +159,16 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
 
         print(f"  [{i}/{total}] {csv_path.name}...", end="", flush=True)
 
-        # Build per-file overrides by matching CSV columns to metadata types.
-        overrides: dict[str, pl.DataType] = {}
-        if metadata_types:
-            try:
-                header = pl.read_csv(csv_path, separator=";", n_rows=0, infer_schema_length=0).columns
-                for col in header:
-                    if col in metadata_types:
-                        overrides[col] = metadata_types[col]
-            except Exception:
-                pass
-
         try:
-            df = pl.read_csv(
-                csv_path,
-                separator=";",
-                infer_schema_length=100,
-                try_parse_dates=True,
-                schema_overrides=overrides or None,
-            )
+            overrides: dict[str, pl.DataType] = {}
+            df = parse_csv_bytes(csv_path.read_bytes(), metadata_types, _fallback_overrides=overrides)
             df.write_parquet(parquet_path, compression="zstd")
             converted += 1
-            print(" OK", flush=True)
-        except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
-            # Fallback: accumulate Float64 overrides and retry until no new
-            # columns fail (e.g. a type not covered by metadata).
-            last_err = e
-            while True:
-                m = _COL_RE.search(str(last_err))
-                if not m:
-                    break
-                overrides[m.group(1)] = pl.Float64
-                try:
-                    df = pl.read_csv(
-                        csv_path,
-                        separator=";",
-                        infer_schema_length=100,
-                        try_parse_dates=True,
-                        schema_overrides=overrides,
-                    )
-                    df.write_parquet(parquet_path, compression="zstd")
-                    converted += 1
-                    fixed = ", ".join(f"{c}→float" for c in overrides)
-                    print(f" OK ({fixed})", flush=True)
-                    last_err = None
-                    break
-                except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e2:
-                    last_err = e2
-                except Exception as e2:
-                    last_err = e2
-                    break
-            if last_err is not None:
-                print(f" FAIL: {last_err}", flush=True)
+            if overrides:
+                fixed = ", ".join(f"{c}→float" for c in overrides)
+                print(f" OK ({fixed})", flush=True)
+            else:
+                print(" OK", flush=True)
         except Exception as e:
             print(f" FAIL: {e}", flush=True)
 
