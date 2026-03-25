@@ -68,10 +68,39 @@ def _resolve_keys(keys: list[str], *, allow_grids: bool = False) -> list[str]:
 
 def cmd_list(args: argparse.Namespace) -> None:
     rows = list_datasets()
-    print(f"{'Category':<16} {'Key':<30} Collection ID")
-    print("-" * 90)
+
+    if args.category:
+        cat = args.category.upper()
+        rows = [r for r in rows if r["category"] == cat]
+    if args.format:
+        fmt = args.format.upper()
+        rows = [r for r in rows if r["format"].upper() == fmt]
+
+    if not rows:
+        print("No datasets match the given filters.")
+        return
+
+    # Group by category
+    categories = {
+        "A": "Ground-based measurements",
+        "C": "Climate data",
+        "D": "Radar data",
+        "E": "Forecast data",
+    }
+
+    current_cat = None
     for row in rows:
-        print(f"{row['category']:<16} {row['key']:<30} {row['collection_id']}")
+        cat = row["category"]
+        if cat != current_cat:
+            if current_cat is not None:
+                print()
+            label = categories.get(cat, cat)
+            print(f"── {cat}: {label} ──")
+            print(f"  {'Key':<32} {'Format':<8} {'Granularity':<16} Description")
+            current_cat = cat
+
+        granularities = ", ".join(row["granularities"]) if row["granularities"] else "—"
+        print(f"  {row['key']:<32} {row['format']:<8} {granularities:<16} {row['description']}")
 
 
 def cmd_download(args: argparse.Namespace) -> None:
@@ -169,6 +198,8 @@ def main():
 
     # --- foehn list ---
     sub_list = subparsers.add_parser("list", help="List available datasets")
+    sub_list.add_argument("--category", "-c", help="Filter by category (A, C, D, E)")
+    sub_list.add_argument("--format", "-f", help="Filter by format (CSV, GRIB2, NetCDF)")
     _add_common_args(sub_list)
     sub_list.set_defaults(func=cmd_list)
 
