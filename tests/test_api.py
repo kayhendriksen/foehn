@@ -227,19 +227,17 @@ def test_load_no_csvs_raises(mock_session, mock_meta, mock_items):
 
 def _smn_items(*stations):
     """Build STAC items with realistic SMN filenames for the given station abbrevs."""
-    items = []
-    for stn in stations:
-        items.append(
-            {
-                "id": stn.lower(),
-                "assets": {
-                    "d_recent": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{stn.lower()}_d_recent.csv"},
-                    "h_recent": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{stn.lower()}_h_recent.csv"},
-                    "t_recent": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{stn.lower()}_t_recent.csv"},
-                },
-            }
-        )
-    return items
+    return [
+        {
+            "id": stn.lower(),
+            "assets": {
+                "d_recent": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{stn.lower()}_d_recent.csv"},
+                "h_recent": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{stn.lower()}_h_recent.csv"},
+                "t_recent": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{stn.lower()}_t_recent.csv"},
+            },
+        }
+        for stn in stations
+    ]
 
 
 @patch("foehn.api.get_collection_items")

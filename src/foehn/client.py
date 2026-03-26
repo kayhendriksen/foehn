@@ -36,6 +36,8 @@ def _retry_session(
         status_forcelist=status_forcelist,
         allowed_methods=["GET"],
         raise_on_status=False,
+        connect=retries,
+        read=retries,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
@@ -139,7 +141,7 @@ def download_collection(
     csv_assets = []
     for item in items:
         assets = item.get("assets", {})
-        for _asset_key, asset_info in assets.items():
+        for asset_info in assets.values():
             href = asset_info.get("href", "")
             if not href.endswith(".csv"):
                 continue
@@ -205,7 +207,7 @@ def download_metadata(collection_key: str, output_dir: Path):
         return
 
     downloaded = 0
-    for _key, asset_info in assets.items():
+    for asset_info in assets.values():
         href = asset_info.get("href", "")
         if not href.endswith(".csv"):
             continue
@@ -261,7 +263,7 @@ def download_grib2(
     binary_assets = []
     for item in items:
         assets = item.get("assets", {})
-        for _asset_key, asset_info in assets.items():
+        for asset_info in assets.values():
             href = asset_info.get("href", "")
             clean = href.split("?")[0]
             # Accept grib2, h5, and other binary formats
@@ -308,10 +310,10 @@ def download_netcdf(collection_key: str, output_dir: Path):
     downloaded = 0
     for item in items:
         assets = item.get("assets", {})
-        for _asset_key, asset_info in assets.items():
+        for asset_info in assets.values():
             href = asset_info.get("href", "")
             clean = href.split("?")[0]
-            if not (clean.endswith(".nc") or clean.endswith(".tif") or clean.endswith(".zip")):
+            if not clean.endswith((".nc", ".tif", ".zip")):
                 continue
             filename = clean.split("/")[-1]
             filepath = out_dir / filename

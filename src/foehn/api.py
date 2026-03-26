@@ -147,7 +147,7 @@ def load(
     # 1. Fetch metadata types for schema inference.
     metadata_types: dict[str, pl.DataType] = {}
     coll = get_collection_metadata(collection_id)
-    for _asset_key, asset_info in coll.get("assets", {}).items():
+    for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
         if href.endswith(".csv") and "_meta_parameters" in href:
             _validate_href(href)
@@ -178,7 +178,7 @@ def load(
     csv_hrefs: list[str] = []
     for item in items:
         assets = item.get("assets", {})
-        for _asset_key, asset_info in assets.items():
+        for asset_info in assets.values():
             href = asset_info.get("href", "")
             if not href.endswith(".csv"):
                 continue

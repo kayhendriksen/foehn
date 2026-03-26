@@ -2,6 +2,9 @@
 
 from unittest.mock import patch
 
+import polars as pl
+import pytest
+
 from foehn.cli import main
 
 _PATCHES = [
@@ -179,3 +182,89 @@ def test_env_full_refresh_truthy(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_FULL_REFRESH", "1")
     mocks = _run("download", [], tmp_path)
     mocks["load_last_run"].assert_not_called()
+
+
+# --- unknown key ---
+
+
+def test_unknown_key_exits(tmp_path):
+    with pytest.raises(SystemExit):
+        _run("download", ["nonexistent_key"], tmp_path)
+
+
+# --- list filters ---
+
+
+def test_list_category_filter(tmp_path, capsys):
+    _run("list", ["--category", "A"], tmp_path)
+    out = capsys.readouterr().out
+    assert "Ground-based measurements" in out
+    assert "Forecast data" not in out
+
+
+def test_list_format_filter(tmp_path, capsys):
+    _run("list", ["--format", "GRIB2"], tmp_path)
+    out = capsys.readouterr().out
+    assert "GRIB2" in out
+
+
+def test_list_no_matches(tmp_path, capsys):
+    _run("list", ["--category", "Z"], tmp_path)
+    out = capsys.readouterr().out
+    assert "No datasets match" in out
+
+
+# --- incremental update ---
+
+
+def test_incremental_prints_since(tmp_path, capsys):
+    mocks = {}
+    patchers = [patch(t) for t in _PATCHES]
+    started = [p.start() for p in patchers]
+    for name, mock in zip(_PATCHES, started, strict=True):
+        mocks[name.split(".")[-1]] = mock
+    mocks["load_last_run"].return_value = "2025-01-01T00:00:00"
+
+    try:
+        with patch("sys.argv", ["foehn", "download", "--data-dir", str(tmp_path)]):
+            main()
+    finally:
+        for p in patchers:
+            p.stop()
+
+    out = capsys.readouterr().out
+    assert "Incremental update" in out
+
+
+# --- convert skips grids ---
+
+
+def test_convert_skips_grid_collections(tmp_path):
+    mocks = _run("convert", [], tmp_path)
+    # convert_to_parquet should only be called for CSV collections, not grid ones
+    for call in mocks["convert_to_parquet"].call_args_list:
+        key = call[0][0]
+        from foehn.collections import GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
+
+        assert key not in GRIB2_COLLECTIONS
+        assert key not in NETCDF_COLLECTIONS
+
+
+# --- load subcommand ---
+
+
+def test_load_prints_dataframe(capsys):
+    fake_df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", ["foehn", "load", "smn"]):
+        main()
+    mock_load.assert_called_once_with("smn")
+    out = capsys.readouterr().out
+    assert "3 rows x 2 columns" in out
+
+
+def test_load_with_filters():
+    fake_df = pl.DataFrame({"a": [1]})
+    argv = ["foehn", "load", "smn", "--station", "BER", "--granularity", "d", "--data-types", "recent", "-n", "5"]
+    with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
+        main()
+    mock_load.assert_called_once_with("smn", station=["BER"], granularity=["d"], data_types=["recent"])

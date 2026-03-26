@@ -8,8 +8,10 @@ import pytest
 
 from foehn.convert import (
     _load_metadata_types,
+    _parse_metadata_types,
     convert_climate_normals_to_parquet,
     convert_to_parquet,
+    parse_csv_bytes,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -137,3 +139,93 @@ def test_convert_climate_normals_readable(climate_normals_raw_dir, tmp_path):
     assert "Station" in df.columns
     assert "Jan" in df.columns
     assert len(df) == 2
+
+
+# --- _parse_metadata_types edge cases ---
+
+
+def test_parse_metadata_types_invalid_content():
+    """Unparseable content returns empty dict."""
+    assert _parse_metadata_types(b"not;valid;csv\x00\xff") == {}
+
+
+def test_parse_metadata_types_missing_columns():
+    """CSV without expected columns returns empty dict."""
+    assert _parse_metadata_types(b"col_a;col_b\nfoo;bar\n") == {}
+
+
+# --- parse_csv_bytes edge cases ---
+
+
+def test_parse_csv_bytes_header_read_failure():
+    """When metadata_types are given but header reading fails, parsing still works."""
+    content = b"a;b\n1;2\n3;4\n"
+    # Pass metadata types but with a bad separator scenario — should still parse
+    df = parse_csv_bytes(content, metadata_types={"a": pl.Float64})
+    assert len(df) == 2
+
+
+def test_parse_csv_bytes_conversion_error_without_column_match():
+    """When error message doesn't contain a column name, the error is raised."""
+    # Create CSV that will cause an error Polars can't recover from
+    content = b""  # empty content
+    with pytest.raises(pl.exceptions.NoDataError):
+        parse_csv_bytes(content)
+
+
+# --- convert_to_parquet error handling ---
+
+
+def test_convert_to_parquet_handles_bad_csv(tmp_path, capsys):
+    """A corrupt CSV should print FAIL but not crash the whole conversion."""
+    raw_dir = tmp_path / "raw"
+    csv_dir = raw_dir / "test_coll"
+    csv_dir.mkdir(parents=True)
+    (csv_dir / "good.csv").write_text("a;b\n1;2\n")
+    (csv_dir / "bad.csv").write_bytes(b"")
+
+    parquet_dir = tmp_path / "parquet"
+    convert_to_parquet("test_coll", raw_dir, parquet_dir)
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+
+
+# --- convert_climate_normals edge cases ---
+
+
+def test_convert_climate_normals_no_txt_files(tmp_path):
+    """Empty climate_normals dir should not raise."""
+    raw_dir = tmp_path / "raw"
+    (raw_dir / "climate_normals").mkdir(parents=True)
+    parquet_dir = tmp_path / "parquet"
+    convert_climate_normals_to_parquet(raw_dir, parquet_dir)
+    # Dir may be created but should contain no parquet files
+    cn_dir = parquet_dir / "climate_normals"
+    assert not cn_dir.exists() or not list(cn_dir.glob("*.parquet"))
+
+
+def test_convert_climate_normals_skips_up_to_date(climate_normals_raw_dir, tmp_path):
+    """Already-converted files should be skipped on second run."""
+    parquet_dir = tmp_path / "parquet"
+    convert_climate_normals_to_parquet(climate_normals_raw_dir, parquet_dir)
+
+    out_file = parquet_dir / "climate_normals" / "sample.parquet"
+    mtime_before = out_file.stat().st_mtime
+
+    convert_climate_normals_to_parquet(climate_normals_raw_dir, parquet_dir)
+    assert out_file.stat().st_mtime == mtime_before
+
+
+def test_convert_climate_normals_handles_bad_file(tmp_path, capsys):
+    """A corrupt TXT should print FAIL but not crash."""
+    raw_dir = tmp_path
+    cn_dir = raw_dir / "climate_normals"
+    cn_dir.mkdir()
+    (cn_dir / "bad.txt").write_bytes(b"\x00\xff")
+
+    parquet_dir = tmp_path / "parquet"
+    convert_climate_normals_to_parquet(raw_dir, parquet_dir)
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out

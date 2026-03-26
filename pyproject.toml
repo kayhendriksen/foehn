@@ -58,13 +58,20 @@ line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "RUF"]
+select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "RUF", "A", "PIE", "PERF", "T20"]
 ignore = [
     "E731",   # lambda assignment — sometimes fine
     "SIM108", # ternary operator — can hurt readability
     "RUF002", # en dash in docstrings — intentional for ranges
     "RUF003", # en dash in comments — intentional for ranges
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"src/foehn/cli.py" = ["T201"]
+"src/foehn/client.py" = ["T201"]
+"src/foehn/convert.py" = ["T201"]
+"src/foehn/stac.py" = ["T201"]
+"scripts/*" = ["T201"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
