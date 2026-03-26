@@ -85,7 +85,7 @@ def parse_csv_bytes(
             for col in header:
                 if col in metadata_types:
                     overrides[col] = metadata_types[col]
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     try:
