@@ -149,7 +149,7 @@ def test_list_prints_collections(tmp_path, capsys):
     mocks = _run("list", [], tmp_path)
     out = capsys.readouterr().out
     assert "smn" in out
-    assert "ch.meteoschweiz.ogd-smn" in out
+    assert "Automatic weather stations" in out
     mocks["download_collection"].assert_not_called()
 
 
