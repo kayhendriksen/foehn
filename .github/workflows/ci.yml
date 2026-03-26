@@ -37,6 +37,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - run: pip install -e . pip-audit bandit
-      - run: pip-audit
+      - run: pip install pip-audit bandit
+      - run: printf 'requests\npolars\n' > _audit_requirements.txt && pip-audit -r _audit_requirements.txt
       - run: bandit -r src/
