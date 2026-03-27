@@ -81,7 +81,7 @@ def load(
     *,
     station: str | list[str] | None = None,
     granularity: str | list[str] | None = None,
-    data_types: list[str] | None = None,
+    data_types: str | list[str] | None = None,
 ) -> pl.DataFrame:
     """Load a dataset and return it as an in-memory Polars DataFrame.
 
@@ -96,8 +96,8 @@ def load(
         granularity: Time granularity filter(s). Options: "t" (10-min), "h" (hourly),
             "d" (daily), "m" (monthly), "y" (yearly). Can be a single string or list.
             If None, all granularities are included.
-        data_types: Time slices to include. Defaults to ["recent"].
-            Options: "historical", "recent", "now".
+        data_types: Time slice(s) to include. Defaults to ["recent"].
+            Options: "historical", "recent", "now". Can be a single string or list.
 
     Returns:
         A Polars DataFrame containing all matching CSV data.
@@ -122,6 +122,8 @@ def load(
 
     if data_types is None:
         data_types = ["recent"]
+    elif isinstance(data_types, str):
+        data_types = [data_types]
 
     # Normalise station filter to a set of lowercase abbreviations.
     station_filter: set[str] | None = None

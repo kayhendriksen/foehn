@@ -2,6 +2,17 @@
 
 __version__ = "0.2.6"
 
+try:
+    import polars as pl
+
+    pl.DataFrame({"_": [0]})
+except Exception as exc:
+    raise ImportError(
+        "Polars failed to load. On systems without AVX2 support (e.g. Databricks), "
+        "install the compatible build:\n\n"
+        '  pip install "foehn[databricks]"   # or: pip install polars-lts-cpu\n'
+    ) from exc
+
 from foehn.api import convert, download, list_datasets, load
 
 __all__ = ["__version__", "convert", "download", "list_datasets", "load"]

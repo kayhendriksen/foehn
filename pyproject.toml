@@ -41,6 +41,7 @@ Issues = "https://github.com/kayhendriksen/foehn/issues"
 
 [project.optional-dependencies]
 databricks = [
+    "polars-lts-cpu>=1.0",
     "pyspark>=4.0,<5.0",
     "delta-spark>=4.0,<5.0",
 ]
