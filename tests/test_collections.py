@@ -43,13 +43,13 @@ def test_list_datasets_returns_all():
 
 def test_list_datasets_dict_keys():
     expected = {
-        "key",
+        "dataset",
         "collection_id",
         "category",
         "subcategory",
         "description",
         "format",
-        "granularities",
+        "frequencies",
         "time_slices",
     }
     for row in list_datasets():

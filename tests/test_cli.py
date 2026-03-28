@@ -58,45 +58,45 @@ def _run_without_data_dir(subcommand, args, tmp_path):
     return mocks
 
 
-# --- data_types assembly ---
+# --- time_slice assembly ---
 
 
 def test_default_uses_recent_only(tmp_path):
     mocks = _run("download", [], tmp_path)
     calls = mocks["download_collection"].call_args_list
     assert calls, "download_collection should be called"
-    data_types = calls[0][1]["data_types"]
-    assert data_types == ["recent"]
+    time_slices = calls[0][1]["data_types"]
+    assert time_slices == ["recent"]
 
 
 def test_now_flag_adds_now(tmp_path):
     mocks = _run("download", ["--now"], tmp_path)
     calls = mocks["download_collection"].call_args_list
-    data_types = calls[0][1]["data_types"]
-    assert "now" in data_types
-    assert "recent" in data_types
+    time_slices = calls[0][1]["data_types"]
+    assert "now" in time_slices
+    assert "recent" in time_slices
 
 
 def test_historical_flag_prepends_historical(tmp_path):
     mocks = _run("download", ["--historical"], tmp_path)
     calls = mocks["download_collection"].call_args_list
-    data_types = calls[0][1]["data_types"]
-    assert data_types[0] == "historical"
-    assert "recent" in data_types
+    time_slices = calls[0][1]["data_types"]
+    assert time_slices[0] == "historical"
+    assert "recent" in time_slices
 
 
 def test_all_time_slices(tmp_path):
     mocks = _run("download", ["--now", "--historical"], tmp_path)
     calls = mocks["download_collection"].call_args_list
-    data_types = calls[0][1]["data_types"]
-    assert set(data_types) == {"historical", "recent", "now"}
+    time_slices = calls[0][1]["data_types"]
+    assert set(time_slices) == {"historical", "recent", "now"}
 
 
-# --- convert subcommand ---
+# --- to-parquet subcommand ---
 
 
-def test_convert_skips_downloads(tmp_path):
-    mocks = _run("convert", [], tmp_path)
+def test_to_parquet_skips_downloads(tmp_path):
+    mocks = _run("to-parquet", [], tmp_path)
     mocks["download_collection"].assert_not_called()
     mocks["download_metadata"].assert_not_called()
     mocks["convert_to_parquet"].assert_called()
@@ -187,9 +187,9 @@ def test_env_full_refresh_truthy(tmp_path, monkeypatch):
 # --- unknown key ---
 
 
-def test_unknown_key_exits(tmp_path):
+def test_unknown_dataset_exits(tmp_path):
     with pytest.raises(SystemExit):
-        _run("download", ["nonexistent_key"], tmp_path)
+        _run("download", ["nonexistent_dataset"], tmp_path)
 
 
 # --- list filters ---
@@ -236,11 +236,11 @@ def test_incremental_prints_since(tmp_path, capsys):
     assert "Incremental update" in out
 
 
-# --- convert skips grids ---
+# --- to-parquet skips grids ---
 
 
-def test_convert_skips_grid_collections(tmp_path):
-    mocks = _run("convert", [], tmp_path)
+def test_to_parquet_skips_grid_collections(tmp_path):
+    mocks = _run("to-parquet", [], tmp_path)
     # convert_to_parquet should only be called for CSV collections, not grid ones
     for call in mocks["convert_to_parquet"].call_args_list:
         key = call[0][0]
@@ -264,7 +264,7 @@ def test_load_prints_dataframe(capsys):
 
 def test_load_with_filters():
     fake_df = pl.DataFrame({"a": [1]})
-    argv = ["foehn", "load", "smn", "--station", "BER", "--granularity", "d", "--data-types", "recent", "-n", "5"]
+    argv = ["foehn", "load", "smn", "--station", "BER", "--frequency", "d", "--time-slice", "recent", "-n", "5"]
     with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
         main()
-    mock_load.assert_called_once_with("smn", station=["BER"], granularity=["d"], data_types=["recent"])
+    mock_load.assert_called_once_with("smn", station=["BER"], frequency=["d"], time_slice=["recent"])

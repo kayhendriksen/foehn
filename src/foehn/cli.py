@@ -42,24 +42,24 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_key_arg(parser: argparse.ArgumentParser) -> None:
-    """Add optional positional KEY arguments."""
+def _add_dataset_arg(parser: argparse.ArgumentParser) -> None:
+    """Add optional positional DATASET arguments."""
     parser.add_argument(
-        "keys",
+        "datasets",
         nargs="*",
-        metavar="KEY",
-        help="Dataset key(s) to operate on (default: all). Use 'foehn list' to see options.",
+        metavar="DATASET",
+        help="Dataset(s) to operate on (default: all). Use 'foehn list' to see options.",
     )
 
 
-def _resolve_keys(keys: list[str], *, allow_grids: bool = False) -> list[str]:
-    """Resolve key arguments to a list of collection keys."""
-    if keys:
-        for k in keys:
-            if k not in COLLECTIONS:
-                print(f"Error: unknown dataset key {k!r}. Run 'foehn list' to see options.", file=sys.stderr)
+def _resolve_datasets(datasets: list[str], *, allow_grids: bool = False) -> list[str]:
+    """Resolve dataset arguments to a list of collection keys."""
+    if datasets:
+        for d in datasets:
+            if d not in COLLECTIONS:
+                print(f"Error: unknown dataset {d!r}. Run 'foehn list' to see options.", file=sys.stderr)
                 sys.exit(1)
-        return keys
+        return datasets
     # Default: all collections (skip grids unless opted in)
     if allow_grids:
         return list(COLLECTIONS)
@@ -96,11 +96,11 @@ def cmd_list(args: argparse.Namespace) -> None:
                 print()
             label = categories.get(cat, cat)
             print(f"── {cat}: {label} ──")
-            print(f"  {'Key':<32} {'Format':<8} {'Granularity':<16} Description")
+            print(f"  {'Dataset':<32} {'Format':<8} {'Frequency':<16} Description")
             current_cat = cat
 
-        granularities = ", ".join(row["granularities"]) if row["granularities"] else "—"
-        print(f"  {row['key']:<32} {row['format']:<8} {granularities:<16} {row['description']}")
+        frequencies = ", ".join(row["frequencies"]) if row["frequencies"] else "—"
+        print(f"  {row['dataset']:<32} {row['format']:<8} {frequencies:<16} {row['description']}")
 
 
 def cmd_download(args: argparse.Namespace) -> None:
@@ -111,11 +111,11 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     full_refresh = args.full_refresh or os.environ.get("FOEHN_FULL_REFRESH", "").lower() in ("1", "true", "yes")
 
-    data_types = ["recent"]
+    time_slices = ["recent"]
     if args.all or args.now:
-        data_types.append("now")
+        time_slices.append("now")
     if args.all or args.historical:
-        data_types.insert(0, "historical")
+        time_slices.insert(0, "historical")
 
     since = None
     if not full_refresh:
@@ -125,23 +125,23 @@ def cmd_download(args: argparse.Namespace) -> None:
         print(f"Incremental update (last run: {since})", flush=True)
     else:
         print("Full download", flush=True)
-    print(f"Data types: {data_types}", flush=True)
+    print(f"Time slices: {time_slices}", flush=True)
 
-    keys = _resolve_keys(args.keys, allow_grids=args.grids)
+    datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
 
-    for key in keys:
-        if key in GRIB2_COLLECTIONS:
-            download_grib2(key, raw_dir, since=since)
-        elif key in NETCDF_COLLECTIONS:
-            download_netcdf(key, raw_dir)
+    for ds in datasets:
+        if ds in GRIB2_COLLECTIONS:
+            download_grib2(ds, raw_dir, since=since)
+        elif ds in NETCDF_COLLECTIONS:
+            download_netcdf(ds, raw_dir)
         else:
-            download_metadata(key, raw_dir)
-            download_collection(key, raw_dir, data_types=data_types, since=since)
+            download_metadata(ds, raw_dir)
+            download_collection(ds, raw_dir, data_types=time_slices, since=since)
             if not args.no_parquet:
-                convert_to_parquet(key, raw_dir, parquet_dir)
+                convert_to_parquet(ds, raw_dir, parquet_dir)
 
     # C6 climate normals (ZIP from opendata.swiss, not STAC)
-    if not args.keys:
+    if not args.datasets:
         download_climate_normals_zip(raw_dir, force=full_refresh)
         if not args.no_parquet:
             convert_climate_normals_to_parquet(raw_dir, parquet_dir)
@@ -153,19 +153,19 @@ def cmd_download(args: argparse.Namespace) -> None:
         print(f"Parquet files saved to: {parquet_dir}")
 
 
-def cmd_convert(args: argparse.Namespace) -> None:
+def cmd_to_parquet(args: argparse.Namespace) -> None:
     data_dir = _resolve_data_dir(args.data_dir)
     raw_dir = data_dir / "raw"
     parquet_dir = data_dir / "parquet"
 
-    keys = _resolve_keys(args.keys)
+    datasets = _resolve_datasets(args.datasets)
 
-    for key in keys:
-        if key in GRIB2_COLLECTIONS or key in NETCDF_COLLECTIONS:
+    for ds in datasets:
+        if ds in GRIB2_COLLECTIONS or ds in NETCDF_COLLECTIONS:
             continue
-        convert_to_parquet(key, raw_dir, parquet_dir)
+        convert_to_parquet(ds, raw_dir, parquet_dir)
 
-    if not args.keys:
+    if not args.datasets:
         convert_climate_normals_to_parquet(raw_dir, parquet_dir)
 
     print(f"Parquet files saved to: {parquet_dir}")
@@ -177,12 +177,12 @@ def cmd_load(args: argparse.Namespace) -> None:
     kwargs: dict = {}
     if args.station:
         kwargs["station"] = args.station
-    if args.granularity:
-        kwargs["granularity"] = args.granularity
-    if args.data_types:
-        kwargs["data_types"] = args.data_types
+    if args.frequency:
+        kwargs["frequency"] = args.frequency
+    if args.time_slice:
+        kwargs["time_slice"] = args.time_slice
 
-    df = load(args.key, **kwargs)
+    df = load(args.dataset, **kwargs)
 
     n = args.n or 20
     print(df.head(n))
@@ -205,7 +205,7 @@ def main():
 
     # --- foehn download ---
     sub_dl = subparsers.add_parser("download", help="Download datasets")
-    _add_key_arg(sub_dl)
+    _add_dataset_arg(sub_dl)
     _add_common_args(sub_dl)
     sub_dl.add_argument("--historical", action="store_true", help="Include historical time slice")
     sub_dl.add_argument("--now", action="store_true", help="Include realtime 'now' time slice")
@@ -215,18 +215,18 @@ def main():
     sub_dl.add_argument("--no-parquet", action="store_true", help="Skip CSV → Parquet conversion")
     sub_dl.set_defaults(func=cmd_download)
 
-    # --- foehn convert ---
-    sub_conv = subparsers.add_parser("convert", help="Convert downloaded CSVs to Parquet")
-    _add_key_arg(sub_conv)
+    # --- foehn to-parquet ---
+    sub_conv = subparsers.add_parser("to-parquet", help="Convert downloaded CSVs to Parquet")
+    _add_dataset_arg(sub_conv)
     _add_common_args(sub_conv)
-    sub_conv.set_defaults(func=cmd_convert)
+    sub_conv.set_defaults(func=cmd_to_parquet)
 
     # --- foehn load ---
     sub_load = subparsers.add_parser("load", help="Load a dataset and print a preview")
-    sub_load.add_argument("key", help="Dataset key (e.g. 'smn')")
+    sub_load.add_argument("dataset", help="Dataset name (e.g. 'smn')")
     sub_load.add_argument("--station", nargs="+", help="Filter by station(s)")
-    sub_load.add_argument("--granularity", nargs="+", help="Filter by granularity (t, h, d, m, y)")
-    sub_load.add_argument("--data-types", nargs="+", help="Time slices (default: recent)")
+    sub_load.add_argument("--frequency", nargs="+", help="Filter by frequency (t, h, d, m, y)")
+    sub_load.add_argument("--time-slice", nargs="+", help="Time slices (default: recent)")
     sub_load.add_argument("-n", type=int, default=None, help="Number of rows to show (default: 20)")
     sub_load.set_defaults(func=cmd_load)
 

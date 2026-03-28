@@ -6,13 +6,13 @@ import polars as pl
 import pytest
 
 import foehn
-from foehn.api import convert, download, list_datasets, load
+from foehn.api import download, list_datasets, load, to_parquet
 from foehn.collections import COLLECTIONS
 
 
 def test_import_from_foehn():
     assert callable(foehn.download)
-    assert callable(foehn.convert)
+    assert callable(foehn.to_parquet)
     assert callable(foehn.list_datasets)
 
 
@@ -20,13 +20,13 @@ def test_list_datasets_returns_all():
     rows = list_datasets()
     assert len(rows) == len(COLLECTIONS)
     expected_keys = {
-        "key",
+        "dataset",
         "collection_id",
         "category",
         "subcategory",
         "description",
         "format",
-        "granularities",
+        "frequencies",
         "time_slices",
     }
     for row in rows:
@@ -34,7 +34,7 @@ def test_list_datasets_returns_all():
 
 
 def test_list_datasets_categories():
-    rows = {r["key"]: r for r in list_datasets()}
+    rows = {r["dataset"]: r for r in list_datasets()}
     assert rows["smn"]["category"] == "A"
     assert rows["smn"]["format"] == "CSV"
     assert rows["forecast_icon_ch1"]["format"] == "GRIB2"
@@ -42,17 +42,17 @@ def test_list_datasets_categories():
     assert rows["forecast_local"]["format"] == "CSV"
 
 
-def test_download_unknown_key_raises():
-    with pytest.raises(ValueError, match="Unknown dataset key"):
+def test_download_unknown_dataset_raises():
+    with pytest.raises(ValueError, match="Unknown dataset"):
         download("nonexistent")
 
 
-def test_download_grib2_key_raises():
+def test_download_grib2_dataset_raises():
     with pytest.raises(ValueError, match="binary/grid dataset"):
         download("forecast_icon_ch1")
 
 
-def test_download_netcdf_key_raises():
+def test_download_netcdf_dataset_raises():
     with pytest.raises(ValueError, match="binary/grid dataset"):
         download("surface_derived_grid")
 
@@ -60,19 +60,19 @@ def test_download_netcdf_key_raises():
 @patch("foehn.api.download_collection")
 @patch("foehn.api.download_metadata")
 def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):
-    download("smn", data_dir=tmp_path, data_types=["historical"])
+    download("smn", data_dir=tmp_path, time_slice=["historical"])
     mock_meta.assert_called_once_with("smn", tmp_path / "raw")
     mock_dl.assert_called_once_with("smn", tmp_path / "raw", data_types=["historical"], since=None)
 
 
-def test_convert_unknown_key_raises():
-    with pytest.raises(ValueError, match="Unknown dataset key"):
-        convert("nonexistent")
+def test_to_parquet_unknown_dataset_raises():
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        to_parquet("nonexistent")
 
 
 @patch("foehn.api.convert_to_parquet")
-def test_convert_calls_convert_to_parquet(mock_conv, tmp_path):
-    convert("smn", data_dir=tmp_path)
+def test_to_parquet_calls_convert_to_parquet(mock_conv, tmp_path):
+    to_parquet("smn", data_dir=tmp_path)
     mock_conv.assert_called_once_with("smn", tmp_path / "raw", tmp_path / "parquet")
 
 
@@ -83,28 +83,28 @@ def test_load_is_exported():
     assert callable(foehn.load)
 
 
-def test_load_unknown_key_raises():
-    with pytest.raises(ValueError, match="Unknown dataset key"):
+def test_load_unknown_dataset_raises():
+    with pytest.raises(ValueError, match="Unknown dataset"):
         load("nonexistent")
 
 
-def test_load_grib2_key_raises():
+def test_load_grib2_dataset_raises():
     with pytest.raises(ValueError, match="binary/grid dataset"):
         load("forecast_icon_ch1")
 
 
-def test_load_netcdf_key_raises():
+def test_load_netcdf_dataset_raises():
     with pytest.raises(ValueError, match="binary/grid dataset"):
         load("surface_derived_grid")
 
 
-def test_load_granularity_on_unsupported_dataset_raises():
-    """Granularity filter on datasets without standard filenames should raise."""
-    with pytest.raises(ValueError, match="does not support granularity"):
-        load("climate_scenarios", granularity="d")
+def test_load_frequency_on_unsupported_dataset_raises():
+    """Frequency filter on datasets without standard filenames should raise."""
+    with pytest.raises(ValueError, match="does not support frequency"):
+        load("climate_scenarios", frequency="d")
 
-    with pytest.raises(ValueError, match="does not support granularity"):
-        load("forecast_local", granularity="h")
+    with pytest.raises(ValueError, match="does not support frequency"):
+        load("forecast_local", frequency="h")
 
 
 def _mock_response(content, status_code=200):
@@ -184,8 +184,8 @@ def test_load_with_metadata_types(mock_session, mock_meta, mock_items):
 @patch("foehn.api.get_collection_items")
 @patch("foehn.api.get_collection_metadata")
 @patch("foehn.api._retry_session")
-def test_load_filters_data_types(mock_session, mock_meta, mock_items):
-    """load() should only include CSVs matching the requested data_types."""
+def test_load_filters_time_slice(mock_session, mock_meta, mock_items):
+    """load() should only include CSVs matching the requested time_slice."""
     mock_meta.return_value = {"assets": {}}
 
     mock_items.return_value = [
@@ -203,7 +203,7 @@ def test_load_filters_data_types(mock_session, mock_meta, mock_items):
     session.get = MagicMock(return_value=_mock_response(csv_data))
     mock_session.return_value = session
 
-    df = load("smn", data_types=["recent"])
+    df = load("smn", time_slice=["recent"])
 
     assert isinstance(df, pl.DataFrame)
     # Only one CSV should have been fetched (the recent one)
@@ -222,7 +222,7 @@ def test_load_no_csvs_raises(mock_session, mock_meta, mock_items):
     mock_session.return_value = session
 
     with pytest.raises(ValueError, match="No CSV files found"):
-        load("smn", data_types=["now"])
+        load("smn", time_slice=["now"])
 
 
 def _smn_items(*stations):
@@ -283,8 +283,8 @@ def test_load_station_filter_multiple(mock_session, mock_meta, mock_items):
 @patch("foehn.api.get_collection_items")
 @patch("foehn.api.get_collection_metadata")
 @patch("foehn.api._retry_session")
-def test_load_granularity_filter(mock_session, mock_meta, mock_items):
-    """load(granularity='d') should only download daily files."""
+def test_load_frequency_filter(mock_session, mock_meta, mock_items):
+    """load(frequency='d') should only download daily files."""
     mock_meta.return_value = {"assets": {}}
     mock_items.return_value = _smn_items("ber")
 
@@ -293,7 +293,7 @@ def test_load_granularity_filter(mock_session, mock_meta, mock_items):
     session.get = MagicMock(return_value=_mock_response(csv_data))
     mock_session.return_value = session
 
-    df = load("smn", station="BER", granularity="d")
+    df = load("smn", station="BER", frequency="d")
 
     assert isinstance(df, pl.DataFrame)
     # Only 1 file: ber_d_recent
@@ -303,8 +303,8 @@ def test_load_granularity_filter(mock_session, mock_meta, mock_items):
 @patch("foehn.api.get_collection_items")
 @patch("foehn.api.get_collection_metadata")
 @patch("foehn.api._retry_session")
-def test_load_granularity_filter_multiple(mock_session, mock_meta, mock_items):
-    """load(granularity=['d', 'h']) should download daily + hourly."""
+def test_load_frequency_filter_multiple(mock_session, mock_meta, mock_items):
+    """load(frequency=['d', 'h']) should download daily + hourly."""
     mock_meta.return_value = {"assets": {}}
     mock_items.return_value = _smn_items("ber")
 
@@ -313,7 +313,7 @@ def test_load_granularity_filter_multiple(mock_session, mock_meta, mock_items):
     session.get = MagicMock(return_value=_mock_response(csv_data))
     mock_session.return_value = session
 
-    df = load("smn", station="BER", granularity=["d", "h"])
+    df = load("smn", station="BER", frequency=["d", "h"])
 
     assert isinstance(df, pl.DataFrame)
     # 2 files: ber_d_recent + ber_h_recent
@@ -333,6 +333,6 @@ def test_load_station_case_insensitive(mock_session, mock_meta, mock_items):
     session.get = MagicMock(return_value=_mock_response(csv_data))
     mock_session.return_value = session
 
-    df = load("smn", station="ber", granularity="d")
+    df = load("smn", station="ber", frequency="d")
     assert isinstance(df, pl.DataFrame)
     assert session.get.call_count == 1

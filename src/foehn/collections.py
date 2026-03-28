@@ -117,7 +117,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A1",
         "description": "Automatic weather stations",
         "format": "CSV",
-        "granularities": ["t", "h", "d", "m"],
+        "frequencies": ["t", "h", "d", "m"],
         "time_slices": ["historical", "recent", "now"],
     },
     "smn_precip": {
@@ -125,7 +125,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A2",
         "description": "Automatic precipitation stations",
         "format": "CSV",
-        "granularities": ["t", "h", "d", "m"],
+        "frequencies": ["t", "h", "d", "m"],
         "time_slices": ["historical", "recent", "now"],
     },
     "smn_tower": {
@@ -133,7 +133,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A3",
         "description": "Automatic tower stations",
         "format": "CSV",
-        "granularities": ["t", "h", "d", "m"],
+        "frequencies": ["t", "h", "d", "m"],
         "time_slices": ["historical", "recent", "now"],
     },
     "nime": {
@@ -141,7 +141,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A5",
         "description": "Manual precipitation stations",
         "format": "CSV",
-        "granularities": ["d", "m", "y"],
+        "frequencies": ["d", "m", "y"],
         "time_slices": ["historical", "recent"],
     },
     "tot": {
@@ -149,7 +149,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A6",
         "description": "Totaliser precipitation",
         "format": "CSV",
-        "granularities": ["y"],
+        "frequencies": ["y"],
         "time_slices": [],
     },
     "obs": {
@@ -157,7 +157,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A8",
         "description": "Meteorological visual observations",
         "format": "CSV",
-        "granularities": ["t", "m", "y"],
+        "frequencies": ["t", "m", "y"],
         "time_slices": ["historical", "recent", "now"],
     },
     "pollen": {
@@ -165,7 +165,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A7",
         "description": "Pollen stations",
         "format": "CSV",
-        "granularities": ["h", "d"],
+        "frequencies": ["h", "d"],
         "time_slices": ["historical", "recent", "now"],
     },
     "phenology": {
@@ -173,7 +173,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A9",
         "description": "Phenological observations",
         "format": "CSV",
-        "granularities": ["y"],
+        "frequencies": ["y"],
         "time_slices": [],
     },
     # ── C: Climate data ──────────────────────────────────────────────────────
@@ -182,7 +182,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C1",
         "description": "Climate stations, homogeneous",
         "format": "CSV",
-        "granularities": ["d", "m"],
+        "frequencies": ["d", "m"],
         "time_slices": ["historical", "recent"],
     },
     "nbcn_precip": {
@@ -190,7 +190,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C2",
         "description": "Climate precipitation, homogeneous",
         "format": "CSV",
-        "granularities": ["m"],
+        "frequencies": ["m"],
         "time_slices": ["historical", "recent"],
     },
     "surface_derived_grid": {
@@ -198,7 +198,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C3/C4",
         "description": "Precipitation, temperature, sunshine grids",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "satellite_derived_grid": {
@@ -206,7 +206,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C5",
         "description": "Radiation, clouds grids",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_normals_precip_9120": {
@@ -214,7 +214,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C7",
         "description": "Precipitation normals (1991-2020)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_normals_sun_9120": {
@@ -222,7 +222,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C7",
         "description": "Sunshine normals (1991-2020)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_normals_temp_9120": {
@@ -230,7 +230,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C7",
         "description": "Temperature normals (1991-2020)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_normals_precip_6190": {
@@ -238,7 +238,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C7",
         "description": "Precipitation normals (1961-1990)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_normals_sun_6190": {
@@ -246,7 +246,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C7",
         "description": "Sunshine normals (1961-1990)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_normals_temp_6190": {
@@ -254,7 +254,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C7",
         "description": "Temperature normals (1961-1990)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_scenarios": {
@@ -262,7 +262,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C8",
         "description": "Climate scenarios CH2025 local",
         "format": "CSV",
-        "granularities": ["y"],
+        "frequencies": ["y"],
         "time_slices": [],
     },
     "climate_scenarios_grid": {
@@ -270,7 +270,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C9",
         "description": "Climate scenarios CH2025 gridded",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     # ── Hail hazard maps ─────────────────────────────────────────────────────
@@ -279,7 +279,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C",
         "description": "Hail hazard map (10-year return period)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "hail_hazard_20y": {
@@ -287,7 +287,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C",
         "description": "Hail hazard map (20-year return period)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "hail_hazard_50y": {
@@ -295,7 +295,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C",
         "description": "Hail hazard map (50-year return period)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "hail_hazard_100y": {
@@ -303,7 +303,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C",
         "description": "Hail hazard map (100-year return period)",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_scenarios_indoor": {
@@ -311,7 +311,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C",
         "description": "Indoor climate scenarios",
         "format": "NetCDF",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     # ── D: Radar data ────────────────────────────────────────────────────────
@@ -320,7 +320,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "D1",
         "description": "Precipitation radar",
         "format": "GRIB2",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "radar_hail": {
@@ -328,7 +328,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "D3",
         "description": "Hail radar",
         "format": "GRIB2",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     # ── E: Forecast data ─────────────────────────────────────────────────────
@@ -337,7 +337,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "E2",
         "description": "ICON-CH1-EPS 1km",
         "format": "GRIB2",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "forecast_icon_ch2": {
@@ -345,7 +345,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "E3",
         "description": "ICON-CH2-EPS 2.1km",
         "format": "GRIB2",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
     "forecast_local": {
@@ -353,7 +353,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "E4",
         "description": "Local point forecasts",
         "format": "CSV",
-        "granularities": [],
+        "frequencies": [],
         "time_slices": [],
     },
 }

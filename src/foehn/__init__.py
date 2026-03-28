@@ -13,6 +13,6 @@ except Exception as exc:
         '  pip install "foehn[databricks]"   # or: pip install polars-lts-cpu\n'
     ) from exc
 
-from foehn.api import convert, download, list_datasets, load
+from foehn.api import download, list_datasets, load, to_parquet
 
-__all__ = ["__version__", "convert", "download", "list_datasets", "load"]
+__all__ = ["__version__", "download", "list_datasets", "load", "to_parquet"]

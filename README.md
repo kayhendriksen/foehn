@@ -54,7 +54,7 @@ MeteoSwiss organises its open data into five categories. Category **B** (atmosph
 
 Station-level time series in CSV, split into time slices (`historical`, `recent`, `now`). Converted to Parquet.
 
-| Key | ID | Description | Granularities | Stations | Parameters |
+| Dataset | ID | Description | Frequencies | Stations | Parameters |
 |---|---|---|---|---|---|
 | `smn` | A1 | **Automatic weather stations** — the core SwissMetNet network. ~160 stations across Switzerland measuring temperature, humidity, pressure, precipitation, wind, radiation, sunshine, soil temperature, and dew point. | 10-min, hourly, daily, monthly, yearly | 158 | 181 |
 | `smn_precip` | A2 | **Automatic precipitation stations** — rain-gauge-only network. Reports precipitation totals at multiple granularities. | 10-min, hourly, daily, monthly, yearly | 141 | 6 |
@@ -113,7 +113,7 @@ Static spatial reference grids showing expected hail grain size (cm) at differen
 
 MeteoSwiss splits CSV data into three time slices, encoded in the filename:
 
-| Slice | Range | Update frequency | Granularities |
+| Slice | Range | Update frequency | Frequencies |
 |---|---|---|---|
 | `recent` | Jan 1 this year → yesterday | Daily at 12:00 UTC | 10-min, hourly, daily, monthly |
 | `historical` | Start of measurement → Dec 31 last year | Once per year (early January) | 10-min, hourly, daily, monthly |
@@ -157,28 +157,28 @@ import foehn
 
 # List all available datasets
 foehn.list_datasets()
-# [{'key': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn', 'category': 'A',
+# [{'dataset': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn', 'category': 'A',
 #   'subcategory': 'A1', 'description': 'Automatic weather stations',
-#   'format': 'CSV', 'granularities': ['t', 'h', 'd', 'm'],
+#   'format': 'CSV', 'frequencies': ['t', 'h', 'd', 'm'],
 #   'time_slices': ['historical', 'recent', 'now']}, ...]
 
 # Load data directly into a Polars DataFrame (nothing written to disk)
-df = foehn.load("smn", station="BER", granularity="d")
+df = foehn.load("smn", station="BER", frequency="d")
 
-# Filter by multiple stations and granularities
-df = foehn.load("smn", station=["BER", "ZUR"], granularity=["d", "h"])
+# Filter by multiple stations and frequencies
+df = foehn.load("smn", station=["BER", "ZUR"], frequency=["d", "h"])
 
 # Include historical data
-df = foehn.load("smn", station="BER", granularity="d", data_types=["historical", "recent"])
+df = foehn.load("smn", station="BER", frequency="d", time_slice=["historical", "recent"])
 
 # Download a single dataset to disk
 foehn.download("smn", data_dir="./data/meteoswiss")
 
 # Download with specific time slices
-foehn.download("smn", data_types=["historical", "recent"])
+foehn.download("smn", time_slice=["historical", "recent"])
 
 # Convert downloaded CSVs to Parquet
-foehn.convert("smn", data_dir="./data/meteoswiss")
+foehn.to_parquet("smn", data_dir="./data/meteoswiss")
 ```
 
 ---
@@ -195,9 +195,9 @@ List all available datasets.
 foehn list
 ```
 
-### `foehn download [KEY...]`
+### `foehn download [DATASET...]`
 
-Download datasets. Without keys, downloads all CSV collections. Specify one or more keys to download specific datasets.
+Download datasets. Without arguments, downloads all CSV collections. Specify one or more datasets to download specific ones.
 
 ```bash
 foehn download              # all CSV collections
@@ -214,33 +214,33 @@ foehn download smn pollen   # specific datasets only
 | `--no-parquet` | Skip CSV → Parquet conversion |
 | `--data-dir PATH` | Output root (default: `./data/meteoswiss`) |
 
-### `foehn convert [KEY...]`
+### `foehn to-parquet [DATASET...]`
 
-Convert downloaded CSVs to Parquet. Without keys, converts all collections.
+Convert downloaded CSVs to Parquet. Without arguments, converts all collections.
 
 ```bash
-foehn convert               # all collections
-foehn convert smn           # single dataset
+foehn to-parquet            # all collections
+foehn to-parquet smn        # single dataset
 ```
 
 | Flag | Description |
 |---|---|
 | `--data-dir PATH` | Root data directory |
 
-### `foehn load KEY`
+### `foehn load DATASET`
 
 Load a dataset from the API and print a preview (no files written to disk).
 
 ```bash
-foehn load smn --station BER --granularity d
-foehn load smn --station BER ZUR --granularity d h -n 50
+foehn load smn --station BER --frequency d
+foehn load smn --station BER ZUR --frequency d h -n 50
 ```
 
 | Flag | Description |
 |---|---|
 | `--station` | Filter by station(s) |
-| `--granularity` | Filter by granularity (t, h, d, m, y) |
-| `--data-types` | Time slices to include (default: recent) |
+| `--frequency` | Filter by frequency (t, h, d, m, y) |
+| `--time-slice` | Time slices to include (default: recent) |
 | `-n` | Number of rows to show (default: 20) |
 
 Parquet files land in `<data-dir>/parquet/<collection>/`.
