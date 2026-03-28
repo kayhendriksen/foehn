@@ -44,6 +44,8 @@ foehn download
 
 Recent data (Jan 1 → yesterday) is downloaded and converted to Parquet under `./data/meteoswiss/`.
 
+<img src="https://raw.githubusercontent.com/kayhendriksen/foehn/main/assets/demo.gif" alt="foehn CLI demo" width="800">
+
 ---
 
 ## Collections
