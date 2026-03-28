@@ -268,3 +268,54 @@ def test_load_with_filters():
     with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
         main()
     mock_load.assert_called_once_with("smn", station=["BER"], frequency=["d"], time_slice=["recent"])
+
+
+# --- metadata subcommand ---
+
+
+def test_metadata_parameters(capsys):
+    fake_df = pl.DataFrame({"shortname": ["tre200d0"], "description": ["Air temp"], "unit": ["°C"]})
+    with (
+        patch("foehn.cli.parameters", return_value=fake_df),
+        patch("sys.argv", ["foehn", "metadata", "parameters", "smn"]),
+    ):
+        main()
+    out = capsys.readouterr().out
+    assert "tre200d0" in out
+    assert "Air temp" in out
+    assert "1 rows" in out
+
+
+def test_metadata_stations(capsys):
+    fake_df = pl.DataFrame({"abbr": ["BER"], "name": ["Bern"], "canton": ["BE"]})
+    with (
+        patch("foehn.cli.stations", return_value=fake_df),
+        patch("sys.argv", ["foehn", "metadata", "stations", "smn"]),
+    ):
+        main()
+    out = capsys.readouterr().out
+    assert "BER" in out
+    assert "Bern" in out
+
+
+def test_metadata_inventory(capsys):
+    fake_df = pl.DataFrame({"station": ["BER"], "parameter": ["tre200d0"]})
+    with (
+        patch("foehn.cli.inventory", return_value=fake_df),
+        patch("sys.argv", ["foehn", "metadata", "inventory", "smn"]),
+    ):
+        main()
+    out = capsys.readouterr().out
+    assert "BER" in out
+    assert "tre200d0" in out
+
+
+def test_metadata_empty(capsys):
+    fake_df = pl.DataFrame({"shortname": [], "description": [], "unit": []})
+    with (
+        patch("foehn.cli.parameters", return_value=fake_df),
+        patch("sys.argv", ["foehn", "metadata", "parameters", "smn"]),
+    ):
+        main()
+    out = capsys.readouterr().out
+    assert "No parameters metadata found" in out

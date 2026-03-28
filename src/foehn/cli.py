@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from foehn.api import list_datasets
+from foehn.api import inventory, list_datasets, parameters, stations
 from foehn.client import (
     download_climate_normals_zip,
     download_collection,
@@ -171,6 +171,44 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
     print(f"Parquet files saved to: {parquet_dir}")
 
 
+def cmd_metadata(args: argparse.Namespace) -> None:
+    kind = args.kind
+    dataset = args.dataset
+
+    if kind == "parameters":
+        df = parameters(dataset)
+    elif kind == "stations":
+        df = stations(dataset)
+    elif kind == "inventory":
+        df = inventory(dataset)
+    else:
+        print(f"Unknown metadata kind: {kind!r}", file=sys.stderr)
+        sys.exit(1)
+
+    if df.is_empty():
+        print(f"No {kind} metadata found for {dataset!r}.")
+        return
+
+    # Table output similar to foehn list
+    headers = df.columns
+    # Compute column widths (min width = header length, capped at 40)
+    widths = []
+    for col in headers:
+        max_val = max((len(str(v)) for v in df[col].to_list()), default=0)
+        widths.append(min(max(len(col), max_val), 40))
+
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    print(fmt.format(*(("─" * w) for w in widths)))
+    for row in df.iter_rows():
+        values = [str(v) if v is not None else "—" for v in row]
+        # Truncate long values
+        values = [v[:w] if len(v) > w else v for v, w in zip(values, widths, strict=True)]
+        print(fmt.format(*values))
+
+    print(f"\n[{df.shape[0]} rows]")
+
+
 def cmd_load(args: argparse.Namespace) -> None:
     from foehn.api import load
 
@@ -220,6 +258,12 @@ def main():
     _add_dataset_arg(sub_conv)
     _add_common_args(sub_conv)
     sub_conv.set_defaults(func=cmd_to_parquet)
+
+    # --- foehn metadata ---
+    sub_meta = subparsers.add_parser("metadata", help="Show dataset metadata (parameters, stations, inventory)")
+    sub_meta.add_argument("kind", choices=["parameters", "stations", "inventory"], help="Type of metadata to show")
+    sub_meta.add_argument("dataset", help="Dataset name (e.g. 'smn')")
+    sub_meta.set_defaults(func=cmd_metadata)
 
     # --- foehn load ---
     sub_load = subparsers.add_parser("load", help="Load a dataset and print a preview")

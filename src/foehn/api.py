@@ -76,6 +76,99 @@ def to_parquet(
     convert_to_parquet(dataset, raw_dir, parquet_dir)
 
 
+def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
+    """Fetch a collection-level metadata CSV from the STAC API.
+
+    Args:
+        dataset: Dataset name (e.g. "smn").
+        suffix: Metadata file suffix (e.g. "_meta_parameters").
+
+    Returns:
+        A Polars DataFrame with the parsed CSV contents.
+    """
+    if dataset not in COLLECTIONS:
+        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
+
+    collection_id = COLLECTIONS[dataset]
+    session = _retry_session()
+
+    coll = get_collection_metadata(collection_id)
+    for asset_info in coll.get("assets", {}).values():
+        href = asset_info.get("href", "")
+        if href.endswith(".csv") and suffix in href:
+            _validate_href(href)
+            resp = session.get(href, timeout=60)
+            resp.raise_for_status()
+            try:
+                content = resp.content.decode("windows-1252")
+            except UnicodeDecodeError:
+                content = resp.content.decode("utf-8")
+            return pl.read_csv(content.encode("utf-8"), separator=";")
+
+    raise ValueError(f"No {suffix} metadata found for dataset {dataset!r}.")
+
+
+def parameters(dataset: str) -> pl.DataFrame:
+    """Fetch parameter metadata for a dataset.
+
+    Returns a DataFrame with columns: shortname, description, unit, type,
+    granularity, decimals, group.
+
+    Args:
+        dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
+    """
+    df = _fetch_metadata_csv(dataset, "_meta_parameters")
+    return df.select(
+        pl.col("parameter_shortname").alias("shortname"),
+        pl.col("parameter_description_en").alias("description"),
+        pl.col("parameter_unit").alias("unit"),
+        pl.col("parameter_datatype").alias("type"),
+        pl.col("parameter_granularity").alias("granularity"),
+        pl.col("parameter_decimals").alias("decimals"),
+        pl.col("parameter_group_en").alias("group"),
+    )
+
+
+def stations(dataset: str) -> pl.DataFrame:
+    """Fetch station metadata for a dataset.
+
+    Returns a DataFrame with columns: abbr, name, canton, altitude,
+    lat, lon, data_since.
+
+    Args:
+        dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
+    """
+    df = _fetch_metadata_csv(dataset, "_meta_stations")
+    return df.select(
+        pl.col("station_abbr").alias("abbr"),
+        pl.col("station_name").alias("name"),
+        pl.col("station_canton").alias("canton"),
+        pl.col("station_height_masl").alias("altitude"),
+        pl.col("station_coordinates_wgs84_lat").alias("lat"),
+        pl.col("station_coordinates_wgs84_lon").alias("lon"),
+        pl.col("station_data_since").alias("data_since"),
+    )
+
+
+def inventory(dataset: str) -> pl.DataFrame:
+    """Fetch the data inventory for a dataset.
+
+    Returns a DataFrame with columns: station, parameter, data_since,
+    data_till, owner.
+
+    Args:
+        dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
+    """
+    df = _fetch_metadata_csv(dataset, "_meta_datainventory")
+    return df.select(
+        pl.col("station_abbr").alias("station"),
+        pl.col("parameter_shortname").alias("parameter"),
+        pl.col("data_since"),
+        pl.col("data_till"),
+        pl.col("owner"),
+    )
+
+
 def load(
     dataset: str,
     *,

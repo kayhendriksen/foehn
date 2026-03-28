@@ -171,6 +171,11 @@ df = foehn.load("smn", station=["BER", "ZUR"], frequency=["d", "h"])
 # Include historical data
 df = foehn.load("smn", station="BER", frequency="d", time_slice=["historical", "recent"])
 
+# Explore dataset metadata (fetched live from the API)
+foehn.parameters("smn")   # column name mappings: shortname, description, unit, type, ...
+foehn.stations("smn")     # station info: abbr, name, canton, altitude, lat, lon, ...
+foehn.inventory("smn")    # what each station measures and since when
+
 # Download a single dataset to disk
 foehn.download("smn", data_dir="./data/meteoswiss")
 
@@ -226,6 +231,16 @@ foehn to-parquet smn        # single dataset
 | Flag | Description |
 |---|---|
 | `--data-dir PATH` | Root data directory |
+
+### `foehn metadata KIND DATASET`
+
+Show dataset metadata fetched live from the API. `KIND` is one of `parameters`, `stations`, or `inventory`.
+
+```bash
+foehn metadata parameters smn   # what each column name means
+foehn metadata stations smn     # station locations and info
+foehn metadata inventory smn    # which station has which parameter
+```
 
 ### `foehn load DATASET`
 

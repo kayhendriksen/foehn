@@ -1,6 +1,6 @@
 """foehn — Download MeteoSwiss Open Government Data and convert to Parquet."""
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 
 try:
     import polars as pl
@@ -13,6 +13,6 @@ except Exception as exc:
         '  pip install "foehn[databricks]"   # or: pip install polars-lts-cpu\n'
     ) from exc
 
-from foehn.api import download, list_datasets, load, to_parquet
+from foehn.api import download, inventory, list_datasets, load, parameters, stations, to_parquet
 
-__all__ = ["__version__", "download", "list_datasets", "load", "to_parquet"]
+__all__ = ["__version__", "download", "inventory", "list_datasets", "load", "parameters", "stations", "to_parquet"]

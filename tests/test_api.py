@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 
 import foehn
-from foehn.api import download, list_datasets, load, to_parquet
+from foehn.api import download, inventory, list_datasets, load, parameters, stations, to_parquet
 from foehn.collections import COLLECTIONS
 
 
@@ -336,3 +336,118 @@ def test_load_station_case_insensitive(mock_session, mock_meta, mock_items):
     df = load("smn", station="ber", frequency="d")
     assert isinstance(df, pl.DataFrame)
     assert session.get.call_count == 1
+
+
+# --- metadata tests ---
+
+_PARAMS_CSV = (
+    "parameter_shortname;parameter_description_de;parameter_description_fr;"
+    "parameter_description_it;parameter_description_en;parameter_group_de;"
+    "parameter_group_fr;parameter_group_it;parameter_group_en;"
+    "parameter_granularity;parameter_decimals;parameter_datatype;parameter_unit\n"
+    "tre200d0;Temp de;Temp fr;Temp it;Air temperature 2m daily mean;"
+    "Temperatur;Température;Temperatura;Temperature;D;1;Float;°C\n"
+)
+
+_STATIONS_CSV = (
+    "station_abbr;station_name;station_canton;station_wigos_id;station_type_de;"
+    "station_type_fr;station_type_it;station_type_en;station_dataowner;"
+    "station_data_since;station_height_masl;station_height_barometer_masl;"
+    "station_coordinates_lv95_east;station_coordinates_lv95_north;"
+    "station_coordinates_wgs84_lat;station_coordinates_wgs84_lon;"
+    "station_exposition_de;station_exposition_fr;station_exposition_it;"
+    "station_exposition_en;station_url_de;station_url_fr;station_url_it;station_url_en\n"
+    "BER;Bern;BE;0-20000-0-06631;Auto;Auto;Auto;Auto;MeteoSchweiz;"
+    "01.01.1864;553.0;554.0;2601933.0;1199885.0;46.9508;7.4394;"
+    "Ebene;Plaine;Pianura;plain;url_de;url_fr;url_it;url_en\n"
+)
+
+_INVENTORY_CSV = (
+    "station_abbr;parameter_shortname;meas_cat_nr;data_since;data_till;owner\n"
+    "BER;tre200d0;1;01.01.1864 00:00;;MeteoSchweiz\n"
+)
+
+
+def _stac_assets(suffix, href):
+    return {"assets": {suffix: {"href": href}}}
+
+
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_parameters_returns_dataframe(mock_session, mock_meta):
+    mock_meta.return_value = _stac_assets("params", "https://data.geo.admin.ch/smn/ogd-smn_meta_parameters.csv")
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_PARAMS_CSV.encode("windows-1252")))
+    mock_session.return_value = session
+
+    df = parameters("smn")
+
+    assert isinstance(df, pl.DataFrame)
+    assert df.columns == ["shortname", "description", "unit", "type", "granularity", "decimals", "group"]
+    assert df["shortname"][0] == "tre200d0"
+    assert df["description"][0] == "Air temperature 2m daily mean"
+    assert df["unit"][0] == "°C"
+
+
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_stations_returns_dataframe(mock_session, mock_meta):
+    mock_meta.return_value = _stac_assets("stations", "https://data.geo.admin.ch/smn/ogd-smn_meta_stations.csv")
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_STATIONS_CSV))
+    mock_session.return_value = session
+
+    df = stations("smn")
+
+    assert isinstance(df, pl.DataFrame)
+    assert df.columns == ["abbr", "name", "canton", "altitude", "lat", "lon", "data_since"]
+    assert df["abbr"][0] == "BER"
+    assert df["name"][0] == "Bern"
+    assert df["canton"][0] == "BE"
+
+
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_inventory_returns_dataframe(mock_session, mock_meta):
+    mock_meta.return_value = _stac_assets("inv", "https://data.geo.admin.ch/smn/ogd-smn_meta_datainventory.csv")
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_INVENTORY_CSV))
+    mock_session.return_value = session
+
+    df = inventory("smn")
+
+    assert isinstance(df, pl.DataFrame)
+    assert df.columns == ["station", "parameter", "data_since", "data_till", "owner"]
+    assert df["station"][0] == "BER"
+    assert df["parameter"][0] == "tre200d0"
+
+
+def test_parameters_unknown_dataset_raises():
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        parameters("nonexistent")
+
+
+def test_stations_unknown_dataset_raises():
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        stations("nonexistent")
+
+
+def test_inventory_unknown_dataset_raises():
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        inventory("nonexistent")
+
+
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_metadata_no_matching_asset_raises(mock_session, mock_meta):
+    mock_meta.return_value = {"assets": {}}
+    mock_session.return_value = MagicMock()
+
+    with pytest.raises(ValueError, match="No _meta_parameters metadata found"):
+        parameters("smn")
+
+
+def test_metadata_exported_from_foehn():
+    assert callable(foehn.parameters)
+    assert callable(foehn.stations)
+    assert callable(foehn.inventory)
