@@ -174,9 +174,9 @@ def download_collection(
 
         # MeteoSwiss CSVs are Windows-1252; re-encode to UTF-8
         try:
-            content = resp.content.decode("windows-1252")
+            content = resp.content.decode("utf-8-sig")
         except UnicodeDecodeError:
-            content = resp.content.decode("utf-8")
+            content = resp.content.decode("windows-1252")
         filepath.write_text(content, encoding="utf-8")
 
         new_etag = resp.headers.get("ETag")
@@ -217,9 +217,9 @@ def download_metadata(collection_key: str, output_dir: Path):
         resp = _retry_session().get(href, timeout=60)
         resp.raise_for_status()
         try:
-            content = resp.content.decode("windows-1252")
+            content = resp.content.decode("utf-8-sig")
         except UnicodeDecodeError:
-            content = resp.content.decode("utf-8")
+            content = resp.content.decode("windows-1252")
         filepath.write_text(content, encoding="utf-8")
         downloaded += 1
         print(f"  Metadata: {filename}", flush=True)

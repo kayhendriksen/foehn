@@ -100,9 +100,9 @@ def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
             resp = session.get(href, timeout=60)
             resp.raise_for_status()
             try:
-                content = resp.content.decode("windows-1252")
+                content = resp.content.decode("utf-8-sig")
             except UnicodeDecodeError:
-                content = resp.content.decode("utf-8")
+                content = resp.content.decode("windows-1252")
             return pl.read_csv(content.encode("utf-8"), separator=";")
 
     raise ValueError(f"No {suffix} metadata found for dataset {dataset!r}.")
@@ -249,9 +249,9 @@ def load(
             resp = session.get(href, timeout=60)
             resp.raise_for_status()
             try:
-                content = resp.content.decode("windows-1252")
+                content = resp.content.decode("utf-8-sig")
             except UnicodeDecodeError:
-                content = resp.content.decode("utf-8")
+                content = resp.content.decode("windows-1252")
             metadata_types = _parse_metadata_types(content)
             break
 
@@ -302,9 +302,9 @@ def load(
         resp = session.get(href, timeout=60)
         resp.raise_for_status()
         try:
-            content = resp.content.decode("windows-1252")
+            content = resp.content.decode("utf-8-sig")
         except UnicodeDecodeError:
-            content = resp.content.decode("utf-8")
+            content = resp.content.decode("windows-1252")
         df = parse_csv_bytes(content.encode("utf-8"), metadata_types)
         frames.append(df)
 
