@@ -6,7 +6,15 @@ import polars as pl
 import pytest
 
 import foehn
-from foehn.api import download, inventory, list_datasets, load, parameters, stations, to_parquet
+from foehn.api import (
+    download,
+    inventory,
+    list_datasets,
+    load,
+    parameters,
+    stations,
+    to_parquet,
+)
 from foehn.collections import COLLECTIONS
 
 

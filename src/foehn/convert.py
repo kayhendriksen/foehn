@@ -122,47 +122,76 @@ def parse_csv_bytes(
 
 
 def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
-    """Convert all CSVs in a collection's raw folder to Parquet.
+    """Convert all CSVs in a collection's raw folder to combined Parquet files.
+
+    Per-station CSVs are grouped by frequency and time slice, then
+    concatenated into a single Parquet file per group.  For example,
+    all ``ogd-smn_*_d_recent.csv`` files become ``smn_d_recent.parquet``.
 
     Args:
         collection_key: Key from COLLECTIONS (e.g. "smn").
         raw_dir: Root raw download directory (CSVs in raw_dir/<key>/).
         parquet_dir: Root parquet directory (output to parquet_dir/<key>/).
     """
+    from foehn.collections import COLLECTIONS, NO_GRANULARITY_COLLECTIONS
+
     csv_dir = raw_dir / collection_key
     out_dir = parquet_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
     csv_files = sorted(csv_dir.glob("*.csv"))
+    csv_files = [f for f in csv_files if "_meta_" not in f.name]
     if not csv_files:
         return
 
     # Load parameter type info from metadata once for the whole collection.
     metadata_types = _load_metadata_types(csv_dir)
 
+    # Derive the filename prefix from the collection ID (e.g. "ogd-smn").
+    prefix = COLLECTIONS[collection_key].rsplit(".", 1)[-1]
+    no_granularity = collection_key in NO_GRANULARITY_COLLECTIONS
+
+    # Group CSVs by (frequency, time_slice).
+    groups: dict[tuple[str, ...], list[Path]] = {}
+    for csv_path in csv_files:
+        suffix_part = csv_path.stem[len(prefix) + 1 :]  # e.g. "ber_d_recent"
+        parts = suffix_part.split("_")
+        if no_granularity:
+            group_key: tuple[str, ...] = ()
+        elif len(parts) > 2:
+            group_key = (parts[1], parts[2])  # (frequency, time_slice)
+        else:
+            group_key = (parts[1],) if len(parts) > 1 else ()  # (frequency,)
+        groups.setdefault(group_key, []).append(csv_path)
+
     print(f"Converting {collection_key} to Parquet:", flush=True)
     converted = 0
     skipped = 0
-    total = len(csv_files)
-    for i, csv_path in enumerate(csv_files, 1):
-        # Skip metadata files – they are not data CSVs.
-        if "_meta_" in csv_path.name:
-            total -= 1
-            continue
+    for group_key, files in sorted(groups.items()):
+        # Output name: smn_d_recent.parquet, smn_d.parquet, or smn.parquet
+        if group_key:
+            out_name = f"{collection_key}_{'_'.join(group_key)}.parquet"
+        else:
+            out_name = f"{collection_key}.parquet"
+        parquet_path = out_dir / out_name
 
-        parquet_path = out_dir / csv_path.with_suffix(".parquet").name
+        # Skip if parquet is already newer than all CSVs in the group.
+        if parquet_path.exists():
+            parquet_mtime = parquet_path.stat().st_mtime
+            if all(f.stat().st_mtime <= parquet_mtime for f in files):
+                skipped += 1
+                continue
 
-        # Skip if parquet is already newer than csv
-        if parquet_path.exists() and parquet_path.stat().st_mtime >= csv_path.stat().st_mtime:
-            skipped += 1
-            continue
-
-        print(f"  [{i}/{total}] {csv_path.name}...", end="", flush=True)
+        print(f"  {out_name} ({len(files)} files)...", end="", flush=True)
 
         try:
+            frames: list[pl.DataFrame] = []
             overrides: dict[str, pl.DataType] = {}
-            df = parse_csv_bytes(csv_path.read_bytes(), metadata_types, _fallback_overrides=overrides)
-            df.write_parquet(parquet_path, compression="zstd")
+            for csv_path in files:
+                df = parse_csv_bytes(csv_path.read_bytes(), metadata_types, _fallback_overrides=overrides)
+                frames.append(df)
+            combined = pl.concat(frames, how="diagonal_relaxed")
+            combined.write_parquet(parquet_path, compression="zstd")
             converted += 1
             if overrides:
                 fixed = ", ".join(f"{c}→float" for c in overrides)
