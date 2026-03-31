@@ -77,6 +77,7 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/foehn"]
