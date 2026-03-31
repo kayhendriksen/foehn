@@ -52,9 +52,8 @@ targets:
       catalog: main
 
 # ── Shared cluster template ───────────────────────────────────────────────────
-# Single-node: download + Polars conversion don't need distributed Spark.
-# The ingest step uses local Spark (spark.master=local[*]) which is fine for
-# writing Delta tables from pre-built Parquet files.
+# Single-node: download uses requests, CSV parsing uses Polars (streaming).
+# Spark runs local[*] only for the Delta table writes — no distributed compute.
 
 _worker: &worker
   job_cluster_key: worker
@@ -92,19 +91,21 @@ resources:
 
       tasks:
         - task_key: download
-          description: "foehn --recent → Parquet files written to Unity Catalog Volume"
+          description: "foehn --recent → raw CSVs written to Unity Catalog Volume"
           job_cluster_key: worker
           python_wheel_task:
             package_name: foehn
             entry_point: foehn
             parameters:
+              - "download"
+              - "--no-parquet"
               - "--data-dir"
               - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
           libraries:
             - whl: ./dist/foehn-*.whl
 
         - task_key: ingest
-          description: "Parquet → Delta tables in ${var.catalog}.${var.schema}"
+          description: "CSV → Polars (streaming) → Spark → Delta tables in ${var.catalog}.${var.schema}"
           depends_on:
             - task_key: download
           job_cluster_key: worker
@@ -144,27 +145,30 @@ resources:
 
       tasks:
         - task_key: download_historical
-          description: "foehn --historical → Parquet files in Unity Catalog Volume"
+          description: "foehn --historical → raw CSVs in Unity Catalog Volume"
           job_cluster_key: worker
           python_wheel_task:
             package_name: foehn
             entry_point: foehn
             parameters:
+              - "download"
               - "--historical"
               - "--full-refresh"
+              - "--no-parquet"
               - "--data-dir"
               - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
           libraries:
             - whl: ./dist/foehn-*.whl
 
         - task_key: ingest_historical
-          description: "Parquet → Delta tables (mergeSchema handles new columns)"
+          description: "CSV → Polars (streaming + chunked) → Spark → Delta tables"
           depends_on:
             - task_key: download_historical
           job_cluster_key: worker
           spark_python_task:
             python_file: ./scripts/ingest_delta.py
             parameters:
+              - "--historical"
               - "--catalog"
               - "${var.catalog}"
               - "--schema"
