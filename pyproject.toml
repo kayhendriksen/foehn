@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "foehn"
-version = "0.2.10"
+version = "0.2.11"
 description = "Download MeteoSwiss Open Government Data and convert to Parquet / Delta tables"
 readme = "README.md"
 license = "MIT"
@@ -45,6 +45,9 @@ databricks = [
     "pyspark>=4.0,<5.0",
     "delta-spark>=4.0,<5.0",
 ]
+mcp = [
+    "mcp[cli]>=1.0",
+]
 dev = [
     "ruff>=0.9",
     "pytest>=8.0",
@@ -73,6 +76,7 @@ ignore = [
 "src/foehn/client.py" = ["T201"]
 "src/foehn/convert.py" = ["T201"]
 "src/foehn/stac.py" = ["T201"]
+"src/foehn/mcp_server.py" = ["T201"]
 "scripts/*" = ["T201", "PERF203"]
 
 [tool.pytest.ini_options]

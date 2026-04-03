@@ -209,6 +209,12 @@ def cmd_metadata(args: argparse.Namespace) -> None:
     print(f"\n[{df.shape[0]} rows]")
 
 
+def cmd_mcp(args: argparse.Namespace) -> None:
+    from foehn.mcp_server import run
+
+    run(transport=args.transport)
+
+
 def cmd_load(args: argparse.Namespace) -> None:
     from foehn.api import load
 
@@ -273,6 +279,16 @@ def main():
     sub_load.add_argument("--time-slice", nargs="+", help="Time slices (default: recent)")
     sub_load.add_argument("-n", type=int, default=None, help="Number of rows to show (default: 20)")
     sub_load.set_defaults(func=cmd_load)
+
+    # --- foehn mcp ---
+    sub_mcp = subparsers.add_parser("mcp", help="Start the MCP server for LLM integration")
+    sub_mcp.add_argument(
+        "--transport",
+        choices=["stdio", "sse"],
+        default="stdio",
+        help="Transport protocol (default: stdio)",
+    )
+    sub_mcp.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args()
     args.func(args)
