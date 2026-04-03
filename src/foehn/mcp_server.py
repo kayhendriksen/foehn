@@ -22,9 +22,7 @@ from foehn.collections import (
 logger = logging.getLogger(__name__)
 
 # Datasets that can be loaded as tabular data (CSV-backed).
-_LOADABLE_DATASETS = sorted(
-    k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS and k not in NETCDF_COLLECTIONS
-)
+_LOADABLE_DATASETS = sorted(k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS and k not in NETCDF_COLLECTIONS)
 _VALID_FREQUENCIES = {"t", "h", "d", "m", "y"}
 _VALID_TIME_SLICES = {"historical", "recent", "now"}
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
