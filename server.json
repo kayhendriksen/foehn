@@ -3,7 +3,7 @@
   "name": "io.github.kayhendriksen/foehn",
   "title": "foehn",
   "description": "Access Swiss meteorological open data from MeteoSwiss, powered by foehn",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "websiteUrl": "https://github.com/kayhendriksen/foehn",
   "repository": {
     "url": "https://github.com/kayhendriksen/foehn",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "foehn",
-      "version": "0.2.12",
+      "version": "0.2.13",
       "transport": {
         "type": "stdio"
       },
