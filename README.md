@@ -3,7 +3,7 @@
 </h1>
 
 <p align="center">
-  <strong>MeteoSwiss Open Data → Parquet → Databricks Delta tables</strong>
+  <strong>MeteoSwiss Open Data → Python API, CLI, MCP server, Parquet & Delta tables</strong>
 </p>
 
 <p align="center">
@@ -23,11 +23,12 @@
 
 ---
 
-foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) collection via the STAC API, converts CSV/TXT to Parquet with [Polars](https://pola.rs), and optionally ingests everything into [Databricks](https://www.databricks.com) Unity Catalog Delta tables on a daily schedule.
+foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) collection via the STAC API, converts CSV/TXT to Parquet with [Polars](https://pola.rs), and optionally ingests everything into [Databricks](https://www.databricks.com) Unity Catalog Delta tables on a daily schedule. It also ships an [MCP server](https://modelcontextprotocol.io) so LLMs can query Swiss weather data directly.
 
 ## Why foehn?
 
 - **20+ collections in one command** — weather stations, radar, hail maps, forecasts, climate scenarios, and more
+- **MCP server for LLMs** — give your favorite LLM live access to MeteoSwiss data with the MCP server
 - **Significantly smaller on disk** — columnar Parquet with Zstandard compression vs. raw CSVs
 - **Incremental by default** — only re-downloads files that changed since your last run, tracked via `_last_run.json`
 - **No Spark required locally** — download + conversion uses Polars only; Spark is optional for Delta ingestion
@@ -187,6 +188,39 @@ foehn.download("smn", time_slice=["historical", "recent"])
 # Convert downloaded CSVs to Parquet
 foehn.to_parquet("smn", data_dir="./data/meteoswiss")
 ```
+
+---
+
+## MCP server
+
+foehn includes an [MCP server](https://modelcontextprotocol.io) that gives LLMs live access to MeteoSwiss data. It's published on the [MCP Registry](https://registry.modelcontextprotocol.io).
+
+```bash
+pip install "foehn[mcp]"
+```
+
+Add it to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "foehn": {
+      "command": "foehn",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Tools available:**
+
+| Tool | Description |
+|---|---|
+| `list_datasets` | Browse all MeteoSwiss datasets with metadata |
+| `load_data` | Fetch weather measurements as rows |
+| `get_parameters` | Look up what each column measures |
+| `get_stations` | Find station abbreviations and locations |
+| `get_inventory` | Check data availability per station |
 
 ---
 
