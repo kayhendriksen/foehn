@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 import foehn
 from foehn.collections import (
@@ -26,6 +28,14 @@ _LOADABLE_DATASETS = sorted(k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS
 _VALID_FREQUENCIES = {"t", "h", "d", "m", "y"}
 _VALID_TIME_SLICES = {"historical", "recent", "now"}
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
+
+# All tools are read-only queries against the MeteoSwiss API.
+_READ_ONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
 
 mcp = FastMCP(
     "foehn",
@@ -46,11 +56,53 @@ mcp = FastMCP(
 )
 
 
+# ── Structured output models ───────────────────────────────────────────────
+
+
+class Dataset(BaseModel):
+    dataset: str = Field(description="Short name used in API calls (e.g. 'smn')")
+    collection_id: str = Field(description="STAC collection ID")
+    category: str = Field(description="MeteoSwiss category: A (ground), C (climate), D (radar), E (forecast)")
+    subcategory: str = Field(description="Subcategory code (e.g. 'A1')")
+    description: str = Field(description="Human-readable description")
+    format: str = Field(description="Data format (CSV, GRIB2, NetCDF, etc.)")
+    frequencies: list[str] = Field(description="Supported time frequencies (t, h, d, m, y)")
+    time_slices: list[str] = Field(description="Available time slices (historical, recent, now)")
+
+
+class Parameter(BaseModel):
+    shortname: str = Field(description="Column name in data files (e.g. 'tre200s0')")
+    description: str = Field(description="Human-readable description (e.g. 'Air temperature 2m above ground')")
+    unit: str = Field(description="Measurement unit (e.g. '°C', 'mm', 'hPa')")
+    type: str = Field(description="Data type")
+    granularity: str = Field(description="Temporal granularity")
+    decimals: int | str = Field(description="Number of decimal places")
+    group: str = Field(description="Parameter group (e.g. 'Temperature', 'Precipitation')")
+
+
+class Station(BaseModel):
+    abbr: str = Field(description="Station abbreviation (e.g. 'BER' for Bern)")
+    name: str = Field(description="Full station name")
+    canton: str = Field(description="Swiss canton code (e.g. 'BE', 'ZH')")
+    altitude: int | float = Field(description="Altitude in metres above sea level")
+    lat: float = Field(description="WGS84 latitude")
+    lon: float = Field(description="WGS84 longitude")
+    data_since: str = Field(description="Date measurements started (YYYY-MM-DD)")
+
+
+class InventoryEntry(BaseModel):
+    station: str = Field(description="Station abbreviation")
+    parameter: str = Field(description="Parameter shortname")
+    data_since: str = Field(description="Start of available data")
+    data_till: str = Field(description="End of available data")
+    owner: str = Field(description="Data owner")
+
+
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 
-@mcp.tool()
-def list_datasets(category: str | None = None) -> list[dict]:
+@mcp.tool(title="List datasets", annotations=_READ_ONLY)
+def list_datasets(category: str | None = None) -> list[Dataset]:
     """List all available MeteoSwiss datasets.
 
     Returns dataset name, collection ID, category, description, format,
@@ -61,15 +113,15 @@ def list_datasets(category: str | None = None) -> list[dict]:
             "C" (climate), "D" (radar), "E" (forecasts). If omitted, returns all.
     """
     if category and category.upper() not in _VALID_CATEGORIES:
-        return [{"error": f"Invalid category {category!r}. Options: A, C, D, E."}]
+        raise ValueError(f"Invalid category {category!r}. Valid options: A, C, D, E.")
 
     datasets = foehn.list_datasets()
     if category:
         datasets = [d for d in datasets if d.get("category") == category.upper()]
-    return datasets
+    return [Dataset(**d) for d in datasets]
 
 
-@mcp.tool()
+@mcp.tool(title="Load data", annotations=_READ_ONLY)
 def load_data(
     dataset: str,
     station: list[str] | None = None,
@@ -99,14 +151,14 @@ def load_data(
             or coarser frequency to stay within limits on large datasets.
     """
     if dataset not in COLLECTIONS:
-        return [{"error": f"Unknown dataset {dataset!r}. Call list_datasets() to see options."}]
+        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
     if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
         fmt = COLLECTION_META[dataset]["format"]
-        return [{"error": f"Dataset {dataset!r} is {fmt} (binary/grid) and cannot be loaded as tabular data."}]
+        raise ValueError(f"Dataset {dataset!r} is {fmt} (binary/grid) and cannot be loaded as tabular data.")
     if frequency and frequency.lower() not in _VALID_FREQUENCIES:
-        return [{"error": f"Invalid frequency {frequency!r}. Options: t, h, d, m, y."}]
+        raise ValueError(f"Invalid frequency {frequency!r}. Valid options: t, h, d, m, y.")
     if time_slice and time_slice.lower() not in _VALID_TIME_SLICES:
-        return [{"error": f"Invalid time_slice {time_slice!r}. Options: historical, recent, now."}]
+        raise ValueError(f"Invalid time_slice {time_slice!r}. Valid options: historical, recent, now.")
 
     limit = min(max(1, limit), 500)
 
@@ -118,17 +170,12 @@ def load_data(
     if time_slice:
         kwargs["time_slice"] = time_slice
 
-    try:
-        df = foehn.load(dataset, **kwargs)
-    except Exception as exc:
-        logger.exception("load_data failed for %s", dataset)
-        return [{"error": f"Failed to load data: {exc}"}]
-
+    df = foehn.load(dataset, **kwargs)
     return df.head(limit).to_dicts()
 
 
-@mcp.tool()
-def get_parameters(dataset: str) -> list[dict]:
+@mcp.tool(title="Get parameters", annotations=_READ_ONLY)
+def get_parameters(dataset: str) -> list[Parameter]:
     """Get parameter descriptions for a dataset.
 
     Returns what measurements are available (e.g. temperature, pressure,
@@ -141,17 +188,13 @@ def get_parameters(dataset: str) -> list[dict]:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
     """
     if dataset not in COLLECTIONS:
-        return [{"error": f"Unknown dataset {dataset!r}. Call list_datasets() to see options."}]
+        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
 
-    try:
-        return foehn.parameters(dataset).to_dicts()
-    except Exception as exc:
-        logger.exception("get_parameters failed for %s", dataset)
-        return [{"error": f"Failed to fetch parameters: {exc}"}]
+    return [Parameter(**row) for row in foehn.parameters(dataset).to_dicts()]
 
 
-@mcp.tool()
-def get_stations(dataset: str) -> list[dict]:
+@mcp.tool(title="Get stations", annotations=_READ_ONLY)
+def get_stations(dataset: str) -> list[Station]:
     """Get station metadata for a dataset.
 
     Returns station abbreviation, name, canton, altitude (m a.s.l.),
@@ -161,17 +204,13 @@ def get_stations(dataset: str) -> list[dict]:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
     """
     if dataset not in COLLECTIONS:
-        return [{"error": f"Unknown dataset {dataset!r}. Call list_datasets() to see options."}]
+        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
 
-    try:
-        return foehn.stations(dataset).to_dicts()
-    except Exception as exc:
-        logger.exception("get_stations failed for %s", dataset)
-        return [{"error": f"Failed to fetch stations: {exc}"}]
+    return [Station(**row) for row in foehn.stations(dataset).to_dicts()]
 
 
-@mcp.tool()
-def get_inventory(dataset: str) -> list[dict]:
+@mcp.tool(title="Get inventory", annotations=_READ_ONLY)
+def get_inventory(dataset: str) -> list[InventoryEntry]:
     """Get the data inventory for a dataset.
 
     Shows which parameters are available at which stations, and the time
@@ -181,13 +220,9 @@ def get_inventory(dataset: str) -> list[dict]:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
     """
     if dataset not in COLLECTIONS:
-        return [{"error": f"Unknown dataset {dataset!r}. Call list_datasets() to see options."}]
+        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
 
-    try:
-        return foehn.inventory(dataset).to_dicts()
-    except Exception as exc:
-        logger.exception("get_inventory failed for %s", dataset)
-        return [{"error": f"Failed to fetch inventory: {exc}"}]
+    return [InventoryEntry(**row) for row in foehn.inventory(dataset).to_dicts()]
 
 
 # ── Resource ─────────────────────────────────────────────────────────────────

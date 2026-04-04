@@ -312,3 +312,5 @@ This deploys two jobs:
 ## License
 
 MIT
+
+<!-- mcp-name: io.github.kayhendriksen/foehn -->

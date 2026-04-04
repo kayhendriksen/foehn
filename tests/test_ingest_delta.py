@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
-
 from conftest import FIXTURES_DIR
 
 # We can't import the script directly (it has a top-level pyspark import),

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kayhendriksen/foehn",
+  "title": "foehn",
+  "description": "Access Swiss meteorological open data from MeteoSwiss, powered by foehn",
+  "version": "0.2.12",
+  "websiteUrl": "https://github.com/kayhendriksen/foehn",
+  "repository": {
+    "url": "https://github.com/kayhendriksen/foehn",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "foehn",
+      "version": "0.2.12",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "valueHint": "mcp"
+        }
+      ]
+    }
+  ]
+}
