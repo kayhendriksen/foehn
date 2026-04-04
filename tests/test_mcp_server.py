@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
 
 import polars as pl
@@ -16,9 +17,11 @@ from foehn.mcp_server import (
     _VALID_FREQUENCIES,
     _VALID_TIME_SLICES,
     Dataset,
+    DataSummary,
     InventoryEntry,
     Parameter,
     Station,
+    describe_data,
     get_inventory,
     get_parameters,
     get_stations,
@@ -267,6 +270,389 @@ class TestLoadData:
         assert isinstance(result[0], dict)
         assert "station" in result[0]
 
+    @patch("foehn.mcp_server.foehn.load")
+    def test_year_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2023, 1, 1),
+                    datetime(2024, 1, 1),
+                    datetime(2025, 1, 1),
+                ],
+                "temp": [18.0, 19.0, 20.0],
+            }
+        )
+        result = load_data("smn", year=[2025], limit=500)
+        assert len(result) == 1
+        assert result[0]["temp"] == 20.0
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_year_filter_multiple_years(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2023, 1, 1),
+                    datetime(2024, 1, 1),
+                    datetime(2025, 1, 1),
+                ],
+                "temp": [18.0, 19.0, 20.0],
+            }
+        )
+        result = load_data("smn", year=[2024, 2025], limit=500)
+        assert len(result) == 2
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_columns_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER"],
+                "reference_timestamp": [datetime(2025, 1, 1)],
+                "temp": [20.0],
+                "precip": [5.0],
+                "wind": [10.0],
+            }
+        )
+        result = load_data("smn", columns=["temp"], limit=500)
+        assert len(result) == 1
+        assert set(result[0].keys()) == {"station_abbr", "reference_timestamp", "temp"}
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_columns_filter_ignores_nonexistent(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER"],
+                "reference_timestamp": [datetime(2025, 1, 1)],
+                "temp": [20.0],
+            }
+        )
+        result = load_data("smn", columns=["temp", "nonexistent"], limit=500)
+        assert set(result[0].keys()) == {"station_abbr", "reference_timestamp", "temp"}
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_year_and_columns_combined(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER"],
+                "reference_timestamp": [datetime(2024, 1, 1), datetime(2025, 1, 1)],
+                "temp": [19.0, 20.0],
+                "precip": [3.0, 5.0],
+            }
+        )
+        result = load_data("smn", year=[2025], columns=["temp"], limit=500)
+        assert len(result) == 1
+        assert set(result[0].keys()) == {"station_abbr", "reference_timestamp", "temp"}
+        assert result[0]["temp"] == 20.0
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_month_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 15),
+                    datetime(2025, 6, 15),
+                    datetime(2025, 7, 15),
+                ],
+                "temp": [0.0, 20.0, 25.0],
+            }
+        )
+        result = load_data("smn", month=[6, 7], limit=500)
+        assert len(result) == 2
+        assert result[0]["temp"] == 20.0
+        assert result[1]["temp"] == 25.0
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_year_and_month_combined(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2024, 7, 1),
+                    datetime(2025, 1, 1),
+                    datetime(2025, 7, 1),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [22.0, 0.0, 25.0, -2.0],
+            }
+        )
+        result = load_data("smn", year=[2025], month=[7], limit=500)
+        assert len(result) == 1
+        assert result[0]["temp"] == 25.0
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_date_from_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 6, 1),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 20.0, -1.0],
+            }
+        )
+        result = load_data("smn", date_from="2025-06-01", limit=500)
+        assert len(result) == 2
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_date_to_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 6, 1),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 20.0, -1.0],
+            }
+        )
+        result = load_data("smn", date_to="2025-06-01", limit=500)
+        assert len(result) == 2
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_date_range_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 6, 1),
+                    datetime(2025, 8, 31),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 20.0, 25.0, -1.0],
+            }
+        )
+        result = load_data("smn", date_from="2025-06-01", date_to="2025-08-31", limit=500)
+        assert len(result) == 2
+        assert result[0]["temp"] == 20.0
+        assert result[1]["temp"] == 25.0
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_drop_null_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "ZUR", "GVE"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 1, 1),
+                    datetime(2025, 1, 1),
+                ],
+                "hail": [3, None, None],
+            }
+        )
+        result = load_data("smn", drop_null="hail", limit=500)
+        assert len(result) == 1
+        assert result[0]["station_abbr"] == "BER"
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_drop_null_nonexistent_column_ignored(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER"],
+                "reference_timestamp": [datetime(2025, 1, 1)],
+                "temp": [20.0],
+            }
+        )
+        result = load_data("smn", drop_null="nonexistent", limit=500)
+        assert len(result) == 1
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_sort_desc(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 6, 1),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 20.0, -1.0],
+            }
+        )
+        result = load_data("smn", sort="desc", limit=500)
+        assert len(result) == 3
+        assert result[0]["temp"] == -1.0  # December first
+        assert result[2]["temp"] == 0.0  # January last
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_sort_asc(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 12, 1),
+                    datetime(2025, 1, 1),
+                ],
+                "temp": [-1.0, 0.0],
+            }
+        )
+        result = load_data("smn", sort="asc", limit=500)
+        assert result[0]["temp"] == 0.0  # January first
+
+    def test_invalid_sort_raises(self):
+        with pytest.raises(ValueError, match="Invalid sort"):
+            load_data("smn", sort="random")
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_sort_desc_with_limit(self, mock_load):
+        """sort=desc + limit gets the most recent rows."""
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER"] * 5,
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 3, 1),
+                    datetime(2025, 6, 1),
+                    datetime(2025, 9, 1),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 5.0, 20.0, 15.0, -1.0],
+            }
+        )
+        result = load_data("smn", sort="desc", limit=2)
+        assert len(result) == 2
+        assert result[0]["temp"] == -1.0  # December
+        assert result[1]["temp"] == 15.0  # September
+
+
+# ── describe_data ────────────────────────────────────────────────────────────
+
+
+class TestDescribeData:
+    @patch("foehn.mcp_server.foehn.load")
+    def test_basic_summary(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "ZUR", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 1, 1),
+                    datetime(2025, 2, 1),
+                ],
+                "temp": [5.0, 3.0, 8.0],
+            }
+        )
+        result = describe_data("smn")
+        assert isinstance(result, DataSummary)
+        assert result.dataset == "smn"
+        assert result.total_rows == 3
+        assert sorted(result.stations) == ["BER", "ZUR"]
+        assert result.date_min is not None
+        assert result.date_max is not None
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_column_summaries(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER"],
+                "reference_timestamp": [datetime(2025, 1, 1), datetime(2025, 2, 1)],
+                "temp": [5.0, None],
+            }
+        )
+        result = describe_data("smn")
+        col_names = [c.name for c in result.columns]
+        assert "temp" in col_names
+        temp_col = next(c for c in result.columns if c.name == "temp")
+        assert temp_col.non_null_count == 1
+        assert temp_col.null_count == 1
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_with_year_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER"],
+                "reference_timestamp": [datetime(2024, 1, 1), datetime(2025, 1, 1)],
+                "temp": [19.0, 20.0],
+            }
+        )
+        result = describe_data("smn", year=[2025])
+        assert result.total_rows == 1
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_with_month_filter(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 7, 1),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 25.0, -1.0],
+            }
+        )
+        result = describe_data("smn", month=[7])
+        assert result.total_rows == 1
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_with_date_range(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER", "BER"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 6, 15),
+                    datetime(2025, 12, 1),
+                ],
+                "temp": [0.0, 20.0, -1.0],
+            }
+        )
+        result = describe_data("smn", date_from="2025-06-01", date_to="2025-08-31")
+        assert result.total_rows == 1
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_with_drop_null(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "ZUR", "GVE"],
+                "reference_timestamp": [
+                    datetime(2025, 1, 1),
+                    datetime(2025, 1, 1),
+                    datetime(2025, 1, 1),
+                ],
+                "hail": [3, None, None],
+            }
+        )
+        result = describe_data("smn", drop_null="hail")
+        assert result.total_rows == 1
+        assert result.stations == ["BER"]
+
+    def test_unknown_dataset_raises(self):
+        with pytest.raises(ValueError, match="Unknown dataset"):
+            describe_data("nonexistent")
+
+    def test_grib2_dataset_raises(self):
+        with pytest.raises(ValueError, match="binary/grid"):
+            describe_data("forecast_icon_ch1")
+
+    def test_invalid_frequency_raises(self):
+        with pytest.raises(ValueError, match="Invalid frequency"):
+            describe_data("smn", frequency="x")
+
+    def test_invalid_time_slice_raises(self):
+        with pytest.raises(ValueError, match="Invalid time_slice"):
+            describe_data("smn", time_slice="future")
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_empty_dataframe(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": pl.Series([], dtype=pl.Utf8),
+                "reference_timestamp": pl.Series([], dtype=pl.Datetime),
+                "temp": pl.Series([], dtype=pl.Float64),
+            }
+        )
+        result = describe_data("smn")
+        assert result.total_rows == 0
+        assert result.stations == []
+        assert result.date_min is None
+        assert result.date_max is None
+
 
 # ── get_parameters ───────────────────────────────────────────────────────────
 
@@ -380,6 +766,7 @@ class TestUsageGuide:
         assert "list_datasets()" in result
         assert "get_stations(dataset)" in result
         assert "get_parameters(dataset)" in result
+        assert "describe_data(" in result
         assert "load_data(" in result
 
     def test_contains_frequency_docs(self):
