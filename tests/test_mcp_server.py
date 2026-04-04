@@ -7,6 +7,8 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
+pytest.importorskip("mcp", reason="mcp not installed")
+
 from foehn.collections import COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
 from foehn.mcp_server import (
     _LOADABLE_DATASETS,
