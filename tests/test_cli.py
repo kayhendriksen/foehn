@@ -270,6 +270,49 @@ def test_load_with_filters():
     mock_load.assert_called_once_with("smn", station=["BER"], frequency=["d"], time_slice=["recent"])
 
 
+def test_load_with_post_filters():
+    fake_df = pl.DataFrame({"a": [1]})
+    argv = [
+        "foehn",
+        "load",
+        "smn",
+        "--station",
+        "BER",
+        "--frequency",
+        "d",
+        "--year",
+        "2025",
+        "--month",
+        "6",
+        "7",
+        "--date-from",
+        "2025-06-01",
+        "--date-to",
+        "2025-08-31",
+        "--columns",
+        "temp",
+        "precip",
+        "--drop-null",
+        "temp",
+        "--sort",
+        "desc",
+    ]
+    with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
+        main()
+    mock_load.assert_called_once_with(
+        "smn",
+        station=["BER"],
+        frequency=["d"],
+        year=[2025],
+        month=[6, 7],
+        date_from="2025-06-01",
+        date_to="2025-08-31",
+        columns=["temp", "precip"],
+        drop_null="temp",
+        sort="desc",
+    )
+
+
 # --- metadata subcommand ---
 
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "foehn"
 version = "0.2.14"
-description = "Download MeteoSwiss Open Government Data and convert to Parquet / Delta tables"
+description = "Python toolkit for Swiss weather data — download, query, and analyse MeteoSwiss Open Government Data"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -42,8 +42,8 @@ Issues = "https://github.com/kayhendriksen/foehn/issues"
 [project.optional-dependencies]
 databricks = [
     "polars-lts-cpu>=1.0",
-    "pyspark>=4.0,<5.0",
-    "delta-spark>=4.0,<5.0",
+    "pyspark>=3.5,<5.0",
+    "delta-spark>=2.4,<5.0",
 ]
 mcp = [
     "mcp[cli]>=1.0",

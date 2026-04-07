@@ -135,7 +135,7 @@ def _load_and_filter(
     drop_null: str | None,
     sort: str | None,
 ) -> pl.DataFrame:
-    """Load a dataset and apply all post-load filters."""
+    """Load a dataset and apply all filters via foehn.load()."""
     kwargs: dict = {}
     if station:
         kwargs["station"] = station
@@ -143,35 +143,21 @@ def _load_and_filter(
         kwargs["frequency"] = frequency
     if time_slice:
         kwargs["time_slice"] = time_slice
-
-    df = foehn.load(dataset, **kwargs)
-
-    # Time filters.
-    ts = "reference_timestamp"
     if year:
-        df = df.filter(pl.col(ts).dt.year().is_in(year))
+        kwargs["year"] = year
     if month:
-        df = df.filter(pl.col(ts).dt.month().is_in(month))
+        kwargs["month"] = month
     if date_from:
-        df = df.filter(pl.col(ts) >= pl.lit(date_from).str.to_datetime())
+        kwargs["date_from"] = date_from
     if date_to:
-        df = df.filter(pl.col(ts) <= pl.lit(date_to).str.to_datetime())
-
-    # Drop rows where a specific column is null.
-    if drop_null and drop_null in df.columns:
-        df = df.filter(pl.col(drop_null).is_not_null())
-
-    # Sort by timestamp.
-    if sort in ("asc", "desc"):
-        df = df.sort(ts, descending=(sort == "desc"))
-
-    # Column selection (always keep station_abbr + reference_timestamp).
+        kwargs["date_to"] = date_to
     if columns:
-        keep = ["station_abbr", "reference_timestamp"]
-        keep += [c for c in columns if c not in keep and c in df.columns]
-        df = df.select(keep)
-
-    return df
+        kwargs["columns"] = columns
+    if drop_null:
+        kwargs["drop_null"] = drop_null
+    if sort:
+        kwargs["sort"] = sort
+    return foehn.load(dataset, **kwargs)
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────

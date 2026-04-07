@@ -225,6 +225,20 @@ def cmd_load(args: argparse.Namespace) -> None:
         kwargs["frequency"] = args.frequency
     if args.time_slice:
         kwargs["time_slice"] = args.time_slice
+    if args.year:
+        kwargs["year"] = args.year
+    if args.month:
+        kwargs["month"] = args.month
+    if args.date_from:
+        kwargs["date_from"] = args.date_from
+    if args.date_to:
+        kwargs["date_to"] = args.date_to
+    if args.columns:
+        kwargs["columns"] = args.columns
+    if args.drop_null:
+        kwargs["drop_null"] = args.drop_null
+    if args.sort:
+        kwargs["sort"] = args.sort
 
     df = load(args.dataset, **kwargs)
 
@@ -277,6 +291,13 @@ def main():
     sub_load.add_argument("--station", nargs="+", help="Filter by station(s)")
     sub_load.add_argument("--frequency", nargs="+", help="Filter by frequency (t, h, d, m, y)")
     sub_load.add_argument("--time-slice", nargs="+", help="Time slices (default: recent)")
+    sub_load.add_argument("--year", nargs="+", type=int, help="Filter by year(s) (e.g. 2025 2026)")
+    sub_load.add_argument("--month", nargs="+", type=int, help="Filter by month(s) (1-12)")
+    sub_load.add_argument("--date-from", help="Start date inclusive (YYYY-MM-DD)")
+    sub_load.add_argument("--date-to", help="End date inclusive (YYYY-MM-DD)")
+    sub_load.add_argument("--columns", nargs="+", help="Only return these columns")
+    sub_load.add_argument("--drop-null", help="Drop rows where this column is null")
+    sub_load.add_argument("--sort", choices=["asc", "desc"], help="Sort by timestamp")
     sub_load.add_argument("-n", type=int, default=None, help="Number of rows to show (default: 20)")
     sub_load.set_defaults(func=cmd_load)
 

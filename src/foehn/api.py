@@ -175,6 +175,13 @@ def load(
     station: str | list[str] | None = None,
     frequency: str | list[str] | None = None,
     time_slice: str | list[str] | None = None,
+    year: int | list[int] | None = None,
+    month: int | list[int] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    columns: list[str] | None = None,
+    drop_null: str | None = None,
+    sort: str | None = None,
 ) -> pl.DataFrame:
     """Load a dataset and return it as an in-memory Polars DataFrame.
 
@@ -191,6 +198,15 @@ def load(
             If None, all frequencies are included.
         time_slice: Time slice(s) to include. Defaults to ["recent"].
             Options: "historical", "recent", "now". Can be a single string or list.
+        year: Filter to specific year(s) (e.g. 2025 or [2020, 2021, 2022]).
+        month: Filter to specific month(s) (1-12, e.g. 7 or [6, 7, 8] for summer).
+        date_from: Start date (inclusive), ISO format "YYYY-MM-DD".
+        date_to: End date (inclusive), ISO format "YYYY-MM-DD".
+        columns: Only return these columns. ``station_abbr`` and
+            ``reference_timestamp`` are always included.
+        drop_null: Drop rows where this column is null.
+        sort: Sort by timestamp. Options: "asc" (oldest first) or "desc"
+            (newest first).
 
     Returns:
         A Polars DataFrame containing all matching CSV data.
@@ -205,8 +221,14 @@ def load(
         # Hourly data for multiple stations
         df = foehn.load("smn", station=["BER", "ZUR"], frequency="h")
 
-        # All recent data (large!)
-        df = foehn.load("smn")
+        # Daily data for Bern, only January 2026
+        df = foehn.load("smn", station="BER", frequency="d", year=2026, month=1)
+
+        # Summer 2025 temperatures, sorted newest first
+        df = foehn.load("smn", station="BER", frequency="d",
+                        time_slice="historical", date_from="2025-06-01",
+                        date_to="2025-08-31", columns=["tre200d0"],
+                        sort="desc")
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
@@ -308,4 +330,27 @@ def load(
         df = parse_csv_bytes(content.encode("utf-8"), metadata_types)
         frames.append(df)
 
-    return pl.concat(frames, how="diagonal_relaxed")
+    df = pl.concat(frames, how="diagonal_relaxed")
+
+    # Post-load filters.
+    ts = "reference_timestamp"
+    if year is not None:
+        years = [year] if isinstance(year, int) else year
+        df = df.filter(pl.col(ts).dt.year().is_in(years))
+    if month is not None:
+        months = [month] if isinstance(month, int) else month
+        df = df.filter(pl.col(ts).dt.month().is_in(months))
+    if date_from is not None:
+        df = df.filter(pl.col(ts) >= pl.lit(date_from).str.to_datetime())
+    if date_to is not None:
+        df = df.filter(pl.col(ts) <= pl.lit(date_to).str.to_datetime())
+    if drop_null and drop_null in df.columns:
+        df = df.filter(pl.col(drop_null).is_not_null())
+    if sort in ("asc", "desc"):
+        df = df.sort(ts, descending=(sort == "desc"))
+    if columns:
+        keep = ["station_abbr", "reference_timestamp"]
+        keep += [c for c in columns if c not in keep and c in df.columns]
+        df = df.select(keep)
+
+    return df

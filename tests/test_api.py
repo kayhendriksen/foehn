@@ -459,3 +459,169 @@ def test_metadata_exported_from_foehn():
     assert callable(foehn.parameters)
     assert callable(foehn.stations)
     assert callable(foehn.inventory)
+
+
+# --- post-load filter tests ---
+
+# CSV with reference_timestamp for filter tests.
+_FILTER_CSV = (
+    "station_abbr;reference_timestamp;temp;precip\n"
+    "BER;2024-07-01T00:00:00;22.0;5.0\n"
+    "BER;2025-01-15T00:00:00;0.0;10.0\n"
+    "BER;2025-06-15T00:00:00;20.0;\n"
+    "BER;2025-07-15T00:00:00;25.0;8.0\n"
+    "BER;2025-12-01T00:00:00;-1.0;3.0\n"
+)
+
+
+def _setup_filter_mocks(mock_session, mock_meta, mock_items):
+    """Set up common mocks for filter tests."""
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = [
+        {"id": "BER", "assets": {"data": {"href": "https://data.geo.admin.ch/smn/ogd-smn_ber_d_recent.csv"}}},
+    ]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FILTER_CSV))
+    mock_session.return_value = session
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_year_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", year=2025)
+    assert len(df) == 4
+    assert all(ts.year == 2025 for ts in df["reference_timestamp"].to_list())
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_year_filter_list(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", year=[2024, 2025])
+    assert len(df) == 5
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_month_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", month=[6, 7])
+    assert len(df) == 3
+    assert all(ts.month in (6, 7) for ts in df["reference_timestamp"].to_list())
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_year_and_month_combined(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", year=2025, month=7)
+    assert len(df) == 1
+    assert df["temp"][0] == 25.0
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_date_from_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", date_from="2025-06-01")
+    assert len(df) == 3
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_date_to_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", date_to="2025-01-15")
+    assert len(df) == 2
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_date_range_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", date_from="2025-06-01", date_to="2025-08-31")
+    assert len(df) == 2
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_drop_null_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", drop_null="precip")
+    assert len(df) == 4
+    assert df["precip"].null_count() == 0
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_drop_null_nonexistent_column_ignored(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", drop_null="nonexistent")
+    assert len(df) == 5
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_sort_desc(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", sort="desc")
+    timestamps = df["reference_timestamp"].to_list()
+    assert timestamps == sorted(timestamps, reverse=True)
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_sort_asc(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", sort="asc")
+    timestamps = df["reference_timestamp"].to_list()
+    assert timestamps == sorted(timestamps)
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_columns_filter(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", columns=["temp"])
+    assert set(df.columns) == {"station_abbr", "reference_timestamp", "temp"}
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_columns_filter_ignores_nonexistent(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", columns=["temp", "nonexistent"])
+    assert set(df.columns) == {"station_abbr", "reference_timestamp", "temp"}
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_all_filters_combined(mock_session, mock_meta, mock_items):
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load(
+        "smn",
+        station="BER",
+        frequency="d",
+        year=2025,
+        month=[6, 7],
+        columns=["temp"],
+        sort="desc",
+    )
+    assert len(df) == 2
+    assert set(df.columns) == {"station_abbr", "reference_timestamp", "temp"}
+    assert df["temp"][0] == 25.0  # July first (desc)
