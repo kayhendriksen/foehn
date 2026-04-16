@@ -220,6 +220,73 @@ def _ingest_collection(
     return succeeded, skipped
 
 
+RADAR_COLLECTIONS = ("radar_precip", "radar_hail")
+
+
+def _ingest_radar(
+    spark: SparkSession,
+    raw_base: Path,
+    cat: str,
+    sch: str,
+    keys: tuple[str, ...] = RADAR_COLLECTIONS,
+) -> tuple[int, int]:
+    """Index radar HDF5 files into per-collection Delta catalog tables.
+
+    Scans each collection's landing dir via Spark's binaryFile reader and
+    MERGEs by path, so repeated 5-min runs only insert newly-arrived files.
+    The HDF5 payload itself stays in the volume — the table just holds
+    (path, modification_time, size_bytes).
+    """
+    total_ok = 0
+    total_skip = 0
+
+    for key in keys:
+        h5_dir = raw_base / key
+        if not h5_dir.exists() or not any(h5_dir.glob("*.h5")):
+            print(f"  --  {key:25s} skipped (no data)", flush=True)
+            total_skip += 1
+            continue
+
+        new_df = (
+            spark.read.format("binaryFile")
+            .option("pathGlobFilter", "*.h5")
+            .load(str(h5_dir))
+            .selectExpr(
+                "path",
+                # Product code from the filename prefix (RZC, TZC, CPC, BZC, MZC, ...).
+                # CombiPrecip reanalysis (CPCH) shares CPC's filename, so it stays "CPC"
+                # here — distinguish reanalysis via modification_time, which trails the
+                # product time embedded in the filename by ~8 days.
+                "regexp_extract(element_at(split(path, '/'), -1), '^[A-Z]+', 0) as product",
+                "modificationTime as modification_time",
+                "length as size_bytes",
+            )
+        )
+
+        table = f"{cat}.{sch}.`{key}`"
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {table} "
+            "(path STRING, product STRING, modification_time TIMESTAMP, size_bytes BIGINT) "
+            "USING DELTA"
+        )
+
+        view = f"_{key}_new"
+        new_df.createOrReplaceTempView(view)
+        # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too).
+        spark.sql(
+            f"MERGE INTO {table} t USING {view} s ON t.path = s.path "
+            "WHEN MATCHED AND s.modification_time > t.modification_time THEN UPDATE SET "
+            "  modification_time = s.modification_time, size_bytes = s.size_bytes "
+            "WHEN NOT MATCHED THEN INSERT *"
+        )
+
+        count = new_df.count()
+        print(f"  OK  {key:25s} → {table} ({count} files indexed)", flush=True)
+        total_ok += 1
+
+    return total_ok, total_skip
+
+
 def _ingest_climate_normals(spark: SparkSession, raw_base: Path, catalog: str, schema: str) -> tuple[int, int]:
     """Ingest climate normals TXT files into a single Delta table."""
     txt_dir = raw_base / "climate_normals"
@@ -270,6 +337,14 @@ def main() -> None:
         help="Enable chunked writes for large collections (SMN, etc.)",
     )
     parser.add_argument(
+        "--radar",
+        nargs="*",
+        default=None,
+        metavar="COLLECTION",
+        help="Only index radar HDF5 files into Delta catalogs. Pass one or more "
+        "collection keys (radar_precip, radar_hail) to restrict; bare --radar ingests all.",
+    )
+    parser.add_argument(
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK_SIZE,
@@ -296,6 +371,15 @@ def main() -> None:
 
     total_ok = 0
     total_skip = 0
+
+    if args.radar is not None:
+        keys = tuple(args.radar) if args.radar else RADAR_COLLECTIONS
+        invalid = [k for k in keys if k not in RADAR_COLLECTIONS]
+        if invalid:
+            raise SystemExit(f"Unknown radar collection(s): {invalid}. Valid: {list(RADAR_COLLECTIONS)}")
+        ok, skip = _ingest_radar(spark, raw_base, cat, sch, keys)
+        print(f"\nDone — {ok} tables written, {skip} skipped.")
+        return
 
     for key in TABULAR_COLLECTIONS:
         if key == "climate_normals":

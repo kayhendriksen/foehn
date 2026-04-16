@@ -75,9 +75,10 @@ COLLECTIONS = {
     # C1/C2 — Homogeneous series (CSV, time-sliced: historical/recent)
     "nbcn": "ch.meteoschweiz.ogd-nbcn",  # C1 — Climate stations, homogeneous (d,m)
     "nbcn_precip": "ch.meteoschweiz.ogd-nbcn-precip",  # C2 — Climate precipitation, homogeneous (m)
-    # C3/C4/C5 — Spatial climate analyses (NetCDF, static grids)
-    "surface_derived_grid": "ch.meteoschweiz.ogd-surface-derived-grid",  # C3/C4 — Precipitation, temperature, sunshine
-    "satellite_derived_grid": "ch.meteoschweiz.ogd-satellite-derived-grid",  # C5 — Radiation, clouds
+    # C3/C4 — Spatial climate analyses (NetCDF, static grids)
+    "surface_derived_grid": "ch.meteoschweiz.ogd-surface-derived-grid",  # C3 — Precipitation, temperature, sunshine
+    "satellite_derived_grid": "ch.meteoschweiz.ogd-satellite-derived-grid",  # C4 — Radiation, clouds, LST
+    # C5 — Spatial climate analyses, hail                        NOT YET RELEASED
     # C6 — Climate normals → downloaded separately as ZIP, see CLIMATE_NORMALS_ZIP_URL
     # C7 — Spatial climate normals (NetCDF/GeoTIFF, static reference grids)
     "climate_normals_precip_9120": "ch.meteoschweiz.klimanormwerte-niederschlag_aktuelle_periode",
@@ -195,7 +196,7 @@ COLLECTION_META: dict[str, dict] = {
     },
     "surface_derived_grid": {
         "category": "C",
-        "subcategory": "C3/C4",
+        "subcategory": "C3",
         "description": "Precipitation, temperature, sunshine grids",
         "format": "NetCDF",
         "frequencies": [],
@@ -203,8 +204,8 @@ COLLECTION_META: dict[str, dict] = {
     },
     "satellite_derived_grid": {
         "category": "C",
-        "subcategory": "C5",
-        "description": "Radiation, clouds grids",
+        "subcategory": "C4",
+        "description": "Radiation, clouds, land surface temperature grids",
         "format": "NetCDF",
         "frequencies": [],
         "time_slices": [],

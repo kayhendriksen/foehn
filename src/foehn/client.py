@@ -231,6 +231,27 @@ def download_metadata(collection_key: str, output_dir: Path):
 # --- GRIB2 / HDF5 downloads ---
 
 
+def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
+    """Decide whether to (re)download a binary asset.
+
+    Handles MeteoSwiss's in-place overwrites — e.g. CombiPrecip reanalysis
+    (CPCH) replaces the original CPC hourly file with the same filename
+    ~8 days later. A plain exists() check would leave the stale version
+    on disk; comparing the STAC "updated" timestamp against local mtime
+    picks up those server-side updates.
+    """
+    if not filepath.exists():
+        return True
+    if not remote_updated:
+        return False
+    try:
+        remote_dt = datetime.fromisoformat(remote_updated.replace("Z", "+00:00"))
+        local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=timezone.utc)
+    except (ValueError, OSError):
+        return False
+    return remote_dt > local_dt
+
+
 def download_grib2(
     collection_key: str,
     output_dir: Path,
@@ -262,20 +283,24 @@ def download_grib2(
 
     binary_assets = []
     for item in items:
+        item_updated = item.get("properties", {}).get("updated", "")
         assets = item.get("assets", {})
         for asset_info in assets.values():
             href = asset_info.get("href", "")
             clean = href.split("?")[0]
             # Accept grib2, h5, and other binary formats
             if any(clean.endswith(ext) for ext in (".grib2", ".h5", ".hdf5")):
-                binary_assets.append((href, clean.split("/")[-1]))
+                # Per-asset "updated" is preferred when present (STAC allows it),
+                # otherwise fall back to the item-level updated timestamp.
+                updated = asset_info.get("updated") or item_updated
+                binary_assets.append((href, clean.split("/")[-1], updated))
 
     print(f"  {len(binary_assets)} binary files to download", flush=True)
 
     downloaded = 0
-    for i, (href, filename) in enumerate(binary_assets, 1):
+    for i, (href, filename, updated) in enumerate(binary_assets, 1):
         filepath = out_dir / filename
-        if filepath.exists():
+        if not _needs_redownload(filepath, updated):
             continue
 
         _validate_href(href)

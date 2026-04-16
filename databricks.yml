@@ -125,6 +125,126 @@ resources:
         on_failure:
           - ${var.alert_email}    # set via env: BUNDLE_VAR_alert_email
 
+    # ── Radar precipitation: 5-min year-round (D1) ────────────────────────────
+    foehn_radar_precip:
+      name: "[foehn] Radar precip (5-min)"
+      description: >
+        Every 5 minutes year-round: downloads new D1 precipitation radar
+        HDF5 files (PRECIP/RZC, PRECIP-SV/TZC, CombiPrecip/CPC, and the
+        hourly CPCH reanalysis with 8-day lag) into the UC Volume and
+        MERGEs their paths into the radar_precip Delta catalog.
+        Runs on serverless — ~30s per run, cold-start in seconds.
+
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: serverless_env
+          spec:
+            environment_version: "2"
+            dependencies:
+              - ./dist/foehn-*.whl
+
+      tasks:
+        - task_key: download
+          description: "foehn download --grids radar_precip → HDF5 in UC Volume"
+          environment_key: serverless_env
+          python_wheel_task:
+            package_name: foehn
+            entry_point: foehn
+            parameters:
+              - "download"
+              - "--grids"
+              - "--no-parquet"
+              - "radar_precip"
+              - "--data-dir"
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
+
+        - task_key: ingest
+          description: "Index new radar_precip HDF5 files into Delta via binaryFile + MERGE"
+          depends_on:
+            - task_key: download
+          environment_key: serverless_env
+          spark_python_task:
+            python_file: ./scripts/ingest_delta.py
+            parameters:
+              - "--radar"
+              - "radar_precip"
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+              - "--volume"
+              - "${var.volume}"
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+
+    # ── Radar hail: 5-min Apr–Sep only (D3, seasonal) ─────────────────────────
+    foehn_radar_hail:
+      name: "[foehn] Radar hail (5-min, Apr–Sep)"
+      description: >
+        Every 5 minutes during the hail season (April 1 – September 30):
+        downloads new D3 hail radar HDF5 files (POH + MESHS) into the UC
+        Volume and MERGEs their paths into the radar_hail Delta catalog.
+        MeteoSwiss does not publish hail products outside these months, so
+        the job is month-restricted at the cron level. Runs on serverless.
+
+      schedule:
+        quartz_cron_expression: "0 */5 * ? 4-9 *"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: serverless_env
+          spec:
+            environment_version: "2"
+            dependencies:
+              - ./dist/foehn-*.whl
+
+      tasks:
+        - task_key: download
+          description: "foehn download --grids radar_hail → HDF5 in UC Volume"
+          environment_key: serverless_env
+          python_wheel_task:
+            package_name: foehn
+            entry_point: foehn
+            parameters:
+              - "download"
+              - "--grids"
+              - "--no-parquet"
+              - "radar_hail"
+              - "--data-dir"
+              - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
+
+        - task_key: ingest
+          description: "Index new radar_hail HDF5 files into Delta via binaryFile + MERGE"
+          depends_on:
+            - task_key: download
+          environment_key: serverless_env
+          spark_python_task:
+            python_file: ./scripts/ingest_delta.py
+            parameters:
+              - "--radar"
+              - "radar_hail"
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+              - "--volume"
+              - "${var.volume}"
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+
     # ── Historical: full archive backfill ─────────────────────────────────────
     foehn_historical:
       name: "[foehn] Historical backfill"
