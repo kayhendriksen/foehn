@@ -18,6 +18,7 @@ with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_
         _group_csv_files,
         _ingest_climate_normals,
         _ingest_collection,
+        _ingest_metadata,
         _scan_and_collect,
         _table_suffix,
         _validate_identifier,
@@ -227,13 +228,14 @@ def test_ingest_collection(smn_raw_dir, mock_spark):
         "`main`",
         "`meteoswiss`",
     )
-    assert ok == 1  # one group (d_recent)
+    # 1 data group (d_recent) + 1 meta table (parameters)
+    assert ok == 2
     assert skip == 0
-    mock_spark.createDataFrame.assert_called_once()
+    assert mock_spark.createDataFrame.call_count == 2
 
 
 def test_ingest_collection_chunked(smn_raw_dir, mock_spark):
-    """Chunked mode with chunk_size=1 should produce 2 Spark writes."""
+    """Chunked mode with chunk_size=1 should produce 2 data writes + 1 meta write."""
     ok, skip = _ingest_collection(
         mock_spark,
         "smn",
@@ -243,10 +245,11 @@ def test_ingest_collection_chunked(smn_raw_dir, mock_spark):
         chunked=True,
         chunk_size=1,
     )
-    assert ok == 1
+    # 1 data group + 1 meta table
+    assert ok == 2
     assert skip == 0
-    # 2 files, chunk_size=1 → 2 createDataFrame calls (overwrite + append)
-    assert mock_spark.createDataFrame.call_count == 2
+    # 2 files × chunk_size=1 (overwrite + append) + 1 meta write = 3
+    assert mock_spark.createDataFrame.call_count == 3
 
 
 def test_ingest_collection_empty(tmp_path, mock_spark):
@@ -255,6 +258,51 @@ def test_ingest_collection_empty(tmp_path, mock_spark):
     ok, skip = _ingest_collection(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+
+
+# ── _ingest_metadata ─────────────────────────────────────────────────────────
+
+
+def test_ingest_metadata(smn_raw_dir, mock_spark):
+    ok, skip = _ingest_metadata(
+        mock_spark,
+        "smn",
+        smn_raw_dir / "smn",
+        "`main`",
+        "`meteoswiss`",
+    )
+    assert ok == 1  # ogd-smn_meta_parameters.csv
+    assert skip == 0
+    mock_spark.createDataFrame.assert_called_once()
+
+
+def test_ingest_metadata_multiple_files(smn_raw_dir, mock_spark):
+    """Stations + datainventory + parameters should each become their own table."""
+    smn_dir = smn_raw_dir / "smn"
+    (smn_dir / "ogd-smn_meta_stations.csv").write_text("station_abbr;station_name\nABO;Adelboden\nBER;Bern\n")
+    (smn_dir / "ogd-smn_meta_datainventory.csv").write_text(
+        "station_abbr;parameter_shortname;data_since;data_till\nABO;tre200d0;1900-01-01;2026-01-01\n"
+    )
+
+    ok, skip = _ingest_metadata(mock_spark, "smn", smn_dir, "`main`", "`meteoswiss`")
+    assert ok == 3
+    assert skip == 0
+
+    # Each meta file should land in its own suffixed table.
+    save_as = mock_spark.createDataFrame.return_value.write.mode.return_value.option.return_value.saveAsTable
+    tables_written = [c.args[0] for c in save_as.call_args_list]
+    assert any(t.endswith("`smn_meta_stations`") for t in tables_written)
+    assert any(t.endswith("`smn_meta_parameters`") for t in tables_written)
+    assert any(t.endswith("`smn_meta_datainventory`") for t in tables_written)
+
+
+def test_ingest_metadata_no_files(tmp_path, mock_spark):
+    empty_dir = tmp_path / "smn"
+    empty_dir.mkdir()
+    ok, skip = _ingest_metadata(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
+    assert ok == 0
+    assert skip == 0
+    mock_spark.createDataFrame.assert_not_called()
 
 
 # ── _ingest_climate_normals ──────────────────────────────────────────────────

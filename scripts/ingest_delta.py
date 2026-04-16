@@ -162,6 +162,45 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
             spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{shortname}` COMMENT '{comment_escaped}'")
 
 
+def _ingest_metadata(
+    spark: SparkSession,
+    key: str,
+    csv_dir: Path,
+    catalog: str,
+    schema: str,
+) -> tuple[int, int]:
+    """Ingest *_meta_*.csv files (stations, parameters, datainventory, ...) into Delta.
+
+    Each meta CSV becomes its own table: ``{collection}_meta_{suffix}``. Always
+    overwrites — these files are small, authoritative, and refreshed each run.
+    """
+    meta_files = sorted(csv_dir.glob("*_meta_*.csv"))
+    succeeded = 0
+    skipped = 0
+
+    for meta_path in meta_files:
+        # "ogd-smn_meta_stations.csv" → suffix "stations"
+        suffix = meta_path.stem.split("_meta_", 1)[1]
+        tbl_name = f"{key}_meta_{suffix}"
+        table = f"{catalog}.{schema}.`{tbl_name}`"
+
+        try:
+            df = pl.read_csv(
+                meta_path,
+                separator=";",
+                infer_schema_length=10000,
+                try_parse_dates=True,
+            )
+            _write_to_delta(spark, df, table)
+            print(f"  OK  {tbl_name:25s} → {table} ({df.height} rows)", flush=True)
+            succeeded += 1
+        except Exception as e:
+            print(f"  --  {tbl_name:25s}   skipped ({type(e).__name__})", flush=True)
+            skipped += 1
+
+    return succeeded, skipped
+
+
 def _ingest_collection(
     spark: SparkSession,
     key: str,
@@ -179,12 +218,14 @@ def _ingest_collection(
     metadata_types = _load_metadata_types(csv_dir)
     groups = _group_csv_files(csv_dir, key)
 
+    meta_ok, meta_skip = _ingest_metadata(spark, key, csv_dir, catalog, schema)
+
     if not groups:
         print(f"  --  {key:25s}   skipped (no CSVs)", flush=True)
-        return 0, 1
+        return meta_ok, meta_skip + 1
 
-    succeeded = 0
-    skipped = 0
+    succeeded = meta_ok
+    skipped = meta_skip
 
     for group_key, files in sorted(groups.items()):
         tbl_name = f"{key}{_table_suffix(group_key)}"
