@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,6 +22,10 @@ from foehn.collections import (
 from foehn.stac import get_collection_items, get_collection_metadata
 
 _ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss", "rgw.cscs.ch"}
+
+# Default concurrency for per-asset downloads. Kept modest to stay polite on the
+# MeteoSwiss/CSCS CDNs — they handle bursts fine but we don't need to hammer them.
+DEFAULT_WORKERS = 8
 
 
 def _retry_session(
@@ -87,11 +92,38 @@ def save_last_run(data_dir: Path):
 # --- CSV downloads ---
 
 
+def _download_csv(
+    session: requests.Session,
+    href: str,
+    filepath: Path,
+    old_etag: str | None,
+) -> tuple[str, str, str, str | None]:
+    """Fetch a single CSV, re-encode to UTF-8, and write it to disk.
+
+    Returns (status, href, filename, new_etag) where status is "downloaded" or "skipped".
+    """
+    _validate_href(href)
+    filename = filepath.name
+    headers = {"If-None-Match": old_etag} if old_etag and filepath.exists() else {}
+    resp = session.get(href, headers=headers, timeout=60)
+    if resp.status_code == 304:
+        return ("skipped", href, filename, None)
+    resp.raise_for_status()
+    # MeteoSwiss CSVs are Windows-1252; re-encode to UTF-8
+    try:
+        content = resp.content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        content = resp.content.decode("windows-1252")
+    filepath.write_text(content, encoding="utf-8")
+    return ("downloaded", href, filename, resp.headers.get("ETag"))
+
+
 def download_collection(
     collection_key: str,
     output_dir: Path,
     data_types: list[str] | None = None,
     since: str | None = None,
+    workers: int = DEFAULT_WORKERS,
 ):
     """Download CSVs for a collection.
 
@@ -100,6 +132,7 @@ def download_collection(
         output_dir: Root directory for bronze downloads (files go to output_dir/<key>/).
         data_types: List of "historical", "recent", "now". Defaults to ["recent"].
         since: ISO timestamp — only process items updated after this time.
+        workers: Number of concurrent HTTP downloads.
     """
     if data_types is None:
         data_types = ["recent"]
@@ -153,38 +186,30 @@ def download_collection(
 
     print(f"  {len(csv_assets)} CSV files to process", flush=True)
 
+    session = _retry_session()
+    total = len(csv_assets)
     downloaded = 0
     skipped = 0
-    for i, (href, _asset_info) in enumerate(csv_assets, 1):
-        _validate_href(href)
-        filename = href.split("?")[0].split("/")[-1]
-        filepath = out_dir / filename
-
-        # Use ETag to skip files that haven't changed
-        headers = {}
-        old_etag = etags.get(href)
-        if old_etag and filepath.exists():
-            headers["If-None-Match"] = old_etag
-
-        resp = _retry_session().get(href, headers=headers, timeout=60)
-        if resp.status_code == 304:
-            skipped += 1
-            continue
-        resp.raise_for_status()
-
-        # MeteoSwiss CSVs are Windows-1252; re-encode to UTF-8
-        try:
-            content = resp.content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            content = resp.content.decode("windows-1252")
-        filepath.write_text(content, encoding="utf-8")
-
-        new_etag = resp.headers.get("ETag")
-        if new_etag:
-            etags[href] = new_etag
-
-        downloaded += 1
-        print(f"  [{i}/{len(csv_assets)}] Downloaded: {filename}", flush=True)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                _download_csv,
+                session,
+                href,
+                out_dir / href.split("?")[0].split("/")[-1],
+                etags.get(href),
+            )
+            for href, _ in csv_assets
+        ]
+        for i, fut in enumerate(as_completed(futures), 1):
+            status, href, filename, new_etag = fut.result()
+            if status == "skipped":
+                skipped += 1
+                continue
+            if new_etag:
+                etags[href] = new_etag
+            downloaded += 1
+            print(f"  [{i}/{total}] Downloaded: {filename}", flush=True)
 
     save_etags(output_dir.parent, etags)
     if skipped:
@@ -195,7 +220,7 @@ def download_collection(
 # --- Metadata downloads ---
 
 
-def download_metadata(collection_key: str, output_dir: Path):
+def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS):
     """Download collection-level metadata files (stations, parameters, inventory)."""
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
@@ -206,23 +231,22 @@ def download_metadata(collection_key: str, output_dir: Path):
     if not assets:
         return
 
+    targets = [
+        (asset_info["href"], out_dir / asset_info["href"].split("?")[0].split("/")[-1])
+        for asset_info in assets.values()
+        if asset_info.get("href", "").endswith(".csv")
+    ]
+    if not targets:
+        return
+
+    session = _retry_session()
     downloaded = 0
-    for asset_info in assets.values():
-        href = asset_info.get("href", "")
-        if not href.endswith(".csv"):
-            continue
-        _validate_href(href)
-        filename = href.split("?")[0].split("/")[-1]
-        filepath = out_dir / filename
-        resp = _retry_session().get(href, timeout=60)
-        resp.raise_for_status()
-        try:
-            content = resp.content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            content = resp.content.decode("windows-1252")
-        filepath.write_text(content, encoding="utf-8")
-        downloaded += 1
-        print(f"  Metadata: {filename}", flush=True)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_download_csv, session, href, filepath, None) for href, filepath in targets]
+        for fut in as_completed(futures):
+            filename = fut.result()[2]
+            downloaded += 1
+            print(f"  Metadata: {filename}", flush=True)
 
     if downloaded:
         print(f"  {downloaded} metadata files downloaded", flush=True)
@@ -252,10 +276,22 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
     return remote_dt > local_dt
 
 
+def _download_binary(session: requests.Session, href: str, filepath: Path, timeout: int = 120) -> str:
+    """Stream a binary asset to disk. Returns the filename."""
+    _validate_href(href)
+    with session.get(href, stream=True, timeout=timeout) as resp:
+        resp.raise_for_status()
+        with filepath.open("wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+    return filepath.name
+
+
 def download_grib2(
     collection_key: str,
     output_dir: Path,
     since: str | None = None,
+    workers: int = DEFAULT_WORKERS,
 ):
     """Download GRIB2/HDF5 binary files (latest page only)."""
     collection_id = COLLECTIONS[collection_key]
@@ -297,20 +333,21 @@ def download_grib2(
 
     print(f"  {len(binary_assets)} binary files to download", flush=True)
 
-    downloaded = 0
-    for i, (href, filename, updated) in enumerate(binary_assets, 1):
-        filepath = out_dir / filename
-        if not _needs_redownload(filepath, updated):
-            continue
+    to_fetch = [
+        (href, out_dir / filename)
+        for href, filename, updated in binary_assets
+        if _needs_redownload(out_dir / filename, updated)
+    ]
 
-        _validate_href(href)
-        with _retry_session().get(href, stream=True, timeout=120) as resp:
-            resp.raise_for_status()
-            with filepath.open("wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    f.write(chunk)
-        downloaded += 1
-        print(f"  [{i}/{len(binary_assets)}] Downloaded: {filename}", flush=True)
+    session = _retry_session()
+    total = len(to_fetch)
+    downloaded = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_download_binary, session, href, filepath) for href, filepath in to_fetch]
+        for i, fut in enumerate(as_completed(futures), 1):
+            filename = fut.result()
+            downloaded += 1
+            print(f"  [{i}/{total}] Downloaded: {filename}", flush=True)
 
     print(f"\n  Done — {downloaded} binary files downloaded", flush=True)
 
@@ -318,7 +355,7 @@ def download_grib2(
 # --- NetCDF / GeoTIFF / ZIP downloads ---
 
 
-def download_netcdf(collection_key: str, output_dir: Path):
+def download_netcdf(collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS):
     """Download NetCDF, GeoTIFF, and ZIP files for spatial/static collections."""
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
@@ -332,24 +369,24 @@ def download_netcdf(collection_key: str, output_dir: Path):
     items = get_collection_items(collection_id, require_csv=False)
     print(f"  Found {len(items)} items", flush=True)
 
-    downloaded = 0
+    targets: list[tuple[str, Path]] = []
     for item in items:
-        assets = item.get("assets", {})
-        for asset_info in assets.values():
+        for asset_info in item.get("assets", {}).values():
             href = asset_info.get("href", "")
             clean = href.split("?")[0]
             if not clean.endswith((".nc", ".tif", ".zip")):
                 continue
-            filename = clean.split("/")[-1]
-            filepath = out_dir / filename
+            filepath = out_dir / clean.split("/")[-1]
             if filepath.exists():
                 continue
-            _validate_href(href)
-            with _retry_session().get(href, stream=True, timeout=120) as resp:
-                resp.raise_for_status()
-                with filepath.open("wb") as f:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        f.write(chunk)
+            targets.append((href, filepath))
+
+    session = _retry_session()
+    downloaded = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_download_binary, session, href, filepath) for href, filepath in targets]
+        for fut in as_completed(futures):
+            filename = fut.result()
             downloaded += 1
             print(f"  Downloaded: {filename}", flush=True)
 

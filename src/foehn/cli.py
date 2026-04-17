@@ -129,14 +129,15 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
 
+    workers = args.workers
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS:
-            download_grib2(ds, bronze_dir, since=since)
+            download_grib2(ds, bronze_dir, since=since, workers=workers)
         elif ds in NETCDF_COLLECTIONS:
-            download_netcdf(ds, bronze_dir)
+            download_netcdf(ds, bronze_dir, workers=workers)
         else:
-            download_metadata(ds, bronze_dir)
-            download_collection(ds, bronze_dir, data_types=time_slices, since=since)
+            download_metadata(ds, bronze_dir, workers=workers)
+            download_collection(ds, bronze_dir, data_types=time_slices, since=since, workers=workers)
             if not args.no_parquet:
                 convert_to_parquet(ds, bronze_dir, parquet_dir)
 
@@ -271,6 +272,12 @@ def main():
     sub_dl.add_argument("--full-refresh", action="store_true", help="Ignore incremental tracking, re-download all")
     sub_dl.add_argument("--grids", action="store_true", help="Include grid/binary datasets (GRIB2, NetCDF)")
     sub_dl.add_argument("--no-parquet", action="store_true", help="Skip CSV → Parquet conversion")
+    sub_dl.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Concurrent downloads per dataset (default: 8)",
+    )
     sub_dl.set_defaults(func=cmd_download)
 
     # --- foehn to-parquet ---

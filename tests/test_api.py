@@ -69,8 +69,8 @@ def test_download_netcdf_dataset_raises():
 @patch("foehn.api.download_metadata")
 def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):
     download("smn", data_dir=tmp_path, time_slice=["historical"])
-    mock_meta.assert_called_once_with("smn", tmp_path / "bronze")
-    mock_dl.assert_called_once_with("smn", tmp_path / "bronze", data_types=["historical"], since=None)
+    mock_meta.assert_called_once_with("smn", tmp_path / "bronze", workers=8)
+    mock_dl.assert_called_once_with("smn", tmp_path / "bronze", data_types=["historical"], since=None, workers=8)
 
 
 def test_to_parquet_unknown_dataset_raises():

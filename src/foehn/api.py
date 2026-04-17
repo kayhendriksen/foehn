@@ -34,6 +34,7 @@ def download(
     data_dir: Path | str | None = None,
     time_slice: list[str] | None = None,
     since: str | None = None,
+    workers: int = 8,
 ) -> None:
     """Download a single dataset.
 
@@ -42,6 +43,7 @@ def download(
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         time_slice: Time slices to download. Defaults to ["recent"].
         since: ISO timestamp for incremental updates.
+        workers: Concurrent HTTP downloads (default 8).
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
@@ -52,8 +54,8 @@ def download(
     bronze_dir = data_dir / "bronze"
     bronze_dir.mkdir(parents=True, exist_ok=True)
 
-    download_metadata(dataset, bronze_dir)
-    download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since)
+    download_metadata(dataset, bronze_dir, workers=workers)
+    download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers)
 
 
 def to_parquet(
