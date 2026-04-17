@@ -100,9 +100,9 @@ def test_download_collection_saves_csv(mock_retry, mock_items, tmp_path):
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n")
 
-    download_collection("smn", tmp_path / "raw")
+    download_collection("smn", tmp_path / "bronze")
 
-    assert (tmp_path / "raw" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
+    assert (tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
 
 
 @patch("foehn.client.get_collection_items")
@@ -114,9 +114,9 @@ def test_download_collection_re_encodes_to_utf8(mock_retry, mock_items, tmp_path
     # Windows-1252 encoded content (ä = 0xe4)
     mock_get.return_value = _csv_response(b"col\n\xe4\n")
 
-    download_collection("smn", tmp_path / "raw")
+    download_collection("smn", tmp_path / "bronze")
 
-    content = (tmp_path / "raw" / "smn" / "ogd-smn_tst_d_recent.csv").read_text(encoding="utf-8")
+    content = (tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv").read_text(encoding="utf-8")
     assert "ä" in content
 
 
@@ -128,7 +128,7 @@ def test_download_collection_saves_etag(mock_retry, mock_items, tmp_path):
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(etag='"v1"')
 
-    download_collection("smn", tmp_path / "raw")
+    download_collection("smn", tmp_path / "bronze")
 
     etags = load_etags(tmp_path)
     assert etags.get(url) == '"v1"'
@@ -143,13 +143,13 @@ def test_download_collection_sends_if_none_match(mock_retry, mock_items, tmp_pat
 
     # Pre-seed an ETag and create the file so the cache path is taken
     save_etags(tmp_path, {url: '"old"'})
-    out = tmp_path / "raw" / "smn" / "ogd-smn_tst_d_recent.csv"
+    out = tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("existing")
 
     mock_get.return_value = _csv_response(status_code=304)
 
-    download_collection("smn", tmp_path / "raw")
+    download_collection("smn", tmp_path / "bronze")
 
     _, kwargs = mock_get.call_args
     assert kwargs["headers"].get("If-None-Match") == '"old"'
@@ -164,9 +164,9 @@ def test_download_collection_skips_304(mock_retry, mock_items, tmp_path):
     mock_get.return_value = _csv_response(status_code=304)
 
     # File does not get created when server returns 304
-    download_collection("smn", tmp_path / "raw")
+    download_collection("smn", tmp_path / "bronze")
 
-    assert not (tmp_path / "raw" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
+    assert not (tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
 
 
 @patch("foehn.client.get_collection_items")
@@ -178,7 +178,7 @@ def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
     mock_items.return_value = [_stac_item(url, updated="2025-06-01T00:00:00Z")]
     mock_get.return_value = _csv_response()
 
-    download_collection("smn", tmp_path / "raw", since="2026-01-01T00:00:00Z")
+    download_collection("smn", tmp_path / "bronze", since="2026-01-01T00:00:00Z")
 
     mock_get.assert_not_called()
 
@@ -193,9 +193,9 @@ def test_download_metadata_saves_csv(mock_retry, mock_meta, tmp_path):
     mock_meta.return_value = {"assets": {"stations": {"href": "https://data.geo.admin.ch/stations.csv"}}}
     mock_get.return_value = _csv_response(b"id;name\nTST;Test Station\n")
 
-    download_metadata("smn", tmp_path / "raw")
+    download_metadata("smn", tmp_path / "bronze")
 
-    assert (tmp_path / "raw" / "smn" / "stations.csv").exists()
+    assert (tmp_path / "bronze" / "smn" / "stations.csv").exists()
 
 
 @patch("foehn.client.get_collection_metadata")
@@ -204,7 +204,7 @@ def test_download_metadata_skips_non_csv_assets(mock_retry, mock_meta, tmp_path)
     mock_get = mock_retry.return_value.get
     mock_meta.return_value = {"assets": {"readme": {"href": "https://data.geo.admin.ch/README.pdf"}}}
 
-    download_metadata("smn", tmp_path / "raw")
+    download_metadata("smn", tmp_path / "bronze")
 
     mock_get.assert_not_called()
 
@@ -226,20 +226,20 @@ def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
     zip_bytes = _make_zip({"sample.txt": b"data"})
     mock_get.return_value = _csv_response(content=zip_bytes)
 
-    download_climate_normals_zip(tmp_path / "raw")
+    download_climate_normals_zip(tmp_path / "bronze")
 
-    assert (tmp_path / "raw" / "climate_normals" / "normwerte.zip").exists()
-    assert (tmp_path / "raw" / "climate_normals" / "sample.txt").exists()
+    assert (tmp_path / "bronze" / "climate_normals" / "normwerte.zip").exists()
+    assert (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
 
 
 @patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
-    out_dir = tmp_path / "raw" / "climate_normals"
+    out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "normwerte.zip").write_bytes(b"existing")
 
-    download_climate_normals_zip(tmp_path / "raw")
+    download_climate_normals_zip(tmp_path / "bronze")
 
     mock_get.assert_not_called()
 
@@ -247,14 +247,14 @@ def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
 @patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
-    out_dir = tmp_path / "raw" / "climate_normals"
+    out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "normwerte.zip").write_bytes(b"old")
 
     zip_bytes = _make_zip({"new.txt": b"fresh"})
     mock_get.return_value = _csv_response(content=zip_bytes)
 
-    download_climate_normals_zip(tmp_path / "raw", force=True)
+    download_climate_normals_zip(tmp_path / "bronze", force=True)
 
     mock_get.assert_called_once()
     assert (out_dir / "new.txt").exists()
@@ -277,9 +277,9 @@ def test_download_grib2_saves_binary(mock_retry, tmp_path):
 
     mock_get.side_effect = [items_resp, file_resp]
 
-    download_grib2("forecast_icon_ch1", tmp_path / "raw")
+    download_grib2("forecast_icon_ch1", tmp_path / "bronze")
 
-    assert (tmp_path / "raw" / "forecast_icon_ch1" / "forecast.grib2").exists()
+    assert (tmp_path / "bronze" / "forecast_icon_ch1" / "forecast.grib2").exists()
 
 
 @patch("foehn.client._retry_session")
@@ -294,11 +294,11 @@ def test_download_grib2_skips_existing_file(mock_retry, tmp_path):
     }
     mock_get.return_value = items_resp
 
-    out_dir = tmp_path / "raw" / "forecast_icon_ch1"
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
     out_dir.mkdir(parents=True)
     (out_dir / "forecast.grib2").write_bytes(b"existing")
 
-    download_grib2("forecast_icon_ch1", tmp_path / "raw")
+    download_grib2("forecast_icon_ch1", tmp_path / "bronze")
 
     # Only 1 call for the STAC items page, none for the file
     assert mock_get.call_count == 1
@@ -316,9 +316,9 @@ def test_download_netcdf_saves_nc_file(mock_retry, mock_items, tmp_path):
     ]
     mock_get.return_value = _stream_response(chunks=(b"\x89HDF",))
 
-    download_netcdf("surface_derived_grid", tmp_path / "raw")
+    download_netcdf("surface_derived_grid", tmp_path / "bronze")
 
-    assert (tmp_path / "raw" / "surface_derived_grid" / "grid.nc").exists()
+    assert (tmp_path / "bronze" / "surface_derived_grid" / "grid.nc").exists()
 
 
 @patch("foehn.client.get_collection_items")
@@ -329,10 +329,10 @@ def test_download_netcdf_skips_existing_file(mock_retry, mock_items, tmp_path):
         {"id": "g1", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     ]
 
-    out_dir = tmp_path / "raw" / "surface_derived_grid"
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
     out_dir.mkdir(parents=True)
     (out_dir / "grid.nc").write_bytes(b"existing")
 
-    download_netcdf("surface_derived_grid", tmp_path / "raw")
+    download_netcdf("surface_derived_grid", tmp_path / "bronze")
 
     mock_get.assert_not_called()

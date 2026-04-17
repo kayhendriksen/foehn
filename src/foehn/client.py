@@ -97,7 +97,7 @@ def download_collection(
 
     Args:
         collection_key: Key from COLLECTIONS (e.g. "smn").
-        output_dir: Root directory for raw downloads (files go to output_dir/<key>/).
+        output_dir: Root directory for bronze downloads (files go to output_dir/<key>/).
         data_types: List of "historical", "recent", "now". Defaults to ["recent"].
         since: ISO timestamp — only process items updated after this time.
     """

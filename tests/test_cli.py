@@ -164,8 +164,8 @@ def test_env_data_dir_used_when_no_flag(tmp_path, monkeypatch):
     mocks = _run_without_data_dir("download", [], tmp_path)
     calls = mocks["download_collection"].call_args_list
     assert calls
-    raw_dir = calls[0][0][1]
-    assert str(tmp_path / "env-dir") in str(raw_dir)
+    bronze_dir = calls[0][0][1]
+    assert str(tmp_path / "env-dir") in str(bronze_dir)
 
 
 def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
@@ -173,9 +173,9 @@ def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
     mocks = _run("download", [], tmp_path)
     calls = mocks["download_collection"].call_args_list
     assert calls
-    raw_dir = calls[0][0][1]
-    assert str(tmp_path) in str(raw_dir)
-    assert "env-dir" not in str(raw_dir)
+    bronze_dir = calls[0][0][1]
+    assert str(tmp_path) in str(bronze_dir)
+    assert "env-dir" not in str(bronze_dir)
 
 
 def test_env_full_refresh_truthy(tmp_path, monkeypatch):

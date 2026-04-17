@@ -30,8 +30,8 @@ with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_
 
 
 @pytest.fixture()
-def smn_raw_dir(tmp_path):
-    """Raw dir with SMN CSVs and metadata in a 'smn' sub-folder."""
+def smn_bronze_dir(tmp_path):
+    """Bronze dir with SMN CSVs and metadata in a 'smn' sub-folder."""
     smn_dir = tmp_path / "smn"
     smn_dir.mkdir()
     shutil.copy(FIXTURES_DIR / "smn_sample.csv", smn_dir / "ogd-smn_abo_d_recent.csv")
@@ -41,8 +41,8 @@ def smn_raw_dir(tmp_path):
 
 
 @pytest.fixture()
-def climate_normals_raw_dir(tmp_path):
-    """Raw dir with climate normals TXT files."""
+def climate_normals_bronze_dir(tmp_path):
+    """Bronze dir with climate normals TXT files."""
     cn_dir = tmp_path / "climate_normals"
     cn_dir.mkdir()
     shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", cn_dir / "sample.txt")
@@ -80,14 +80,14 @@ def test_validate_identifier_rejects_injection():
 # ── _group_csv_files ─────────────────────────────────────────────────────────
 
 
-def test_group_csv_files(smn_raw_dir):
-    groups = _group_csv_files(smn_raw_dir / "smn", "smn")
+def test_group_csv_files(smn_bronze_dir):
+    groups = _group_csv_files(smn_bronze_dir / "smn", "smn")
     assert ("d", "recent") in groups
     assert len(groups[("d", "recent")]) == 2
 
 
-def test_group_csv_files_excludes_meta(smn_raw_dir):
-    groups = _group_csv_files(smn_raw_dir / "smn", "smn")
+def test_group_csv_files_excludes_meta(smn_bronze_dir):
+    groups = _group_csv_files(smn_bronze_dir / "smn", "smn")
     all_files = [f for files in groups.values() for f in files]
     assert all("_meta_" not in f.name for f in all_files)
 
@@ -111,8 +111,8 @@ def test_table_suffix():
 # ── _build_schema_overrides ──────────────────────────────────────────────────
 
 
-def test_build_schema_overrides(smn_raw_dir):
-    files = sorted((smn_raw_dir / "smn").glob("ogd-smn_*_d_recent.csv"))
+def test_build_schema_overrides(smn_bronze_dir):
+    files = sorted((smn_bronze_dir / "smn").glob("ogd-smn_*_d_recent.csv"))
     metadata_types = {"tre200d0": pl.Float64, "ure200d0": pl.Int64, "nonexistent": pl.Float64}
     overrides = _build_schema_overrides(files, metadata_types)
     assert overrides is not None
@@ -128,10 +128,10 @@ def test_build_schema_overrides_no_metadata():
 # ── _scan_and_collect ────────────────────────────────────────────────────────
 
 
-def test_scan_and_collect(smn_raw_dir):
+def test_scan_and_collect(smn_bronze_dir):
     from foehn.convert import _load_metadata_types
 
-    csv_dir = smn_raw_dir / "smn"
+    csv_dir = smn_bronze_dir / "smn"
     files = sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))
     metadata_types = _load_metadata_types(csv_dir)
 
@@ -144,10 +144,10 @@ def test_scan_and_collect(smn_raw_dir):
     assert df["tre200d0"].dtype == pl.Float64
 
 
-def test_scan_and_collect_parses_timestamps(smn_raw_dir):
+def test_scan_and_collect_parses_timestamps(smn_bronze_dir):
     from foehn.convert import _load_metadata_types
 
-    csv_dir = smn_raw_dir / "smn"
+    csv_dir = smn_bronze_dir / "smn"
     files = sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))
     metadata_types = _load_metadata_types(csv_dir)
 
@@ -155,10 +155,10 @@ def test_scan_and_collect_parses_timestamps(smn_raw_dir):
     assert df["reference_timestamp"].dtype == pl.Datetime
 
 
-def test_scan_and_collect_single_file(smn_raw_dir):
+def test_scan_and_collect_single_file(smn_bronze_dir):
     from foehn.convert import _load_metadata_types
 
-    csv_dir = smn_raw_dir / "smn"
+    csv_dir = smn_bronze_dir / "smn"
     files = [sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))[0]]
     metadata_types = _load_metadata_types(csv_dir)
 
@@ -190,7 +190,7 @@ def test_write_to_delta_append_mode(mock_spark):
 # ── _apply_column_comments ───────────────────────────────────────────────────
 
 
-def test_apply_column_comments(smn_raw_dir):
+def test_apply_column_comments(smn_bronze_dir):
     spark = MagicMock()
     # Simulate table with tre200d0 and ure200d0 columns.
     field1 = MagicMock()
@@ -199,7 +199,7 @@ def test_apply_column_comments(smn_raw_dir):
     field2.name = "ure200d0"
     spark.table.return_value.schema.fields = [field1, field2]
 
-    _apply_column_comments(spark, "`cat`.`sch`.`smn_d_recent`", smn_raw_dir / "smn")
+    _apply_column_comments(spark, "`cat`.`sch`.`smn_d_recent`", smn_bronze_dir / "smn")
 
     # Should have issued ALTER TABLE for matching columns.
     sql_calls = [c.args[0] for c in spark.sql.call_args_list]
@@ -220,11 +220,11 @@ def test_apply_column_comments_no_metadata(tmp_path):
 # ── _ingest_collection ───────────────────────────────────────────────────────
 
 
-def test_ingest_collection(smn_raw_dir, mock_spark):
+def test_ingest_collection(smn_bronze_dir, mock_spark):
     ok, skip = _ingest_collection(
         mock_spark,
         "smn",
-        smn_raw_dir / "smn",
+        smn_bronze_dir / "smn",
         "`main`",
         "`meteoswiss`",
     )
@@ -234,12 +234,12 @@ def test_ingest_collection(smn_raw_dir, mock_spark):
     assert mock_spark.createDataFrame.call_count == 2
 
 
-def test_ingest_collection_chunked(smn_raw_dir, mock_spark):
+def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
     """Chunked mode with chunk_size=1 should produce 2 data writes + 1 meta write."""
     ok, skip = _ingest_collection(
         mock_spark,
         "smn",
-        smn_raw_dir / "smn",
+        smn_bronze_dir / "smn",
         "`main`",
         "`meteoswiss`",
         chunked=True,
@@ -263,11 +263,11 @@ def test_ingest_collection_empty(tmp_path, mock_spark):
 # ── _ingest_metadata ─────────────────────────────────────────────────────────
 
 
-def test_ingest_metadata(smn_raw_dir, mock_spark):
+def test_ingest_metadata(smn_bronze_dir, mock_spark):
     ok, skip = _ingest_metadata(
         mock_spark,
         "smn",
-        smn_raw_dir / "smn",
+        smn_bronze_dir / "smn",
         "`main`",
         "`meteoswiss`",
     )
@@ -276,9 +276,9 @@ def test_ingest_metadata(smn_raw_dir, mock_spark):
     mock_spark.createDataFrame.assert_called_once()
 
 
-def test_ingest_metadata_multiple_files(smn_raw_dir, mock_spark):
+def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
     """Stations + datainventory + parameters should each become their own table."""
-    smn_dir = smn_raw_dir / "smn"
+    smn_dir = smn_bronze_dir / "smn"
     (smn_dir / "ogd-smn_meta_stations.csv").write_text("station_abbr;station_name\nABO;Adelboden\nBER;Bern\n")
     (smn_dir / "ogd-smn_meta_datainventory.csv").write_text(
         "station_abbr;parameter_shortname;data_since;data_till\nABO;tre200d0;1900-01-01;2026-01-01\n"
@@ -308,8 +308,8 @@ def test_ingest_metadata_no_files(tmp_path, mock_spark):
 # ── _ingest_climate_normals ──────────────────────────────────────────────────
 
 
-def test_ingest_climate_normals(climate_normals_raw_dir, mock_spark):
-    ok, skip = _ingest_climate_normals(mock_spark, climate_normals_raw_dir, "`main`", "`meteoswiss`")
+def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark):
+    ok, skip = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
     assert ok == 1
     assert skip == 0
     mock_spark.createDataFrame.assert_called_once()

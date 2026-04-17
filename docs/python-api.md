@@ -97,6 +97,8 @@ foehn.download("smn", data_dir="./data/meteoswiss")
 foehn.download("smn", time_slice=["historical", "recent"])
 ```
 
+CSVs and metadata files are written to `<data_dir>/bronze/<collection>/`.
+
 ---
 
 ## Converting to Parquet

@@ -91,7 +91,7 @@ resources:
 
       tasks:
         - task_key: download
-          description: "foehn --recent → raw CSVs written to Unity Catalog Volume"
+          description: "foehn --recent → bronze CSVs written to Unity Catalog Volume"
           job_cluster_key: worker
           python_wheel_task:
             package_name: foehn
@@ -265,7 +265,7 @@ resources:
 
       tasks:
         - task_key: download_historical
-          description: "foehn --historical → raw CSVs in Unity Catalog Volume"
+          description: "foehn --historical → bronze CSVs in Unity Catalog Volume"
           job_cluster_key: worker
           python_wheel_task:
             package_name: foehn

@@ -1,6 +1,6 @@
 """Ingest MeteoSwiss CSVs directly into Delta tables via Polars + Spark.
 
-Reads raw CSV files from a Unity Catalog Volume, lazily scans them with
+Reads bronze CSV files from a Unity Catalog Volume, lazily scans them with
 Polars (scan_csv → LazyFrame), concatenates per group, and collects with
 engine="streaming" to keep peak memory low — even for collections that
 exceed RAM (e.g. SMN historical ~20 GB of 10-minute data).
@@ -266,7 +266,7 @@ RADAR_COLLECTIONS = ("radar_precip", "radar_hail")
 
 def _ingest_radar(
     spark: SparkSession,
-    raw_base: Path,
+    bronze_base: Path,
     cat: str,
     sch: str,
     keys: tuple[str, ...] = RADAR_COLLECTIONS,
@@ -282,7 +282,7 @@ def _ingest_radar(
     total_skip = 0
 
     for key in keys:
-        h5_dir = raw_base / key
+        h5_dir = bronze_base / key
         if not h5_dir.exists() or not any(h5_dir.glob("*.h5")):
             print(f"  --  {key:25s} skipped (no data)", flush=True)
             total_skip += 1
@@ -328,9 +328,9 @@ def _ingest_radar(
     return total_ok, total_skip
 
 
-def _ingest_climate_normals(spark: SparkSession, raw_base: Path, catalog: str, schema: str) -> tuple[int, int]:
+def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str, schema: str) -> tuple[int, int]:
     """Ingest climate normals TXT files into a single Delta table."""
-    txt_dir = raw_base / "climate_normals"
+    txt_dir = bronze_base / "climate_normals"
     if not txt_dir.exists():
         print("  --  climate_normals           skipped (no data)", flush=True)
         return 0, 1
@@ -408,7 +408,7 @@ def main() -> None:
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {cat}.{sch}")
         spark.sql(f"CREATE VOLUME IF NOT EXISTS {cat}.{sch}.{vol}")
 
-    raw_base = Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}/raw")
+    bronze_base = Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}/bronze")
 
     total_ok = 0
     total_skip = 0
@@ -418,18 +418,18 @@ def main() -> None:
         invalid = [k for k in keys if k not in RADAR_COLLECTIONS]
         if invalid:
             raise SystemExit(f"Unknown radar collection(s): {invalid}. Valid: {list(RADAR_COLLECTIONS)}")
-        ok, skip = _ingest_radar(spark, raw_base, cat, sch, keys)
+        ok, skip = _ingest_radar(spark, bronze_base, cat, sch, keys)
         print(f"\nDone — {ok} tables written, {skip} skipped.")
         return
 
     for key in TABULAR_COLLECTIONS:
         if key == "climate_normals":
-            ok, skip = _ingest_climate_normals(spark, raw_base, cat, sch)
+            ok, skip = _ingest_climate_normals(spark, bronze_base, cat, sch)
             total_ok += ok
             total_skip += skip
             continue
 
-        csv_dir = raw_base / key
+        csv_dir = bronze_base / key
         if not csv_dir.exists():
             print(f"  --  {key:25s}   skipped (no data)", flush=True)
             total_skip += 1

@@ -121,8 +121,8 @@ def parse_csv_bytes(
         raise last_err from None
 
 
-def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
-    """Convert all CSVs in a collection's raw folder to combined Parquet files.
+def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path):
+    """Convert all CSVs in a collection's bronze folder to combined Parquet files.
 
     Per-station CSVs are grouped by frequency and time slice, then
     concatenated into a single Parquet file per group.  For example,
@@ -130,12 +130,12 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
 
     Args:
         collection_key: Key from COLLECTIONS (e.g. "smn").
-        raw_dir: Root raw download directory (CSVs in raw_dir/<key>/).
+        bronze_dir: Root bronze download directory (CSVs in bronze_dir/<key>/).
         parquet_dir: Root parquet directory (output to parquet_dir/<key>/).
     """
     from foehn.collections import COLLECTIONS, NO_GRANULARITY_COLLECTIONS
 
-    csv_dir = raw_dir / collection_key
+    csv_dir = bronze_dir / collection_key
     out_dir = parquet_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -207,13 +207,13 @@ def convert_to_parquet(collection_key: str, raw_dir: Path, parquet_dir: Path):
     )
 
 
-def convert_climate_normals_to_parquet(raw_dir: Path, parquet_dir: Path):
+def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path):
     """Convert C6 climate normals TXT files to Parquet.
 
     These files use tab separators, latin1 encoding, and have 7 header rows
     to skip before the actual data begins.
     """
-    txt_dir = raw_dir / "climate_normals"
+    txt_dir = bronze_dir / "climate_normals"
     out_dir = parquet_dir / "climate_normals"
     out_dir.mkdir(parents=True, exist_ok=True)
 

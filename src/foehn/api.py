@@ -49,11 +49,11 @@ def download(
         raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset. Use the CLI with --grids instead.")
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    raw_dir = data_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    bronze_dir = data_dir / "bronze"
+    bronze_dir.mkdir(parents=True, exist_ok=True)
 
-    download_metadata(dataset, raw_dir)
-    download_collection(dataset, raw_dir, data_types=time_slice or ["recent"], since=since)
+    download_metadata(dataset, bronze_dir)
+    download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since)
 
 
 def to_parquet(
@@ -71,9 +71,9 @@ def to_parquet(
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    raw_dir = data_dir / "raw"
+    bronze_dir = data_dir / "bronze"
     parquet_dir = data_dir / "parquet"
-    convert_to_parquet(dataset, raw_dir, parquet_dir)
+    convert_to_parquet(dataset, bronze_dir, parquet_dir)
 
 
 def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:

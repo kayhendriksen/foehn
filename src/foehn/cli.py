@@ -105,9 +105,9 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_download(args: argparse.Namespace) -> None:
     data_dir = _resolve_data_dir(args.data_dir)
-    raw_dir = data_dir / "raw"
+    bronze_dir = data_dir / "bronze"
     parquet_dir = data_dir / "parquet"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    bronze_dir.mkdir(parents=True, exist_ok=True)
 
     full_refresh = args.full_refresh or os.environ.get("FOEHN_FULL_REFRESH", "").lower() in ("1", "true", "yes")
 
@@ -131,31 +131,31 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS:
-            download_grib2(ds, raw_dir, since=since)
+            download_grib2(ds, bronze_dir, since=since)
         elif ds in NETCDF_COLLECTIONS:
-            download_netcdf(ds, raw_dir)
+            download_netcdf(ds, bronze_dir)
         else:
-            download_metadata(ds, raw_dir)
-            download_collection(ds, raw_dir, data_types=time_slices, since=since)
+            download_metadata(ds, bronze_dir)
+            download_collection(ds, bronze_dir, data_types=time_slices, since=since)
             if not args.no_parquet:
-                convert_to_parquet(ds, raw_dir, parquet_dir)
+                convert_to_parquet(ds, bronze_dir, parquet_dir)
 
     # C6 climate normals (ZIP from opendata.swiss, not STAC)
     if not args.datasets:
-        download_climate_normals_zip(raw_dir, force=full_refresh)
+        download_climate_normals_zip(bronze_dir, force=full_refresh)
         if not args.no_parquet:
-            convert_climate_normals_to_parquet(raw_dir, parquet_dir)
+            convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
     save_last_run(data_dir)
 
-    print(f"\nRaw data saved to:      {raw_dir}")
+    print(f"\nBronze data saved to:   {bronze_dir}")
     if not args.no_parquet:
         print(f"Parquet files saved to: {parquet_dir}")
 
 
 def cmd_to_parquet(args: argparse.Namespace) -> None:
     data_dir = _resolve_data_dir(args.data_dir)
-    raw_dir = data_dir / "raw"
+    bronze_dir = data_dir / "bronze"
     parquet_dir = data_dir / "parquet"
 
     datasets = _resolve_datasets(args.datasets)
@@ -163,10 +163,10 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS or ds in NETCDF_COLLECTIONS:
             continue
-        convert_to_parquet(ds, raw_dir, parquet_dir)
+        convert_to_parquet(ds, bronze_dir, parquet_dir)
 
     if not args.datasets:
-        convert_climate_normals_to_parquet(raw_dir, parquet_dir)
+        convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
     print(f"Parquet files saved to: {parquet_dir}")
 
