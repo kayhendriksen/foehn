@@ -134,7 +134,7 @@ def cmd_download(args: argparse.Namespace) -> None:
         if ds in GRIB2_COLLECTIONS:
             download_grib2(ds, bronze_dir, since=since, workers=workers)
         elif ds in NETCDF_COLLECTIONS:
-            download_netcdf(ds, bronze_dir, workers=workers)
+            download_netcdf(ds, bronze_dir, since=since, workers=workers)
         else:
             download_metadata(ds, bronze_dir, workers=workers)
             download_collection(ds, bronze_dir, data_types=time_slices, since=since, workers=workers)

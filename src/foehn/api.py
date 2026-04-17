@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-from foehn.client import _retry_session, _validate_href, download_collection, download_metadata
+from foehn.client import DownloadResult, _retry_session, _validate_href, download_collection, download_metadata
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
@@ -35,15 +35,22 @@ def download(
     time_slice: list[str] | None = None,
     since: str | None = None,
     workers: int = 8,
-) -> None:
+) -> DownloadResult:
     """Download a single dataset.
 
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         time_slice: Time slices to download. Defaults to ["recent"].
-        since: ISO timestamp for incremental updates.
+        since: ISO timestamp for incremental updates. For automatic state
+            tracking across runs, use ``foehn.client.load_last_run(data_dir)``
+            to read the last timestamp and ``save_last_run(data_dir)`` after
+            a successful run.
         workers: Concurrent HTTP downloads (default 8).
+
+    Returns:
+        DownloadResult summarising metadata + collection downloads. Use
+        ``result.downloaded > 0`` to gate expensive downstream processing.
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
@@ -54,8 +61,15 @@ def download(
     bronze_dir = data_dir / "bronze"
     bronze_dir.mkdir(parents=True, exist_ok=True)
 
-    download_metadata(dataset, bronze_dir, workers=workers)
-    download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers)
+    meta = download_metadata(dataset, bronze_dir, workers=workers)
+    coll = download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers)
+
+    return DownloadResult(
+        total_assets=meta.total_assets + coll.total_assets,
+        downloaded=meta.downloaded + coll.downloaded,
+        skipped=meta.skipped + coll.skipped,
+        filenames=meta.filenames + coll.filenames,
+    )
 
 
 def to_parquet(

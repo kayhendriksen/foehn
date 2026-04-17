@@ -1,6 +1,6 @@
 """foehn — Download MeteoSwiss Open Government Data and convert to Parquet."""
 
-__version__ = "0.2.18"
+__version__ = "0.2.19"
 
 try:
     import polars as pl
@@ -14,5 +14,16 @@ except Exception as exc:
     ) from exc
 
 from foehn.api import download, inventory, list_datasets, load, parameters, stations, to_parquet
+from foehn.client import DownloadResult
 
-__all__ = ["__version__", "download", "inventory", "list_datasets", "load", "parameters", "stations", "to_parquet"]
+__all__ = [
+    "DownloadResult",
+    "__version__",
+    "download",
+    "inventory",
+    "list_datasets",
+    "load",
+    "parameters",
+    "stations",
+    "to_parquet",
+]

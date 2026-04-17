@@ -68,9 +68,19 @@ def test_download_netcdf_dataset_raises():
 @patch("foehn.api.download_collection")
 @patch("foehn.api.download_metadata")
 def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):
-    download("smn", data_dir=tmp_path, time_slice=["historical"])
+    from foehn.client import DownloadResult
+
+    mock_meta.return_value = DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["m.csv"])
+    mock_dl.return_value = DownloadResult(total_assets=2, downloaded=2, skipped=0, filenames=["a.csv", "b.csv"])
+
+    result = download("smn", data_dir=tmp_path, time_slice=["historical"])
     mock_meta.assert_called_once_with("smn", tmp_path / "bronze", workers=8)
     mock_dl.assert_called_once_with("smn", tmp_path / "bronze", data_types=["historical"], since=None, workers=8)
+
+    assert isinstance(result, DownloadResult)
+    assert result.total_assets == 3
+    assert result.downloaded == 3
+    assert result.filenames == ["m.csv", "a.csv", "b.csv"]
 
 
 def test_to_parquet_unknown_dataset_raises():

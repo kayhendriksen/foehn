@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from foehn.client import (
+    DownloadResult,
     download_climate_normals_zip,
     download_collection,
     download_grib2,
@@ -100,9 +101,13 @@ def test_download_collection_saves_csv(mock_retry, mock_items, tmp_path):
     mock_items.return_value = [_stac_item(url)]
     mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n")
 
-    download_collection("smn", tmp_path / "bronze")
+    result = download_collection("smn", tmp_path / "bronze")
 
     assert (tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
+    assert isinstance(result, DownloadResult)
+    assert result.downloaded == 1
+    assert result.skipped == 0
+    assert result.filenames == ["ogd-smn_tst_d_recent.csv"]
 
 
 @patch("foehn.client.get_collection_items")
@@ -178,9 +183,11 @@ def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
     mock_items.return_value = [_stac_item(url, updated="2025-06-01T00:00:00Z")]
     mock_get.return_value = _csv_response()
 
-    download_collection("smn", tmp_path / "bronze", since="2026-01-01T00:00:00Z")
+    result = download_collection("smn", tmp_path / "bronze", since="2026-01-01T00:00:00Z")
 
     mock_get.assert_not_called()
+    assert result.downloaded == 0
+    assert result.filenames == []
 
 
 # --- download_metadata ---
@@ -193,9 +200,11 @@ def test_download_metadata_saves_csv(mock_retry, mock_meta, tmp_path):
     mock_meta.return_value = {"assets": {"stations": {"href": "https://data.geo.admin.ch/stations.csv"}}}
     mock_get.return_value = _csv_response(b"id;name\nTST;Test Station\n")
 
-    download_metadata("smn", tmp_path / "bronze")
+    result = download_metadata("smn", tmp_path / "bronze")
 
     assert (tmp_path / "bronze" / "smn" / "stations.csv").exists()
+    assert result.downloaded == 1
+    assert result.filenames == ["stations.csv"]
 
 
 @patch("foehn.client.get_collection_metadata")
@@ -277,9 +286,11 @@ def test_download_grib2_saves_binary(mock_retry, tmp_path):
 
     mock_get.side_effect = [items_resp, file_resp]
 
-    download_grib2("forecast_icon_ch1", tmp_path / "bronze")
+    result = download_grib2("forecast_icon_ch1", tmp_path / "bronze")
 
     assert (tmp_path / "bronze" / "forecast_icon_ch1" / "forecast.grib2").exists()
+    assert result.downloaded == 1
+    assert result.filenames == ["forecast.grib2"]
 
 
 @patch("foehn.client._retry_session")
@@ -316,9 +327,11 @@ def test_download_netcdf_saves_nc_file(mock_retry, mock_items, tmp_path):
     ]
     mock_get.return_value = _stream_response(chunks=(b"\x89HDF",))
 
-    download_netcdf("surface_derived_grid", tmp_path / "bronze")
+    result = download_netcdf("surface_derived_grid", tmp_path / "bronze")
 
     assert (tmp_path / "bronze" / "surface_derived_grid" / "grid.nc").exists()
+    assert result.downloaded == 1
+    assert result.filenames == ["grid.nc"]
 
 
 @patch("foehn.client.get_collection_items")
@@ -333,6 +346,28 @@ def test_download_netcdf_skips_existing_file(mock_retry, mock_items, tmp_path):
     out_dir.mkdir(parents=True)
     (out_dir / "grid.nc").write_bytes(b"existing")
 
-    download_netcdf("surface_derived_grid", tmp_path / "bronze")
+    result = download_netcdf("surface_derived_grid", tmp_path / "bronze")
 
     mock_get.assert_not_called()
+    assert result.downloaded == 0
+    assert result.skipped == 1
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
+def test_download_netcdf_since_filter(mock_retry, mock_items, tmp_path):
+    """Items older than `since` should be skipped without any HTTP call."""
+    mock_get = mock_retry.return_value.get
+    mock_items.return_value = [
+        {
+            "id": "g1",
+            "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}},
+            "properties": {"updated": "2025-06-01T00:00:00Z"},
+        }
+    ]
+
+    result = download_netcdf("surface_derived_grid", tmp_path / "bronze", since="2026-01-01T00:00:00Z")
+
+    mock_get.assert_not_called()
+    assert result.downloaded == 0
+    assert result.filenames == []

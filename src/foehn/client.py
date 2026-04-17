@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,10 +29,25 @@ _ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss", "rgw.cscs.ch"}
 DEFAULT_WORKERS = 8
 
 
+@dataclass
+class DownloadResult:
+    """Summary of a download call. Returned by all download_* functions.
+
+    Callers use this to decide whether to run expensive downstream work
+    (e.g. Spark MERGE INTO) without scanning the output directory.
+    """
+
+    total_assets: int = 0
+    downloaded: int = 0
+    skipped: int = 0
+    filenames: list[str] = field(default_factory=list)
+
+
 def _retry_session(
     retries: int = 3,
     backoff_factor: float = 1.0,
     status_forcelist: tuple[int, ...] = (500, 502, 503, 504),
+    pool_maxsize: int = DEFAULT_WORKERS,
 ) -> requests.Session:
     """Return a requests session with automatic retry on transient errors."""
     session = requests.Session()
@@ -44,7 +60,11 @@ def _retry_session(
         connect=retries,
         read=retries,
     )
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=pool_maxsize,
+        pool_maxsize=pool_maxsize,
+    )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
@@ -124,7 +144,7 @@ def download_collection(
     data_types: list[str] | None = None,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
-):
+) -> DownloadResult:
     """Download CSVs for a collection.
 
     Args:
@@ -133,6 +153,9 @@ def download_collection(
         data_types: List of "historical", "recent", "now". Defaults to ["recent"].
         since: ISO timestamp — only process items updated after this time.
         workers: Number of concurrent HTTP downloads.
+
+    Returns:
+        DownloadResult with counts and list of newly downloaded filenames.
     """
     if data_types is None:
         data_types = ["recent"]
@@ -158,7 +181,7 @@ def download_collection(
         print(f"  {len(items)} items updated since last run", flush=True)
         if not items:
             print("  Nothing changed — skipping", flush=True)
-            return
+            return DownloadResult()
 
     # For forecast collections, only keep the latest item (newest forecast run)
     if collection_key in FORECAST_CSV_COLLECTIONS and items:
@@ -186,10 +209,11 @@ def download_collection(
 
     print(f"  {len(csv_assets)} CSV files to process", flush=True)
 
-    session = _retry_session()
+    session = _retry_session(pool_maxsize=workers)
     total = len(csv_assets)
     downloaded = 0
     skipped = 0
+    filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(
@@ -209,6 +233,7 @@ def download_collection(
             if new_etag:
                 etags[href] = new_etag
             downloaded += 1
+            filenames.append(filename)
             print(f"  [{i}/{total}] Downloaded: {filename}", flush=True)
 
     save_etags(output_dir.parent, etags)
@@ -216,11 +241,13 @@ def download_collection(
         print(f"  Skipped {skipped} unchanged files", flush=True)
     print(f"  Done — {downloaded} files downloaded", flush=True)
 
+    return DownloadResult(total_assets=total, downloaded=downloaded, skipped=skipped, filenames=filenames)
+
 
 # --- Metadata downloads ---
 
 
-def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS):
+def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS) -> DownloadResult:
     """Download collection-level metadata files (stations, parameters, inventory)."""
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
@@ -229,7 +256,7 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
     coll = get_collection_metadata(collection_id)
     assets = coll.get("assets", {})
     if not assets:
-        return
+        return DownloadResult()
 
     targets = [
         (asset_info["href"], out_dir / asset_info["href"].split("?")[0].split("/")[-1])
@@ -237,19 +264,23 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
         if asset_info.get("href", "").endswith(".csv")
     ]
     if not targets:
-        return
+        return DownloadResult()
 
-    session = _retry_session()
+    session = _retry_session(pool_maxsize=workers)
     downloaded = 0
+    filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_download_csv, session, href, filepath, None) for href, filepath in targets]
         for fut in as_completed(futures):
             filename = fut.result()[2]
             downloaded += 1
+            filenames.append(filename)
             print(f"  Metadata: {filename}", flush=True)
 
     if downloaded:
         print(f"  {downloaded} metadata files downloaded", flush=True)
+
+    return DownloadResult(total_assets=len(targets), downloaded=downloaded, skipped=0, filenames=filenames)
 
 
 # --- GRIB2 / HDF5 downloads ---
@@ -292,7 +323,7 @@ def download_grib2(
     output_dir: Path,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
-):
+) -> DownloadResult:
     """Download GRIB2/HDF5 binary files (latest page only)."""
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
@@ -315,7 +346,7 @@ def download_grib2(
         print(f"  {len(items)} items updated since last run", flush=True)
         if not items:
             print("  Nothing changed — skipping", flush=True)
-            return
+            return DownloadResult()
 
     binary_assets = []
     for item in items:
@@ -339,24 +370,45 @@ def download_grib2(
         if _needs_redownload(out_dir / filename, updated)
     ]
 
-    session = _retry_session()
+    session = _retry_session(pool_maxsize=workers)
     total = len(to_fetch)
     downloaded = 0
+    filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_download_binary, session, href, filepath) for href, filepath in to_fetch]
         for i, fut in enumerate(as_completed(futures), 1):
             filename = fut.result()
             downloaded += 1
+            filenames.append(filename)
             print(f"  [{i}/{total}] Downloaded: {filename}", flush=True)
 
     print(f"\n  Done — {downloaded} binary files downloaded", flush=True)
+
+    return DownloadResult(
+        total_assets=len(binary_assets),
+        downloaded=downloaded,
+        skipped=len(binary_assets) - total,
+        filenames=filenames,
+    )
 
 
 # --- NetCDF / GeoTIFF / ZIP downloads ---
 
 
-def download_netcdf(collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS):
-    """Download NetCDF, GeoTIFF, and ZIP files for spatial/static collections."""
+def download_netcdf(
+    collection_key: str,
+    output_dir: Path,
+    since: str | None = None,
+    workers: int = DEFAULT_WORKERS,
+) -> DownloadResult:
+    """Download NetCDF, GeoTIFF, and ZIP files for spatial/static collections.
+
+    Args:
+        collection_key: Key from COLLECTIONS.
+        output_dir: Root directory for bronze downloads.
+        since: ISO timestamp — only process items updated after this time.
+        workers: Number of concurrent HTTP downloads.
+    """
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -369,6 +421,14 @@ def download_netcdf(collection_key: str, output_dir: Path, workers: int = DEFAUL
     items = get_collection_items(collection_id, require_csv=False)
     print(f"  Found {len(items)} items", flush=True)
 
+    if since:
+        items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
+        print(f"  {len(items)} items updated since last run", flush=True)
+        if not items:
+            print("  Nothing changed — skipping", flush=True)
+            return DownloadResult()
+
+    total_assets = 0
     targets: list[tuple[str, Path]] = []
     for item in items:
         for asset_info in item.get("assets", {}).values():
@@ -376,27 +436,37 @@ def download_netcdf(collection_key: str, output_dir: Path, workers: int = DEFAUL
             clean = href.split("?")[0]
             if not clean.endswith((".nc", ".tif", ".zip")):
                 continue
+            total_assets += 1
             filepath = out_dir / clean.split("/")[-1]
             if filepath.exists():
                 continue
             targets.append((href, filepath))
 
-    session = _retry_session()
+    session = _retry_session(pool_maxsize=workers)
     downloaded = 0
+    filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_download_binary, session, href, filepath) for href, filepath in targets]
         for fut in as_completed(futures):
             filename = fut.result()
             downloaded += 1
+            filenames.append(filename)
             print(f"  Downloaded: {filename}", flush=True)
 
     print(f"  Done — {downloaded} files downloaded", flush=True)
+
+    return DownloadResult(
+        total_assets=total_assets,
+        downloaded=downloaded,
+        skipped=total_assets - downloaded,
+        filenames=filenames,
+    )
 
 
 # --- C6 climate normals ZIP ---
 
 
-def download_climate_normals_zip(output_dir: Path, force: bool = False):
+def download_climate_normals_zip(output_dir: Path, force: bool = False) -> DownloadResult:
     """Download C6 climate normals ZIP from opendata.swiss and extract."""
     out_dir = output_dir / "climate_normals"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -404,7 +474,7 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False):
 
     if filepath.exists() and not force:
         print("\n  Climate normals ZIP already downloaded — skipping", flush=True)
-        return
+        return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     print(f"\n{'=' * 60}", flush=True)
     print("Climate normals (C6): downloading from opendata.swiss", flush=True)
@@ -423,3 +493,5 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False):
                 raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
         zf.extractall(out_dir)
         print(f"  Extracted {len(zf.namelist())} files", flush=True)
+
+    return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["normwerte.zip"])
