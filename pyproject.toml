@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "foehn"
-version = "0.2.19"
+version = "0.2.20"
 description = "Python toolkit for Swiss weather data — download, query, and analyse MeteoSwiss Open Government Data"
 readme = "README.md"
 license = "MIT"

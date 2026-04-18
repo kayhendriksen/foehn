@@ -184,17 +184,42 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
 
         print(f"  {out_name} ({len(files)} files)...", end="", flush=True)
 
+        # Stay streaming the whole way: on dtype-drift errors (Int inferred from
+        # the first N rows but a later row carries a decimal), parse the column
+        # name out of the polars error, force it to Float64, and retry.  RSS
+        # stays bounded — the alternative of materialising every CSV blew up
+        # the driver on historical groups.
+        overrides: dict[str, pl.DataType] = dict(metadata_types or {})
+        recovered: list[str] = []
         try:
-            frames: list[pl.DataFrame] = []
-            overrides: dict[str, pl.DataType] = {}
-            for csv_path in files:
-                df = parse_csv_bytes(csv_path.read_bytes(), metadata_types, _fallback_overrides=overrides)
-                frames.append(df)
-            combined = pl.concat(frames, how="diagonal_relaxed")
-            combined.write_parquet(parquet_path, compression="zstd")
+            while True:
+                try:
+                    lazy_frames = [
+                        pl.scan_csv(
+                            f,
+                            separator=";",
+                            try_parse_dates=True,
+                            schema_overrides=overrides or None,
+                            infer_schema_length=10_000,
+                        )
+                        for f in files
+                    ]
+                    pl.concat(lazy_frames, how="diagonal_relaxed").sink_parquet(parquet_path, compression="zstd")
+                    break
+                except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
+                    m = _COL_RE.search(str(e))
+                    if not m:
+                        raise
+                    col = m.group(1)
+                    # If we already forced this column to Float64 and it still
+                    # fails, we can't recover by widening dtype further.
+                    if overrides.get(col) == pl.Float64:
+                        raise
+                    overrides[col] = pl.Float64
+                    recovered.append(col)
             converted += 1
-            if overrides:
-                fixed = ", ".join(f"{c}→float" for c in overrides)
+            if recovered:
+                fixed = ", ".join(f"{c}→float" for c in recovered)
                 print(f" OK ({fixed})", flush=True)
             else:
                 print(" OK", flush=True)
