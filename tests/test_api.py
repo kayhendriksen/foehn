@@ -90,8 +90,23 @@ def test_to_parquet_unknown_dataset_raises():
 
 @patch("foehn.api.convert_to_parquet")
 def test_to_parquet_calls_convert_to_parquet(mock_conv, tmp_path):
+    mock_conv.return_value = 0
     to_parquet("smn", data_dir=tmp_path)
     mock_conv.assert_called_once_with("smn", tmp_path / "bronze", tmp_path / "parquet")
+
+
+@patch("foehn.api.convert_to_parquet")
+def test_to_parquet_raises_on_convert_failure(mock_conv, tmp_path):
+    """Python API should mirror the CLI: any conversion failure raises, not silent."""
+    mock_conv.return_value = 2
+    with pytest.raises(RuntimeError, match="2 group"):
+        to_parquet("smn", data_dir=tmp_path)
+
+
+@patch("foehn.api.convert_to_parquet")
+def test_to_parquet_silent_when_no_failures(mock_conv, tmp_path):
+    mock_conv.return_value = 0
+    to_parquet("smn", data_dir=tmp_path)  # must not raise
 
 
 # --- read() tests ---

@@ -16,12 +16,11 @@
 bundle:
   name: foehn
 
-workspace:
-  host: ${var.host}
+# Workspace host is NOT set here — Databricks does not allow variable
+# interpolation in auth fields. Authenticate via DATABRICKS_HOST env var,
+# a profile in ~/.databrickscfg, or `databricks bundle deploy --profile <name>`.
 
 variables:
-  host:
-    description: "Databricks workspace URL (e.g. https://adb-xxx.azuredatabricks.net)"
   catalog:
     description: "Unity Catalog catalog name"
     default: main

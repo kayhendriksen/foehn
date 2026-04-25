@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -90,6 +91,11 @@ def to_parquet(
     Args:
         dataset: Dataset name (e.g. "smn").
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
+
+    Raises:
+        RuntimeError: If one or more groups fail to convert. Each failure is
+            also printed to stdout. Mirrors the CLI's exit-1 semantics so
+            Python callers can't accidentally treat partial output as success.
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
@@ -97,7 +103,11 @@ def to_parquet(
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     parquet_dir = data_dir / "parquet"
-    convert_to_parquet(dataset, bronze_dir, parquet_dir)
+    failures = convert_to_parquet(dataset, bronze_dir, parquet_dir)
+    if failures:
+        raise RuntimeError(
+            f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
+        )
 
 
 def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
@@ -354,10 +364,17 @@ def load(
         filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"
         raise ValueError(f"No CSV files found for {dataset!r} with {filters}.")
 
-    # 3. Download and parse each CSV concurrently.
+    # 3. Download and parse each CSV concurrently. requests.Session is not
+    # fully thread-safe (cookie jar, headers), so each worker thread gets its
+    # own session via threading.local. Sessions are scoped to this call —
+    # garbage-collected when the function returns.
+    local = threading.local()
+
     def _fetch(href: str) -> pl.DataFrame:
+        if not hasattr(local, "session"):
+            local.session = _retry_session(pool_maxsize=1)
         _validate_href(href)
-        resp = session.get(href, timeout=60)
+        resp = local.session.get(href, timeout=60)
         resp.raise_for_status()
         try:
             content = resp.content.decode("utf-8-sig")
