@@ -121,7 +121,7 @@ def parse_csv_bytes(
         raise last_err from None
 
 
-def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path):
+def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert all CSVs in a collection's bronze folder to combined Parquet files.
 
     Per-station CSVs are grouped by frequency and time slice, then
@@ -132,6 +132,10 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
         collection_key: Key from COLLECTIONS (e.g. "smn").
         bronze_dir: Root bronze download directory (CSVs in bronze_dir/<key>/).
         parquet_dir: Root parquet directory (output to parquet_dir/<key>/).
+
+    Returns:
+        Number of groups that failed to convert. Zero means everything succeeded;
+        non-zero lets callers gate downstream state writes (e.g. ``_last_run.json``).
     """
     from foehn.collections import COLLECTIONS, NO_GRANULARITY_COLLECTIONS
 
@@ -142,7 +146,7 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
     csv_files = sorted(csv_dir.glob("*.csv"))
     csv_files = [f for f in csv_files if "_meta_" not in f.name]
     if not csv_files:
-        return
+        return 0
 
     # Load parameter type info from metadata once for the whole collection.
     metadata_types = _load_metadata_types(csv_dir)
@@ -167,6 +171,7 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
     print(f"Converting {collection_key} to Parquet:", flush=True)
     converted = 0
     skipped = 0
+    failed = 0
     for group_key, files in sorted(groups.items()):
         # Output name: smn_d_recent.parquet, smn_d.parquet, or smn.parquet
         if group_key:
@@ -224,15 +229,17 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
             else:
                 print(" OK", flush=True)
         except Exception as e:
+            failed += 1
             print(f" FAIL: {e}", flush=True)
 
     print(
-        f"  Done: {converted} converted, {skipped} skipped (up-to-date)",
+        f"  Done: {converted} converted, {skipped} skipped (up-to-date), {failed} failed",
         flush=True,
     )
+    return failed
 
 
-def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path):
+def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert C6 climate normals TXT files to Parquet.
 
     These files use tab separators, latin1 encoding, and have 7 header rows
@@ -244,11 +251,12 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path):
 
     txt_files = sorted(txt_dir.glob("*.txt"))
     if not txt_files:
-        return
+        return 0
 
     print("Converting climate_normals to Parquet:", flush=True)
     converted = 0
     skipped = 0
+    failed = 0
     total = len(txt_files)
     for i, txt_path in enumerate(txt_files, 1):
         parquet_path = out_dir / txt_path.with_suffix(".parquet").name
@@ -272,9 +280,11 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path):
             converted += 1
             print(" Converted", flush=True)
         except Exception as e:
+            failed += 1
             print(f" FAIL: {e}", flush=True)
 
     print(
-        f"  Done: {converted} converted, {skipped} skipped (up-to-date)",
+        f"  Done: {converted} converted, {skipped} skipped (up-to-date), {failed} failed",
         flush=True,
     )
+    return failed

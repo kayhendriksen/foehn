@@ -36,6 +36,9 @@ variables:
     default: Standard_D4ds_v5
   spark_version:
     default: "17.3.x-scala2.13"
+  alert_email:
+    description: "Email address to notify on job failure (set via BUNDLE_VAR_alert_email)"
+    default: ""
 
 # ── Targets (environments) ────────────────────────────────────────────────────
 

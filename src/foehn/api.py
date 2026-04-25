@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
 
-from foehn.client import DownloadResult, _retry_session, _validate_href, download_collection, download_metadata
+from foehn.client import (
+    DEFAULT_WORKERS,
+    DownloadResult,
+    _retry_session,
+    _validate_href,
+    download_collection,
+    download_metadata,
+)
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
@@ -198,6 +206,8 @@ def load(
     columns: list[str] | None = None,
     drop_null: str | None = None,
     sort: str | None = None,
+    limit: int | None = None,
+    workers: int = DEFAULT_WORKERS,
 ) -> pl.DataFrame:
     """Load a dataset and return it as an in-memory Polars DataFrame.
 
@@ -223,6 +233,13 @@ def load(
         drop_null: Drop rows where this column is null.
         sort: Sort by timestamp. Options: "asc" (oldest first) or "desc"
             (newest first).
+        limit: Cap the returned DataFrame to N rows. Applied after sort/columns.
+            NOTE: this only bounds the returned shape — it does not reduce
+            network bytes, since CSVs are per-station and not pre-bucketed by
+            row count. To reduce wire volume, narrow with ``time_slice="now"``,
+            ``year``, or ``date_from/date_to``.
+        workers: Concurrent CSV downloads (default 8). The CSV fetches are
+            parallelised via a ThreadPoolExecutor; metadata fetch stays serial.
 
     Returns:
         A Polars DataFrame containing all matching CSV data.
@@ -239,6 +256,10 @@ def load(
 
         # Daily data for Bern, only January 2026
         df = foehn.load("smn", station="BER", frequency="d", year=2026, month=1)
+
+        # Latest 10 readings (sort+limit are applied after the CSV is parsed)
+        df = foehn.load("smn", station="BER", frequency="t",
+                        time_slice="now", sort="desc", limit=10)
 
         # Summer 2025 temperatures, sorted newest first
         df = foehn.load("smn", station="BER", frequency="d",
@@ -275,7 +296,7 @@ def load(
             freq_filter = {f.lower() for f in frequency}
 
     collection_id = COLLECTIONS[dataset]
-    session = _retry_session()
+    session = _retry_session(pool_maxsize=workers)
 
     # 1. Fetch metadata types for schema inference.
     metadata_types: dict[str, pl.DataType] = {}
@@ -333,9 +354,8 @@ def load(
         filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"
         raise ValueError(f"No CSV files found for {dataset!r} with {filters}.")
 
-    # 3. Download and parse each CSV in memory.
-    frames: list[pl.DataFrame] = []
-    for href in csv_hrefs:
+    # 3. Download and parse each CSV concurrently.
+    def _fetch(href: str) -> pl.DataFrame:
         _validate_href(href)
         resp = session.get(href, timeout=60)
         resp.raise_for_status()
@@ -343,8 +363,13 @@ def load(
             content = resp.content.decode("utf-8-sig")
         except UnicodeDecodeError:
             content = resp.content.decode("windows-1252")
-        df = parse_csv_bytes(content.encode("utf-8"), metadata_types)
-        frames.append(df)
+        return parse_csv_bytes(content.encode("utf-8"), metadata_types)
+
+    if len(csv_hrefs) == 1 or workers <= 1:
+        frames = [_fetch(href) for href in csv_hrefs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            frames = list(pool.map(_fetch, csv_hrefs))
 
     df = pl.concat(frames, how="diagonal_relaxed")
 
@@ -368,5 +393,7 @@ def load(
         keep = ["station_abbr", "reference_timestamp"]
         keep += [c for c in columns if c not in keep and c in df.columns]
         df = df.select(keep)
+    if limit is not None:
+        df = df.head(limit)
 
     return df

@@ -635,3 +635,65 @@ def test_load_all_filters_combined(mock_session, mock_meta, mock_items):
     assert len(df) == 2
     assert set(df.columns) == {"station_abbr", "reference_timestamp", "temp"}
     assert df["temp"][0] == 25.0  # July first (desc)
+
+
+# --- limit + concurrent fetching ---
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_limit_caps_rows(mock_session, mock_meta, mock_items):
+    """limit param should cap the returned DataFrame to N rows."""
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", limit=2)
+    assert len(df) == 2
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_limit_applied_after_sort(mock_session, mock_meta, mock_items):
+    """limit + sort='desc' should give the N newest rows."""
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", sort="desc", limit=1)
+    assert len(df) == 1
+    # newest row in _FILTER_CSV is 2025-12-01
+    assert df["reference_timestamp"][0].year == 2025
+    assert df["reference_timestamp"][0].month == 12
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_workers_one_uses_serial_path(mock_session, mock_meta, mock_items):
+    """workers=1 should still produce a correct DataFrame (covers the serial branch)."""
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = _smn_items("ber")
+
+    csv_data = "station;temp\nBER;20\n"
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(csv_data))
+    mock_session.return_value = session
+
+    df = load("smn", station="BER", frequency="d", workers=1)
+    assert isinstance(df, pl.DataFrame)
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_concurrent_fetch_multiple_files(mock_session, mock_meta, mock_items):
+    """With multiple CSVs and workers>1, all are fetched and concatenated."""
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = _smn_items("ber", "zur", "gen")
+
+    csv_data = "station;temp\nX;20\n"
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(csv_data))
+    mock_session.return_value = session
+
+    df = load("smn", frequency="d", workers=4)
+    # 3 stations × 1 frequency = 3 fetches
+    assert session.get.call_count == 3
+    assert len(df) == 3

@@ -134,6 +134,7 @@ def _load_and_filter(
     columns: list[str] | None,
     drop_null: str | None,
     sort: str | None,
+    limit: int | None = None,
 ) -> pl.DataFrame:
     """Load a dataset and apply all filters via foehn.load()."""
     kwargs: dict = {}
@@ -157,6 +158,8 @@ def _load_and_filter(
         kwargs["drop_null"] = drop_null
     if sort:
         kwargs["sort"] = sort
+    if limit is not None:
+        kwargs["limit"] = limit
     return foehn.load(dataset, **kwargs)
 
 
@@ -264,8 +267,9 @@ def load_data(
         columns,
         drop_null,
         sort,
+        limit=limit,
     )
-    return df.head(limit).to_dicts()
+    return df.to_dicts()
 
 
 @mcp.tool(title="Describe data", annotations=_READ_ONLY)

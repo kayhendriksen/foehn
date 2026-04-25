@@ -130,6 +130,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
 
     workers = args.workers
+    failures = 0
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS:
             download_grib2(ds, bronze_dir, since=since, workers=workers)
@@ -139,19 +140,31 @@ def cmd_download(args: argparse.Namespace) -> None:
             download_metadata(ds, bronze_dir, workers=workers)
             download_collection(ds, bronze_dir, data_types=time_slices, since=since, workers=workers)
             if not args.no_parquet:
-                convert_to_parquet(ds, bronze_dir, parquet_dir)
+                failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
 
     # C6 climate normals (ZIP from opendata.swiss, not STAC)
     if not args.datasets:
         download_climate_normals_zip(bronze_dir, force=full_refresh)
         if not args.no_parquet:
-            convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+            failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
-    save_last_run(data_dir)
+    if failures == 0:
+        save_last_run(data_dir)
+    else:
+        # Don't advance the incremental cursor if any conversion failed —
+        # otherwise the next run will skip the broken inputs as "already seen".
+        print(
+            f"\n{failures} conversion failure(s) — not advancing _last_run.json. Re-run after fixing.",
+            file=sys.stderr,
+            flush=True,
+        )
 
     print(f"\nBronze data saved to:   {bronze_dir}")
     if not args.no_parquet:
         print(f"Parquet files saved to: {parquet_dir}")
+
+    if failures:
+        sys.exit(1)
 
 
 def cmd_to_parquet(args: argparse.Namespace) -> None:
@@ -161,15 +174,19 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
 
     datasets = _resolve_datasets(args.datasets)
 
+    failures = 0
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS or ds in NETCDF_COLLECTIONS:
             continue
-        convert_to_parquet(ds, bronze_dir, parquet_dir)
+        failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
 
     if not args.datasets:
-        convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+        failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
     print(f"Parquet files saved to: {parquet_dir}")
+
+    if failures:
+        sys.exit(1)
 
 
 def cmd_metadata(args: argparse.Namespace) -> None:

@@ -20,15 +20,22 @@ _PATCHES = [
 ]
 
 
-def _run(subcommand, args, tmp_path):
-    """Invoke main() with patched sys.argv and all I/O mocked."""
+def _start_mocks():
+    """Start patches, set conversion mocks to return 0 (no failures), return mock dict."""
     mocks = {}
     patchers = [patch(t) for t in _PATCHES]
     started = [p.start() for p in patchers]
     for name, mock in zip(_PATCHES, started, strict=True):
         mocks[name.split(".")[-1]] = mock
     mocks["load_last_run"].return_value = None
+    mocks["convert_to_parquet"].return_value = 0
+    mocks["convert_climate_normals_to_parquet"].return_value = 0
+    return mocks, patchers
 
+
+def _run(subcommand, args, tmp_path):
+    """Invoke main() with patched sys.argv and all I/O mocked."""
+    mocks, patchers = _start_mocks()
     try:
         with patch("sys.argv", ["foehn", subcommand, "--data-dir", str(tmp_path), *args]):
             main()
@@ -41,13 +48,7 @@ def _run(subcommand, args, tmp_path):
 
 def _run_without_data_dir(subcommand, args, tmp_path):
     """Like _run but without --data-dir, so env var can take effect."""
-    mocks = {}
-    patchers = [patch(t) for t in _PATCHES]
-    started = [p.start() for p in patchers]
-    for name, mock in zip(_PATCHES, started, strict=True):
-        mocks[name.split(".")[-1]] = mock
-    mocks["load_last_run"].return_value = None
-
+    mocks, patchers = _start_mocks()
     try:
         with patch("sys.argv", ["foehn", subcommand, *args]):
             main()
@@ -218,11 +219,7 @@ def test_list_no_matches(tmp_path, capsys):
 
 
 def test_incremental_prints_since(tmp_path, capsys):
-    mocks = {}
-    patchers = [patch(t) for t in _PATCHES]
-    started = [p.start() for p in patchers]
-    for name, mock in zip(_PATCHES, started, strict=True):
-        mocks[name.split(".")[-1]] = mock
+    mocks, patchers = _start_mocks()
     mocks["load_last_run"].return_value = "2025-01-01T00:00:00"
 
     try:
@@ -234,6 +231,44 @@ def test_incremental_prints_since(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Incremental update" in out
+
+
+# --- failure gating ---
+
+
+def test_save_last_run_skipped_on_convert_failure(tmp_path, capsys):
+    """If convert_to_parquet reports failures, _last_run.json must NOT be saved."""
+    mocks, patchers = _start_mocks()
+    mocks["convert_to_parquet"].return_value = 2  # 2 groups failed
+    try:
+        with patch("sys.argv", ["foehn", "download", "--data-dir", str(tmp_path)]), pytest.raises(SystemExit) as exc:
+            main()
+    finally:
+        for p in patchers:
+            p.stop()
+
+    assert exc.value.code == 1
+    mocks["save_last_run"].assert_not_called()
+    err = capsys.readouterr().err
+    assert "not advancing _last_run.json" in err
+
+
+def test_save_last_run_called_on_clean_run(tmp_path):
+    """When all conversions return 0 failures, _last_run.json is saved as before."""
+    mocks = _run("download", [], tmp_path)
+    mocks["save_last_run"].assert_called_once()
+
+
+def test_to_parquet_exits_nonzero_on_failure(tmp_path):
+    mocks, patchers = _start_mocks()
+    mocks["convert_to_parquet"].return_value = 1
+    try:
+        with patch("sys.argv", ["foehn", "to-parquet", "--data-dir", str(tmp_path)]), pytest.raises(SystemExit) as exc:
+            main()
+    finally:
+        for p in patchers:
+            p.stop()
+    assert exc.value.code == 1
 
 
 # --- to-parquet skips grids ---
