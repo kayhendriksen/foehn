@@ -15,11 +15,10 @@ pip install databricks-cli
 
 ## Setup
 
-Set your Databricks workspace URL and alert email:
+Set your Databricks workspace URL via the standard unified-auth env var (or a `~/.databrickscfg` profile passed with `--profile`):
 
 ```bash
-export BUNDLE_VAR_host=https://adb-xxx.azuredatabricks.net
-export BUNDLE_VAR_alert_email=you@example.com
+export DATABRICKS_HOST=https://adb-xxx.azuredatabricks.net
 ```
 
 ---

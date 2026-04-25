@@ -35,9 +35,6 @@ variables:
     default: Standard_D4ds_v5
   spark_version:
     default: "17.3.x-scala2.13"
-  alert_email:
-    description: "Email address to notify on job failure (set via BUNDLE_VAR_alert_email)"
-    default: ""
 
 # ── Targets (environments) ────────────────────────────────────────────────────
 
@@ -123,10 +120,6 @@ resources:
           libraries:
             - whl: ./dist/foehn-*.whl
 
-      email_notifications:
-        on_failure:
-          - ${var.alert_email}    # set via env: BUNDLE_VAR_alert_email
-
     # ── Radar precipitation: 5-min year-round (D1) ────────────────────────────
     foehn_radar_precip:
       name: "[foehn] Radar precip (5-min)"
@@ -182,10 +175,6 @@ resources:
               - "${var.schema}"
               - "--volume"
               - "${var.volume}"
-
-      email_notifications:
-        on_failure:
-          - ${var.alert_email}
 
     # ── Radar hail: 5-min Apr–Sep only (D3, seasonal) ─────────────────────────
     foehn_radar_hail:
@@ -243,10 +232,6 @@ resources:
               - "--volume"
               - "${var.volume}"
 
-      email_notifications:
-        on_failure:
-          - ${var.alert_email}
-
     # ── Historical: full archive backfill ─────────────────────────────────────
     foehn_historical:
       name: "[foehn] Historical backfill"
@@ -299,7 +284,3 @@ resources:
               - "${var.volume}"
           libraries:
             - whl: ./dist/foehn-*.whl
-
-      email_notifications:
-        on_failure:
-          - ${var.alert_email}
