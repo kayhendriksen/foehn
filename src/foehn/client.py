@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import zipfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -76,6 +78,25 @@ def _validate_href(href: str) -> str:
     if parsed.hostname not in _ALLOWED_DOMAINS:
         raise ValueError(f"Untrusted download domain: {parsed.hostname}")
     return href
+
+
+def _thread_local_session() -> Callable[[], requests.Session]:
+    """Return a getter that lazily creates one ``requests.Session`` per worker thread.
+
+    ``requests.Session`` is not fully thread-safe (cookie jar, headers), so any
+    parallel download path should use this rather than sharing a single session
+    across a ``ThreadPoolExecutor``. Sessions live for the lifetime of the
+    returned closure — when the caller drops the getter, the per-thread sessions
+    are garbage-collected with it.
+    """
+    local = threading.local()
+
+    def get() -> requests.Session:
+        if not hasattr(local, "session"):
+            local.session = _retry_session(pool_maxsize=1)
+        return local.session
+
+    return get
 
 
 # --- State files (ETags + last-run timestamp) ---
@@ -209,7 +230,11 @@ def download_collection(
 
     print(f"  {len(csv_assets)} CSV files to process", flush=True)
 
-    session = _retry_session(pool_maxsize=workers)
+    get_session = _thread_local_session()
+
+    def _do_csv(href: str, filepath: Path, etag: str | None) -> tuple[str, str, str, str | None]:
+        return _download_csv(get_session(), href, filepath, etag)
+
     total = len(csv_assets)
     downloaded = 0
     skipped = 0
@@ -217,8 +242,7 @@ def download_collection(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(
-                _download_csv,
-                session,
+                _do_csv,
                 href,
                 out_dir / href.split("?")[0].split("/")[-1],
                 etags.get(href),
@@ -266,11 +290,15 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
     if not targets:
         return DownloadResult()
 
-    session = _retry_session(pool_maxsize=workers)
+    get_session = _thread_local_session()
+
+    def _do_csv(href: str, filepath: Path) -> tuple[str, str, str, str | None]:
+        return _download_csv(get_session(), href, filepath, None)
+
     downloaded = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_download_csv, session, href, filepath, None) for href, filepath in targets]
+        futures = [pool.submit(_do_csv, href, filepath) for href, filepath in targets]
         for fut in as_completed(futures):
             filename = fut.result()[2]
             downloaded += 1
@@ -370,12 +398,16 @@ def download_grib2(
         if _needs_redownload(out_dir / filename, updated)
     ]
 
-    session = _retry_session(pool_maxsize=workers)
+    get_session = _thread_local_session()
+
+    def _do_binary(href: str, filepath: Path) -> str:
+        return _download_binary(get_session(), href, filepath)
+
     total = len(to_fetch)
     downloaded = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_download_binary, session, href, filepath) for href, filepath in to_fetch]
+        futures = [pool.submit(_do_binary, href, filepath) for href, filepath in to_fetch]
         for i, fut in enumerate(as_completed(futures), 1):
             filename = fut.result()
             downloaded += 1
@@ -442,11 +474,15 @@ def download_netcdf(
                 continue
             targets.append((href, filepath))
 
-    session = _retry_session(pool_maxsize=workers)
+    get_session = _thread_local_session()
+
+    def _do_binary(href: str, filepath: Path) -> str:
+        return _download_binary(get_session(), href, filepath)
+
     downloaded = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_download_binary, session, href, filepath) for href, filepath in targets]
+        futures = [pool.submit(_do_binary, href, filepath) for href, filepath in targets]
         for fut in as_completed(futures):
             filename = fut.result()
             downloaded += 1

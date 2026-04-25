@@ -1,12 +1,16 @@
 """Tests for state management and HTTP download functions."""
 
 import io
+import threading
 import zipfile
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from foehn.client import (
     DownloadResult,
+    _thread_local_session,
     download_climate_normals_zip,
     download_collection,
     download_grib2,
@@ -42,6 +46,39 @@ def _stream_response(chunks=(b"data",)):
 
 def _stac_item(asset_url, updated="2026-01-01T00:00:00Z"):
     return {"id": "item-1", "assets": {"data": {"href": asset_url}}, "properties": {"updated": updated}}
+
+
+# --- _thread_local_session ---
+
+
+def test_thread_local_session_same_thread_returns_same_session():
+    get = _thread_local_session()
+    assert get() is get()
+
+
+def test_thread_local_session_different_threads_get_different_sessions():
+    get = _thread_local_session()
+    n = 4
+    barrier = threading.Barrier(n)
+    sessions: list[requests.Session] = []
+    lock = threading.Lock()
+
+    def grab():
+        # Hold all threads here until they're all alive — keeps thread IDs distinct.
+        barrier.wait()
+        s = get()
+        with lock:
+            sessions.append(s)
+
+    threads = [threading.Thread(target=grab) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Each thread got a Session, and the per-thread instances are distinct.
+    assert len(sessions) == n
+    assert len({id(s) for s in sessions}) == n
 
 
 # --- State management ---
