@@ -16,6 +16,9 @@
   <a href="https://github.com/kayhendriksen/foehn/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License">
   </a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/kayhendriksen/foehn">
+    <img src="https://api.scorecard.dev/projects/github.com/kayhendriksen/foehn/badge" alt="OpenSSF Scorecard">
+  </a>
   <a href="https://pypi.org/project/foehn/">
     <img src="https://img.shields.io/pypi/dm/foehn.svg" alt="Monthly Downloads">
   </a>
