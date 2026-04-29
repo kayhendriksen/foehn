@@ -58,3 +58,25 @@ def test_list_datasets_dict_keys():
 
 def test_collection_meta_covers_all_keys():
     assert set(COLLECTION_META.keys()) == set(COLLECTIONS.keys())
+
+
+def test_collection_meta_matches_live_stac_granularities():
+    expected = {
+        "smn": (["t", "h", "d", "m", "y"], ["historical", "recent", "now"]),
+        "smn_precip": (["t", "h", "d", "m", "y"], ["historical", "recent", "now"]),
+        "smn_tower": (["t", "h", "d", "m", "y"], ["historical", "recent", "now"]),
+        "obs": (["d", "m", "y"], ["historical", "recent"]),
+        "pollen": (["h", "d", "y"], ["historical", "recent"]),
+        "nbcn": (["d", "m", "y"], ["historical", "recent"]),
+        "nbcn_precip": (["m", "y"], []),
+        "climate_scenarios": (["d"], []),
+        "forecast_local": (["h", "d"], []),
+    }
+    for key, (frequencies, time_slices) in expected.items():
+        assert COLLECTION_META[key]["frequencies"] == frequencies
+        assert COLLECTION_META[key]["time_slices"] == time_slices
+
+
+def test_radar_collections_are_hdf5():
+    assert COLLECTION_META["radar_precip"]["format"] == "HDF5"
+    assert COLLECTION_META["radar_hail"]["format"] == "HDF5"

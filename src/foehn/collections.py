@@ -60,21 +60,21 @@ STAC_API_BASE = "https://data.geo.admin.ch/api/stac/v1"
 #   C6 climate normals  → separate ZIP from opendata.swiss (not on STAC API)
 COLLECTIONS = {
     # ── A: Ground-based measurements (CSV, time-sliced: historical/recent/now) ──
-    "smn": "ch.meteoschweiz.ogd-smn",  # A1 — Automatic weather stations (t,h,d,m)
-    "smn_precip": "ch.meteoschweiz.ogd-smn-precip",  # A2 — Automatic precipitation stations (t,h,d,m)
-    "smn_tower": "ch.meteoschweiz.ogd-smn-tower",  # A3 — Automatic tower stations (t,h,d,m)
+    "smn": "ch.meteoschweiz.ogd-smn",  # A1 — Automatic weather stations (t,h,d,m,y)
+    "smn_precip": "ch.meteoschweiz.ogd-smn-precip",  # A2 — Automatic precipitation stations (t,h,d,m,y)
+    "smn_tower": "ch.meteoschweiz.ogd-smn-tower",  # A3 — Automatic tower stations (t,h,d,m,y)
     # A4 — Automatic soil moisture stations                     NOT YET RELEASED
     "nime": "ch.meteoschweiz.ogd-nime",  # A5 — Manual precipitation stations (d,m,y)
     "tot": "ch.meteoschweiz.ogd-tot",  # A6 — Totaliser precipitation (y, no time-slice)
-    "obs": "ch.meteoschweiz.ogd-obs",  # A8 — Meteorological visual observations (t,m,y)
-    "pollen": "ch.meteoschweiz.ogd-pollen",  # A7 — Pollen stations (h,d)
+    "obs": "ch.meteoschweiz.ogd-obs",  # A8 — Meteorological visual observations (d,m,y)
+    "pollen": "ch.meteoschweiz.ogd-pollen",  # A7 — Pollen stations (h,d,y)
     "phenology": "ch.meteoschweiz.ogd-phenology",  # A9 — Phenological observations (y, no time-slice)
     # ── B: Atmosphere measurements                             NOT YET RELEASED ──
     # B1 Radio soundings, B2 RALMO, B3 Ceilometer, B4-B5 Ozone, B6 SACRaM
     # ── C: Climate data ──────────────────────────────────────────────────────────
     # C1/C2 — Homogeneous series (CSV, time-sliced: historical/recent)
-    "nbcn": "ch.meteoschweiz.ogd-nbcn",  # C1 — Climate stations, homogeneous (d,m)
-    "nbcn_precip": "ch.meteoschweiz.ogd-nbcn-precip",  # C2 — Climate precipitation, homogeneous (m)
+    "nbcn": "ch.meteoschweiz.ogd-nbcn",  # C1 — Climate stations, homogeneous (d,m,y)
+    "nbcn_precip": "ch.meteoschweiz.ogd-nbcn-precip",  # C2 — Climate precipitation, homogeneous (m,y)
     # C3/C4 — Spatial climate analyses (NetCDF, static grids)
     "surface_derived_grid": "ch.meteoschweiz.ogd-surface-derived-grid",  # C3 — Precipitation, temperature, sunshine
     "satellite_derived_grid": "ch.meteoschweiz.ogd-satellite-derived-grid",  # C4 — Radiation, clouds, LST
@@ -118,7 +118,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A1",
         "description": "Automatic weather stations",
         "format": "CSV",
-        "frequencies": ["t", "h", "d", "m"],
+        "frequencies": ["t", "h", "d", "m", "y"],
         "time_slices": ["historical", "recent", "now"],
     },
     "smn_precip": {
@@ -126,7 +126,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A2",
         "description": "Automatic precipitation stations",
         "format": "CSV",
-        "frequencies": ["t", "h", "d", "m"],
+        "frequencies": ["t", "h", "d", "m", "y"],
         "time_slices": ["historical", "recent", "now"],
     },
     "smn_tower": {
@@ -134,7 +134,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A3",
         "description": "Automatic tower stations",
         "format": "CSV",
-        "frequencies": ["t", "h", "d", "m"],
+        "frequencies": ["t", "h", "d", "m", "y"],
         "time_slices": ["historical", "recent", "now"],
     },
     "nime": {
@@ -158,16 +158,16 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "A8",
         "description": "Meteorological visual observations",
         "format": "CSV",
-        "frequencies": ["t", "m", "y"],
-        "time_slices": ["historical", "recent", "now"],
+        "frequencies": ["d", "m", "y"],
+        "time_slices": ["historical", "recent"],
     },
     "pollen": {
         "category": "A",
         "subcategory": "A7",
         "description": "Pollen stations",
         "format": "CSV",
-        "frequencies": ["h", "d"],
-        "time_slices": ["historical", "recent", "now"],
+        "frequencies": ["h", "d", "y"],
+        "time_slices": ["historical", "recent"],
     },
     "phenology": {
         "category": "A",
@@ -183,7 +183,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C1",
         "description": "Climate stations, homogeneous",
         "format": "CSV",
-        "frequencies": ["d", "m"],
+        "frequencies": ["d", "m", "y"],
         "time_slices": ["historical", "recent"],
     },
     "nbcn_precip": {
@@ -191,8 +191,8 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C2",
         "description": "Climate precipitation, homogeneous",
         "format": "CSV",
-        "frequencies": ["m"],
-        "time_slices": ["historical", "recent"],
+        "frequencies": ["m", "y"],
+        "time_slices": [],
     },
     "surface_derived_grid": {
         "category": "C",
@@ -263,7 +263,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "C8",
         "description": "Climate scenarios CH2025 local",
         "format": "CSV",
-        "frequencies": ["y"],
+        "frequencies": ["d"],
         "time_slices": [],
     },
     "climate_scenarios_grid": {
@@ -320,7 +320,7 @@ COLLECTION_META: dict[str, dict] = {
         "category": "D",
         "subcategory": "D1",
         "description": "Precipitation radar",
-        "format": "GRIB2",
+        "format": "HDF5",
         "frequencies": [],
         "time_slices": [],
     },
@@ -328,7 +328,7 @@ COLLECTION_META: dict[str, dict] = {
         "category": "D",
         "subcategory": "D3",
         "description": "Hail radar",
-        "format": "GRIB2",
+        "format": "HDF5",
         "frequencies": [],
         "time_slices": [],
     },
@@ -354,7 +354,7 @@ COLLECTION_META: dict[str, dict] = {
         "subcategory": "E4",
         "description": "Local point forecasts",
         "format": "CSV",
-        "frequencies": [],
+        "frequencies": ["h", "d"],
         "time_slices": [],
     },
 }
