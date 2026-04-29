@@ -12,7 +12,7 @@ import foehn
 foehn.list_datasets()
 # [{'dataset': 'smn', 'collection_id': 'ch.meteoschweiz.ogd-smn', 'category': 'A',
 #   'subcategory': 'A1', 'description': 'Automatic weather stations',
-#   'format': 'CSV', 'frequencies': ['t', 'h', 'd', 'm'],
+#   'format': 'CSV', 'frequencies': ['t', 'h', 'd', 'm', 'y'],
 #   'time_slices': ['historical', 'recent', 'now']}, ...]
 ```
 
