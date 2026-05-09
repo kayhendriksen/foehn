@@ -90,9 +90,11 @@ class Station(BaseModel):
     name: str = Field(description="Full station name")
     canton: str = Field(description="Swiss canton code (e.g. 'BE', 'ZH')")
     altitude: int | float = Field(description="Altitude in metres above sea level")
+    lv95_east: float = Field(description="LV95 easting in metres (EPSG:2056)")
+    lv95_north: float = Field(description="LV95 northing in metres (EPSG:2056)")
     lat: float = Field(description="WGS84 latitude")
     lon: float = Field(description="WGS84 longitude")
-    data_since: str = Field(description="Date measurements started (YYYY-MM-DD)")
+    data_since: str = Field(description="Date measurements started (DD.MM.YYYY, as published by MeteoSwiss)")
 
 
 class InventoryEntry(BaseModel):
@@ -384,7 +386,8 @@ def get_stations(dataset: str) -> list[Station]:
     """Get station metadata for a dataset.
 
     Returns station abbreviation, name, canton, altitude (m a.s.l.),
-    latitude, longitude, and the date measurements started.
+    LV95 coordinates, latitude, longitude, and the date measurements started
+    in MeteoSwiss station metadata format (DD.MM.YYYY).
 
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.

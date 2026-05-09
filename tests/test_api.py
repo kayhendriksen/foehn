@@ -433,10 +433,57 @@ def test_stations_returns_dataframe(mock_session, mock_meta):
     df = stations("smn")
 
     assert isinstance(df, pl.DataFrame)
-    assert df.columns == ["abbr", "name", "canton", "altitude", "lat", "lon", "data_since"]
+    assert df.columns == [
+        "abbr",
+        "name",
+        "canton",
+        "altitude",
+        "lv95_east",
+        "lv95_north",
+        "lat",
+        "lon",
+        "data_since",
+    ]
     assert df["abbr"][0] == "BER"
     assert df["name"][0] == "Bern"
     assert df["canton"][0] == "BE"
+    assert df["lv95_east"][0] == 2601933.0
+    assert df["lv95_north"][0] == 1199885.0
+    assert df["data_since"][0] == "01.01.1864"
+
+
+@pytest.mark.live
+def test_stations_live_returns_lv95_and_source_date_format():
+    df = stations("smn")
+
+    assert isinstance(df, pl.DataFrame)
+    assert df.columns == [
+        "abbr",
+        "name",
+        "canton",
+        "altitude",
+        "lv95_east",
+        "lv95_north",
+        "lat",
+        "lon",
+        "data_since",
+    ]
+    assert df.height > 0
+
+    dates = df["data_since"].drop_nulls().to_list()
+    assert dates
+    assert all(len(date) == 10 and date[2] == "." and date[5] == "." for date in dates)
+
+    ber = df.filter(pl.col("abbr") == "BER")
+    assert ber.height == 1
+    row = ber.to_dicts()[0]
+    assert row["name"].startswith("Bern")
+    assert row["canton"] == "BE"
+    assert 2_400_000 < row["lv95_east"] < 2_900_000
+    assert 1_000_000 < row["lv95_north"] < 1_400_000
+    assert 45.0 < row["lat"] < 48.0
+    assert 5.0 < row["lon"] < 11.0
+    assert row["data_since"] == "01.01.1864"
 
 
 @patch("foehn.api.get_collection_metadata")

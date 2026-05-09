@@ -10,12 +10,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from foehn._urls import validate_download_href
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
     COLLECTIONS,
@@ -23,8 +23,6 @@ from foehn.collections import (
     STAC_API_BASE,
 )
 from foehn.stac import get_collection_items, get_collection_metadata
-
-_ALLOWED_DOMAINS = {"data.geo.admin.ch", "opendata.swiss", "rgw.cscs.ch"}
 
 # Default concurrency for per-asset downloads. Kept modest to stay polite on the
 # MeteoSwiss/CSCS CDNs — they handle bursts fine but we don't need to hammer them.
@@ -70,14 +68,6 @@ def _retry_session(
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
-
-
-def _validate_href(href: str) -> str:
-    """Raise ValueError if *href* points outside the trusted MeteoSwiss domains."""
-    parsed = urlparse(href)
-    if parsed.hostname not in _ALLOWED_DOMAINS:
-        raise ValueError(f"Untrusted download domain: {parsed.hostname}")
-    return href
 
 
 def _thread_local_session() -> Callable[[], requests.Session]:
@@ -143,7 +133,7 @@ def _download_csv(
 
     Returns (status, href, filename, new_etag) where status is "downloaded" or "skipped".
     """
-    _validate_href(href)
+    validate_download_href(href)
     filename = filepath.name
     headers = {"If-None-Match": old_etag} if old_etag and filepath.exists() else {}
     resp = session.get(href, headers=headers, timeout=60)
@@ -337,7 +327,7 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
 
 def _download_binary(session: requests.Session, href: str, filepath: Path, timeout: int = 120) -> str:
     """Stream a binary asset to disk. Returns the filename."""
-    _validate_href(href)
+    validate_download_href(href)
     with session.get(href, stream=True, timeout=timeout) as resp:
         resp.raise_for_status()
         with filepath.open("wb") as f:

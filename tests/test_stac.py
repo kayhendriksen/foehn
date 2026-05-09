@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from foehn._urls import validate_stac_url
 from foehn.stac import get_collection_items, get_collection_metadata
 
 
@@ -86,6 +89,15 @@ def test_get_collection_items_empty_collection(mock_get):
     result = get_collection_items("ch.test.collection", verbose=False)
 
     assert result == []
+
+
+def test_validate_stac_url_rejects_untrusted_urls():
+    url = "https://data.geo.admin.ch/api/stac/v1/page2"
+    assert validate_stac_url(url) == url
+
+    for url in ("https://example.test/api/stac/v1/page2", "http://data.geo.admin.ch/api/stac/v1/page2"):
+        with pytest.raises(ValueError, match="Untrusted STAC URL"):
+            validate_stac_url(url)
 
 
 # --- get_collection_metadata ---

@@ -22,6 +22,10 @@ htmlcov/
 .vscode/
 .idea/
 
+# Local tool state
+.databricks/
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
