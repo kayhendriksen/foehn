@@ -82,8 +82,11 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not live'"
 pythonpath = ["."]
+markers = [
+    "live: opt-in tests that hit the live MeteoSwiss STAC/S3 (run with -m live)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/foehn"]

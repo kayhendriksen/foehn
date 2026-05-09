@@ -99,9 +99,11 @@ class TestModels:
             name="Bern",
             canton="BE",
             altitude=553,
+            lv95_east=2601933.0,
+            lv95_north=1199885.0,
             lat=46.9508,
             lon=7.4394,
-            data_since="1864-01-01",
+            data_since="01.01.1864",
         )
         assert s.abbr == "BER"
         assert s.canton == "BE"
@@ -538,9 +540,11 @@ class TestGetStations:
                 "name": ["Bern"],
                 "canton": ["BE"],
                 "altitude": [553],
+                "lv95_east": [2601933.0],
+                "lv95_north": [1199885.0],
                 "lat": [46.9508],
                 "lon": [7.4394],
-                "data_since": ["1864-01-01"],
+                "data_since": ["01.01.1864"],
             }
         )
         result = get_stations("smn")
@@ -548,6 +552,8 @@ class TestGetStations:
         assert isinstance(result[0], Station)
         assert result[0].abbr == "BER"
         assert result[0].name == "Bern"
+        assert result[0].lv95_east == 2601933.0
+        assert result[0].lv95_north == 1199885.0
         mock_stations.assert_called_once_with("smn")
 
     def test_unknown_dataset_raises(self):

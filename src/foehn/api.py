@@ -8,11 +8,11 @@ from pathlib import Path
 
 import polars as pl
 
+from foehn._urls import validate_download_href
 from foehn.client import (
     DEFAULT_WORKERS,
     DownloadResult,
     _retry_session,
-    _validate_href,
     download_collection,
     download_metadata,
 )
@@ -130,7 +130,7 @@ def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
         if href.endswith(".csv") and suffix in href:
-            _validate_href(href)
+            validate_download_href(href)
             resp = session.get(href, timeout=60)
             resp.raise_for_status()
             try:
@@ -167,7 +167,8 @@ def stations(dataset: str) -> pl.DataFrame:
     """Fetch station metadata for a dataset.
 
     Returns a DataFrame with columns: abbr, name, canton, altitude,
-    lat, lon, data_since.
+    lv95_east, lv95_north, lat, lon, data_since. ``data_since`` keeps the
+    MeteoSwiss station metadata format (DD.MM.YYYY).
 
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
@@ -178,6 +179,8 @@ def stations(dataset: str) -> pl.DataFrame:
         pl.col("station_name").alias("name"),
         pl.col("station_canton").alias("canton"),
         pl.col("station_height_masl").alias("altitude"),
+        pl.col("station_coordinates_lv95_east").alias("lv95_east"),
+        pl.col("station_coordinates_lv95_north").alias("lv95_north"),
         pl.col("station_coordinates_wgs84_lat").alias("lat"),
         pl.col("station_coordinates_wgs84_lon").alias("lon"),
         pl.col("station_data_since").alias("data_since"),
@@ -314,7 +317,7 @@ def load(
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
         if href.endswith(".csv") and "_meta_parameters" in href:
-            _validate_href(href)
+            validate_download_href(href)
             resp = session.get(href, timeout=60)
             resp.raise_for_status()
             try:
@@ -373,7 +376,7 @@ def load(
     def _fetch(href: str) -> pl.DataFrame:
         if not hasattr(local, "session"):
             local.session = _retry_session(pool_maxsize=1)
-        _validate_href(href)
+        validate_download_href(href)
         resp = local.session.get(href, timeout=60)
         resp.raise_for_status()
         try:
