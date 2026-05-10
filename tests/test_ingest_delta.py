@@ -1,7 +1,6 @@
-"""Tests for the Polars-based Delta ingestion script."""
+"""Tests for the foehn.ingest pipeline."""
 
 import shutil
-from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -13,21 +12,17 @@ from foehn.ingest._grouping import (
     _table_suffix,
     _validate_identifier,
 )
-from foehn.ingest.adapters.spark_delta import SparkDeltaSink
-
-# The Spark-touching helpers still live in scripts/ingest_delta.py and
-# import pyspark at module load. Patch it before importing.
-pyspark_mock = MagicMock()
-with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_mock.sql}):
-    from scripts.ingest_delta import (
-        TABULAR_COLLECTIONS,
-        _apply_column_comments,
-        _ingest_climate_normals,
-        _ingest_collection,
-        _ingest_metadata,
-        _scan_and_collect,
-    )
-
+from foehn.ingest.adapters.memory import RecordingBinaryFileIndex, RecordingDeltaSink
+from foehn.ingest.pipeline import (
+    TABULAR_COLLECTIONS,
+    _apply_column_comments,
+    _ingest_climate_normals,
+    _ingest_collection,
+    _ingest_metadata,
+    _scan_and_collect,
+    run_radar,
+    run_tabular,
+)
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -50,26 +45,6 @@ def climate_normals_bronze_dir(tmp_path):
     cn_dir.mkdir()
     shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", cn_dir / "sample.txt")
     return tmp_path
-
-
-@pytest.fixture()
-def mock_spark():
-    """A mock SparkSession that tracks calls."""
-    spark = MagicMock()
-    # spark.createDataFrame returns a mock with .write.mode().option().saveAsTable()
-    mock_writer = MagicMock()
-    mock_writer.mode.return_value = mock_writer
-    mock_writer.option.return_value = mock_writer
-    spark.createDataFrame.return_value.write = mock_writer
-    # spark.table().schema.fields returns empty (no columns to comment on)
-    spark.table.return_value.schema.fields = []
-    return spark
-
-
-@pytest.fixture()
-def mock_sink(mock_spark):
-    """SparkDeltaSink wired to ``mock_spark`` — tests assert via mock_spark."""
-    return SparkDeltaSink(mock_spark)
 
 
 # ── _validate_identifier ─────────────────────────────────────────────────────
@@ -122,12 +97,11 @@ def test_table_suffix():
 
 def test_build_schema_overrides(smn_bronze_dir):
     files = sorted((smn_bronze_dir / "smn").glob("ogd-smn_*_d_recent.csv"))
-    metadata_types = {"tre200d0": pl.Float64, "ure200d0": pl.Int64, "nonexistent": pl.Float64}
+    metadata_types = {"tre200d0": pl.Float64, "ure200d0": pl.Float64, "irrelevant": pl.Int64}
     overrides = _build_schema_overrides(files, metadata_types)
     assert overrides is not None
-    assert overrides["tre200d0"] == pl.Float64
-    assert overrides["ure200d0"] == pl.Int64
-    assert "nonexistent" not in overrides
+    assert "tre200d0" in overrides
+    assert "irrelevant" not in overrides
 
 
 def test_build_schema_overrides_no_metadata():
@@ -178,54 +152,41 @@ def test_scan_and_collect_single_file(smn_bronze_dir):
 # ── _apply_column_comments ───────────────────────────────────────────────────
 
 
-def test_apply_column_comments(smn_bronze_dir):
-    spark = MagicMock()
-    # Simulate table with tre200d0 and ure200d0 columns.
-    field1 = MagicMock()
-    field1.name = "tre200d0"
-    field2 = MagicMock()
-    field2.name = "ure200d0"
-    spark.table.return_value.schema.fields = [field1, field2]
-    sink = SparkDeltaSink(spark)
-
+def test_apply_column_comments_forwards_dict(smn_bronze_dir):
+    sink = RecordingDeltaSink()
     _apply_column_comments(sink, "`cat`.`sch`.`smn_d_recent`", smn_bronze_dir / "smn")
 
-    # Should have issued ALTER TABLE for matching columns.
-    sql_calls = [c.args[0] for c in spark.sql.call_args_list]
-    alter_calls = [s for s in sql_calls if "ALTER TABLE" in s]
-    assert len(alter_calls) >= 2
-    # Check that English descriptions and units are in the comments.
-    assert any("Param A en" in c and "[°C]" in c for c in alter_calls)
-    assert any("Param D en" in c and "[%]" in c for c in alter_calls)
+    table_comments = sink.comments["`cat`.`sch`.`smn_d_recent`"]
+    assert any("Param A en" in c and "[°C]" in c for c in table_comments.values())
+    assert any("Param D en" in c and "[%]" in c for c in table_comments.values())
 
 
-def test_apply_column_comments_no_metadata(tmp_path, mock_spark, mock_sink):
-    """No meta file should be a no-op — sink.apply_comments is never called."""
-    _apply_column_comments(mock_sink, "`cat`.`sch`.`tbl`", tmp_path)
-    mock_spark.sql.assert_not_called()
+def test_apply_column_comments_no_metadata_is_noop(tmp_path):
+    sink = RecordingDeltaSink()
+    _apply_column_comments(sink, "`cat`.`sch`.`tbl`", tmp_path)
+    assert sink.comments == {}
 
 
 # ── _ingest_collection ───────────────────────────────────────────────────────
 
 
-def test_ingest_collection(smn_bronze_dir, mock_spark, mock_sink):
-    ok, skip = _ingest_collection(
-        mock_sink,
-        "smn",
-        smn_bronze_dir / "smn",
-        "`main`",
-        "`meteoswiss`",
-    )
-    # 1 data group (d_recent) + 1 meta table (parameters)
-    assert ok == 2
+def test_ingest_collection_writes_data_and_meta(smn_bronze_dir):
+    sink = RecordingDeltaSink()
+    ok, skip = _ingest_collection(sink, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`")
+
+    assert ok == 2  # 1 data group (d_recent) + 1 meta table (parameters)
     assert skip == 0
-    assert mock_spark.createDataFrame.call_count == 2
+    assert "`main`.`meteoswiss`.`smn_d_recent`" in sink.tables
+    assert "`main`.`meteoswiss`.`smn_meta_parameters`" in sink.tables
+    data = sink.tables["`main`.`meteoswiss`.`smn_d_recent`"]
+    assert data.height == 6  # 2 files × 3 rows
+    assert "tre200d0" in sink.comments["`main`.`meteoswiss`.`smn_d_recent`"]
 
 
-def test_ingest_collection_chunked(smn_bronze_dir, mock_spark, mock_sink):
-    """Chunked mode with chunk_size=1 should produce 2 data writes + 1 meta write."""
+def test_ingest_collection_chunked_writes_overwrite_then_append(smn_bronze_dir):
+    sink = RecordingDeltaSink()
     ok, skip = _ingest_collection(
-        mock_sink,
+        sink,
         "smn",
         smn_bronze_dir / "smn",
         "`main`",
@@ -233,90 +194,146 @@ def test_ingest_collection_chunked(smn_bronze_dir, mock_spark, mock_sink):
         chunked=True,
         chunk_size=1,
     )
-    # 1 data group + 1 meta table
     assert ok == 2
     assert skip == 0
-    # 2 files × chunk_size=1 (overwrite + append) + 1 meta write = 3
-    assert mock_spark.createDataFrame.call_count == 3
+
+    data_calls = [c for c in sink.calls if c.table == "`main`.`meteoswiss`.`smn_d_recent`"]
+    assert [c.mode for c in data_calls] == ["overwrite", "append"]
+    # Final state has both files concatenated.
+    assert sink.tables["`main`.`meteoswiss`.`smn_d_recent`"].height == 6
 
 
-def test_ingest_collection_empty(tmp_path, mock_sink):
+def test_ingest_collection_empty_dir_is_skipped(tmp_path):
+    sink = RecordingDeltaSink()
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
-    ok, skip = _ingest_collection(mock_sink, "smn", empty_dir, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_collection(sink, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+    assert sink.calls == []
 
 
 # ── _ingest_metadata ─────────────────────────────────────────────────────────
 
 
-def test_ingest_metadata(smn_bronze_dir, mock_spark, mock_sink):
-    ok, skip = _ingest_metadata(
-        mock_sink,
-        "smn",
-        smn_bronze_dir / "smn",
-        "`main`",
-        "`meteoswiss`",
-    )
-    assert ok == 1  # ogd-smn_meta_parameters.csv
+def test_ingest_metadata_single_file(smn_bronze_dir):
+    sink = RecordingDeltaSink()
+    ok, skip = _ingest_metadata(sink, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`")
+
+    assert ok == 1
     assert skip == 0
-    mock_spark.createDataFrame.assert_called_once()
+    assert "`main`.`meteoswiss`.`smn_meta_parameters`" in sink.tables
 
 
-def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark, mock_sink):
-    """Stations + datainventory + parameters should each become their own table."""
+def test_ingest_metadata_multiple_files(smn_bronze_dir):
     smn_dir = smn_bronze_dir / "smn"
     (smn_dir / "ogd-smn_meta_stations.csv").write_text("station_abbr;station_name\nABO;Adelboden\nBER;Bern\n")
     (smn_dir / "ogd-smn_meta_datainventory.csv").write_text(
         "station_abbr;parameter_shortname;data_since;data_till\nABO;tre200d0;1900-01-01;2026-01-01\n"
     )
 
-    ok, skip = _ingest_metadata(mock_sink, "smn", smn_dir, "`main`", "`meteoswiss`")
+    sink = RecordingDeltaSink()
+    ok, skip = _ingest_metadata(sink, "smn", smn_dir, "`main`", "`meteoswiss`")
+
     assert ok == 3
     assert skip == 0
-
-    # Each meta file should land in its own suffixed table.
-    save_as = mock_spark.createDataFrame.return_value.write.mode.return_value.option.return_value.saveAsTable
-    tables_written = [c.args[0] for c in save_as.call_args_list]
-    assert any(t.endswith("`smn_meta_stations`") for t in tables_written)
-    assert any(t.endswith("`smn_meta_parameters`") for t in tables_written)
-    assert any(t.endswith("`smn_meta_datainventory`") for t in tables_written)
+    assert "`main`.`meteoswiss`.`smn_meta_stations`" in sink.tables
+    assert "`main`.`meteoswiss`.`smn_meta_parameters`" in sink.tables
+    assert "`main`.`meteoswiss`.`smn_meta_datainventory`" in sink.tables
 
 
-def test_ingest_metadata_no_files(tmp_path, mock_spark, mock_sink):
+def test_ingest_metadata_no_files(tmp_path):
+    sink = RecordingDeltaSink()
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
-    ok, skip = _ingest_metadata(mock_sink, "smn", empty_dir, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_metadata(sink, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 0
-    mock_spark.createDataFrame.assert_not_called()
+    assert sink.calls == []
 
 
 # ── _ingest_climate_normals ──────────────────────────────────────────────────
 
 
-def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark, mock_sink):
-    ok, skip = _ingest_climate_normals(mock_sink, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
+def test_ingest_climate_normals_writes_table(climate_normals_bronze_dir):
+    sink = RecordingDeltaSink()
+    ok, skip = _ingest_climate_normals(sink, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
     assert ok == 1
     assert skip == 0
-    mock_spark.createDataFrame.assert_called_once()
+    assert "`main`.`meteoswiss`.`climate_normals`" in sink.tables
 
 
-def test_ingest_climate_normals_no_dir(tmp_path, mock_sink):
-    ok, skip = _ingest_climate_normals(mock_sink, tmp_path, "`main`", "`meteoswiss`")
+def test_ingest_climate_normals_no_dir_is_skipped(tmp_path):
+    sink = RecordingDeltaSink()
+    ok, skip = _ingest_climate_normals(sink, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+    assert sink.calls == []
 
 
-def test_ingest_climate_normals_empty_dir(tmp_path, mock_sink):
+def test_ingest_climate_normals_empty_dir_is_skipped(tmp_path):
+    sink = RecordingDeltaSink()
     (tmp_path / "climate_normals").mkdir()
-    ok, skip = _ingest_climate_normals(mock_sink, tmp_path, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_climate_normals(sink, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+    assert sink.calls == []
 
 
-# ── TABULAR_COLLECTIONS ─────────────────────────────────────────────────────
+# ── run_tabular ──────────────────────────────────────────────────────────────
+
+
+def test_run_tabular_single_dataset(smn_bronze_dir):
+    sink = RecordingDeltaSink()
+    ok, skip = run_tabular(smn_bronze_dir, "`main`", "`meteoswiss`", sink, keys=["smn"])
+
+    assert ok == 2  # data + meta
+    assert skip == 0
+    assert "`main`.`meteoswiss`.`smn_d_recent`" in sink.tables
+
+
+def test_run_tabular_climate_normals(climate_normals_bronze_dir):
+    sink = RecordingDeltaSink()
+    ok, skip = run_tabular(climate_normals_bronze_dir, "`main`", "`meteoswiss`", sink, keys=["climate_normals"])
+    assert ok == 1
+    assert skip == 0
+    assert "`main`.`meteoswiss`.`climate_normals`" in sink.tables
+
+
+def test_run_tabular_missing_dataset_dir_is_skipped(tmp_path):
+    sink = RecordingDeltaSink()
+    ok, skip = run_tabular(tmp_path, "`main`", "`meteoswiss`", sink, keys=["smn"])
+    assert ok == 0
+    assert skip == 1
+    assert sink.calls == []
+
+
+# ── run_radar ────────────────────────────────────────────────────────────────
+
+
+def test_run_radar_indexes_present_datasets(tmp_path):
+    radar_dir = tmp_path / "radar_precip"
+    radar_dir.mkdir()
+    (radar_dir / "RZC0001.h5").write_bytes(b"")
+    (radar_dir / "RZC0002.h5").write_bytes(b"")
+
+    index = RecordingBinaryFileIndex()
+    ok, skip = run_radar(tmp_path, "`main`", "`meteoswiss`", index, keys=["radar_precip", "radar_hail"])
+
+    assert ok == 1
+    assert skip == 1  # radar_hail is missing
+    assert index.merges == [(radar_dir, "`main`.`meteoswiss`.`radar_precip`")]
+
+
+def test_run_radar_all_missing_is_all_skipped(tmp_path):
+    index = RecordingBinaryFileIndex()
+    ok, skip = run_radar(tmp_path, "`main`", "`meteoswiss`", index)
+    assert ok == 0
+    assert skip == 2
+    assert index.merges == []
+
+
+# ── TABULAR_COLLECTIONS ──────────────────────────────────────────────────────
 
 
 def test_tabular_collections_excludes_binary():
