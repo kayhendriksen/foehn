@@ -167,7 +167,7 @@ resources:
           spark_python_task:
             python_file: ./scripts/ingest_delta.py
             parameters:
-              - "--radar"
+              - "--datasets"
               - "radar_precip"
               - "--catalog"
               - "${var.catalog}"
@@ -223,7 +223,7 @@ resources:
           spark_python_task:
             python_file: ./scripts/ingest_delta.py
             parameters:
-              - "--radar"
+              - "--datasets"
               - "radar_hail"
               - "--catalog"
               - "${var.catalog}"
@@ -275,7 +275,6 @@ resources:
           spark_python_task:
             python_file: ./scripts/ingest_delta.py
             parameters:
-              - "--historical"
               - "--catalog"
               - "${var.catalog}"
               - "--schema"

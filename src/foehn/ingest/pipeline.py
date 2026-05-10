@@ -31,9 +31,9 @@ TABULAR_COLLECTIONS: tuple[str, ...] = tuple(
 
 RADAR_COLLECTIONS: tuple[str, ...] = ("radar_precip", "radar_hail")
 
-# Collections where historical data can exceed available memory.
-# Chunked ingestion is used for these when ``chunked=True`` is passed to ``run_tabular``.
-LARGE_COLLECTIONS = frozenset({"smn", "smn_precip", "smn_tower"})
+# Total CSV bytes above which a chunked ingest splits the Arrow→Spark transfer
+# (only applies when ``chunked=True``). 2 GiB matches what SMN historical hits.
+LARGE_THRESHOLD_BYTES = 2 * 1024**3
 
 DEFAULT_CHUNK_SIZE = 50
 
@@ -163,7 +163,8 @@ def _ingest_collection(
         table = f"{catalog}.{schema}.`{tbl_name}`"
 
         try:
-            if chunked and key in LARGE_COLLECTIONS and len(files) > chunk_size:
+            total_bytes = sum(f.stat().st_size for f in files)
+            if chunked and total_bytes > LARGE_THRESHOLD_BYTES and len(files) > chunk_size:
                 # Large historical: chunk station files to keep Arrow transfer manageable.
                 # Polars streaming handles CSV parsing; chunking bounds the Spark write.
                 total_chunks = (len(files) + chunk_size - 1) // chunk_size

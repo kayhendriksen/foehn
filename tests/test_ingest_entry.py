@@ -43,13 +43,13 @@ def mixed_bronze_dir(smn_bronze_dir, radar_bronze_dir):
 # ── _discover_datasets ───────────────────────────────────────────────────────
 
 
-def test_discover_datasets_lists_known_keys_only(tmp_path):
+def test_discover_datasets_lists_tabular_only(tmp_path):
     (tmp_path / "smn").mkdir()
-    (tmp_path / "radar_precip").mkdir()
+    (tmp_path / "radar_precip").mkdir()  # excluded — radar is opt-in
     (tmp_path / "junk").mkdir()  # not a known dataset
     (tmp_path / "stray.csv").write_text("")  # not a directory
 
-    assert _discover_datasets(tmp_path) == ["radar_precip", "smn"]
+    assert _discover_datasets(tmp_path) == ["smn"]
 
 
 def test_discover_datasets_missing_base_returns_empty(tmp_path):
@@ -121,15 +121,16 @@ def test_ingest_routes_mixed_keys_separately(mixed_bronze_dir):
 # ── ingest — auto-discovery ─────────────────────────────────────────────────
 
 
-def test_ingest_auto_discovers_datasets_when_none_passed(mixed_bronze_dir):
+def test_ingest_auto_discovers_tabular_only(mixed_bronze_dir):
+    """Auto-discovery skips radar — daily ingest stays cheap. Radar must be explicit."""
     sink = RecordingDeltaSink()
     index = RecordingBinaryFileIndex()
     ok, skip = ingest(bronze=mixed_bronze_dir, sink=sink, index=index)
 
-    assert ok == 3  # smn data + smn meta + radar_precip
+    assert ok == 2  # smn data + smn meta only
     assert skip == 0
     assert "`main`.`meteoswiss`.`smn_d_recent`" in sink.tables
-    assert len(index.merges) == 1
+    assert index.merges == []
 
 
 def test_ingest_empty_bronze_is_noop(tmp_path):

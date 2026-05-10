@@ -183,7 +183,9 @@ def test_ingest_collection_writes_data_and_meta(smn_bronze_dir):
     assert "tre200d0" in sink.comments["`main`.`meteoswiss`.`smn_d_recent`"]
 
 
-def test_ingest_collection_chunked_writes_overwrite_then_append(smn_bronze_dir):
+def test_ingest_collection_chunked_writes_overwrite_then_append(smn_bronze_dir, monkeypatch):
+    # Drop the byte-size threshold so the small fixture triggers chunking.
+    monkeypatch.setattr("foehn.ingest.pipeline.LARGE_THRESHOLD_BYTES", 1)
     sink = RecordingDeltaSink()
     ok, skip = _ingest_collection(
         sink,

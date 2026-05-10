@@ -68,6 +68,7 @@ def ingest(
     if sink is None or index is None:
         if spark is None:
             spark = _get_or_create_spark()
+        spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
         if "DATABRICKS_RUNTIME_VERSION" in os.environ:
             spark.sql(f"CREATE CATALOG IF NOT EXISTS {cat}")
             spark.sql(f"USE CATALOG {cat}")
@@ -119,11 +120,17 @@ def ingest(
 
 
 def _discover_datasets(bronze_base: Path) -> list[str]:
-    """Sorted list of dataset keys present under ``bronze_base``."""
+    """Sorted list of *tabular* dataset keys present under ``bronze_base``.
+
+    Auto-discovery defaults to tabular-only — radar callers must pass
+    ``datasets=["radar_precip", ...]`` explicitly. Daily ingest stays cheap;
+    radar runs on its own 5-min schedule and would re-scan thousands of
+    HDF5 files unnecessarily if the daily job picked them up.
+    """
     if not bronze_base.exists():
         return []
-    known = set(TABULAR_COLLECTIONS) | set(RADAR_COLLECTIONS)
-    return sorted(d.name for d in bronze_base.iterdir() if d.is_dir() and d.name in known)
+    tabular = set(TABULAR_COLLECTIONS)
+    return sorted(d.name for d in bronze_base.iterdir() if d.is_dir() and d.name in tabular)
 
 
 def _detect_historical(bronze_base: Path, tabular_keys: Iterable[str]) -> bool:
