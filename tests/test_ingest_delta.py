@@ -7,21 +7,24 @@ import polars as pl
 import pytest
 from conftest import FIXTURES_DIR
 
-# We can't import the script directly (it has a top-level pyspark import),
-# so we patch pyspark before importing.
+from foehn.ingest._grouping import (
+    _build_schema_overrides,
+    _group_csv_files,
+    _table_suffix,
+    _validate_identifier,
+)
+
+# The Spark-touching helpers still live in scripts/ingest_delta.py and
+# import pyspark at module load. Patch it before importing.
 pyspark_mock = MagicMock()
 with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_mock.sql}):
     from scripts.ingest_delta import (
         TABULAR_COLLECTIONS,
         _apply_column_comments,
-        _build_schema_overrides,
-        _group_csv_files,
         _ingest_climate_normals,
         _ingest_collection,
         _ingest_metadata,
         _scan_and_collect,
-        _table_suffix,
-        _validate_identifier,
         _write_to_delta,
     )
 
