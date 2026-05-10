@@ -231,6 +231,55 @@ def test_ingest_invalid_catalog_identifier_raises(tmp_path):
         )
 
 
+# ── ingest — SMN historical scale ────────────────────────────────────────────
+
+
+def test_smn_historical_auto_chunks_via_byte_threshold(tmp_path, monkeypatch):
+    """End-to-end mirror of the foehn_historical job for SMN.
+
+    Many station files in the ``(t, historical)`` group, ``*_historical*.csv``
+    naming, no explicit ``historical=`` kwarg — auto-detection sets
+    ``chunked=True`` and the byte-size threshold gates the chunked write.
+    Without chunking the production job would do a single ~20 GB
+    Arrow→Spark transfer and OOM the worker.
+    """
+    smn = tmp_path / "smn"
+    smn.mkdir()
+    shutil.copy(FIXTURES_DIR / "smn_meta_parameters.csv", smn / "ogd-smn_meta_parameters.csv")
+
+    # 4 station files in the (t, historical) group — analogue of SMN's ~250
+    # station files at 10-min cadence. Reuses the existing 3-row fixture.
+    stations = ["abo", "ber", "luz", "zur"]
+    for sta in stations:
+        shutil.copy(FIXTURES_DIR / "smn_sample.csv", smn / f"ogd-smn_{sta}_t_historical.csv")
+
+    # Drop the threshold so the small test fixture triggers chunking.
+    monkeypatch.setattr("foehn.ingest.pipeline.LARGE_THRESHOLD_BYTES", 1)
+
+    sink = RecordingDeltaSink()
+    index = RecordingBinaryFileIndex()
+
+    ok, skip = ingest(
+        bronze=tmp_path,
+        chunk_size=2,  # 4 station files / 2 per chunk = 2 chunks → overwrite + append
+        sink=sink,
+        index=index,
+    )
+
+    # 1 data table (t, historical) + 1 meta table (parameters).
+    assert ok == 2
+    assert skip == 0
+
+    # Auto-detected historical=True via *_historical*.csv glob, threshold met,
+    # 4 > chunk_size → chunked write fires.
+    table = "`main`.`meteoswiss`.`smn_t_historical`"
+    data_calls = [c for c in sink.calls if c.table == table]
+    assert [c.mode for c in data_calls] == ["overwrite", "append"]
+
+    # Final durable state: 4 stations × 3 rows per fixture = 12 rows.
+    assert sink.tables[table].height == 12
+
+
 def test_ingest_default_bronze_path_uses_volume_layout(tmp_path, monkeypatch):
     """When bronze is None, the default points at /Volumes/{catalog}/{schema}/{volume}/bronze."""
     seen: list = []
