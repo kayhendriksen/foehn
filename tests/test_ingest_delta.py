@@ -13,6 +13,7 @@ from foehn.ingest._grouping import (
     _table_suffix,
     _validate_identifier,
 )
+from foehn.ingest.adapters.spark_delta import SparkDeltaSink
 
 # The Spark-touching helpers still live in scripts/ingest_delta.py and
 # import pyspark at module load. Patch it before importing.
@@ -25,7 +26,6 @@ with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_
         _ingest_collection,
         _ingest_metadata,
         _scan_and_collect,
-        _write_to_delta,
     )
 
 
@@ -64,6 +64,12 @@ def mock_spark():
     # spark.table().schema.fields returns empty (no columns to comment on)
     spark.table.return_value.schema.fields = []
     return spark
+
+
+@pytest.fixture()
+def mock_sink(mock_spark):
+    """SparkDeltaSink wired to ``mock_spark`` — tests assert via mock_spark."""
+    return SparkDeltaSink(mock_spark)
 
 
 # ── _validate_identifier ─────────────────────────────────────────────────────
@@ -169,27 +175,6 @@ def test_scan_and_collect_single_file(smn_bronze_dir):
     assert len(df) == 3
 
 
-# ── _write_to_delta ──────────────────────────────────────────────────────────
-
-
-def test_write_to_delta(mock_spark):
-    df = pl.DataFrame({"a": [1, 2], "b": ["x", "y"]})
-    _write_to_delta(mock_spark, df, "`cat`.`sch`.`tbl`")
-
-    mock_spark.createDataFrame.assert_called_once()
-    writer = mock_spark.createDataFrame.return_value.write
-    writer.mode.assert_called_with("overwrite")
-    writer.mode.return_value.option.assert_called_with("mergeSchema", "true")
-
-
-def test_write_to_delta_append_mode(mock_spark):
-    df = pl.DataFrame({"a": [1]})
-    _write_to_delta(mock_spark, df, "`cat`.`sch`.`tbl`", mode="append")
-
-    writer = mock_spark.createDataFrame.return_value.write
-    writer.mode.assert_called_with("append")
-
-
 # ── _apply_column_comments ───────────────────────────────────────────────────
 
 
@@ -201,8 +186,9 @@ def test_apply_column_comments(smn_bronze_dir):
     field2 = MagicMock()
     field2.name = "ure200d0"
     spark.table.return_value.schema.fields = [field1, field2]
+    sink = SparkDeltaSink(spark)
 
-    _apply_column_comments(spark, "`cat`.`sch`.`smn_d_recent`", smn_bronze_dir / "smn")
+    _apply_column_comments(sink, "`cat`.`sch`.`smn_d_recent`", smn_bronze_dir / "smn")
 
     # Should have issued ALTER TABLE for matching columns.
     sql_calls = [c.args[0] for c in spark.sql.call_args_list]
@@ -213,19 +199,18 @@ def test_apply_column_comments(smn_bronze_dir):
     assert any("Param D en" in c and "[%]" in c for c in alter_calls)
 
 
-def test_apply_column_comments_no_metadata(tmp_path):
-    """No meta file should be a no-op."""
-    spark = MagicMock()
-    _apply_column_comments(spark, "`cat`.`sch`.`tbl`", tmp_path)
-    spark.sql.assert_not_called()
+def test_apply_column_comments_no_metadata(tmp_path, mock_spark, mock_sink):
+    """No meta file should be a no-op — sink.apply_comments is never called."""
+    _apply_column_comments(mock_sink, "`cat`.`sch`.`tbl`", tmp_path)
+    mock_spark.sql.assert_not_called()
 
 
 # ── _ingest_collection ───────────────────────────────────────────────────────
 
 
-def test_ingest_collection(smn_bronze_dir, mock_spark):
+def test_ingest_collection(smn_bronze_dir, mock_spark, mock_sink):
     ok, skip = _ingest_collection(
-        mock_spark,
+        mock_sink,
         "smn",
         smn_bronze_dir / "smn",
         "`main`",
@@ -237,10 +222,10 @@ def test_ingest_collection(smn_bronze_dir, mock_spark):
     assert mock_spark.createDataFrame.call_count == 2
 
 
-def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
+def test_ingest_collection_chunked(smn_bronze_dir, mock_spark, mock_sink):
     """Chunked mode with chunk_size=1 should produce 2 data writes + 1 meta write."""
     ok, skip = _ingest_collection(
-        mock_spark,
+        mock_sink,
         "smn",
         smn_bronze_dir / "smn",
         "`main`",
@@ -255,10 +240,10 @@ def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
     assert mock_spark.createDataFrame.call_count == 3
 
 
-def test_ingest_collection_empty(tmp_path, mock_spark):
+def test_ingest_collection_empty(tmp_path, mock_sink):
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
-    ok, skip = _ingest_collection(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_collection(mock_sink, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
 
@@ -266,9 +251,9 @@ def test_ingest_collection_empty(tmp_path, mock_spark):
 # ── _ingest_metadata ─────────────────────────────────────────────────────────
 
 
-def test_ingest_metadata(smn_bronze_dir, mock_spark):
+def test_ingest_metadata(smn_bronze_dir, mock_spark, mock_sink):
     ok, skip = _ingest_metadata(
-        mock_spark,
+        mock_sink,
         "smn",
         smn_bronze_dir / "smn",
         "`main`",
@@ -279,7 +264,7 @@ def test_ingest_metadata(smn_bronze_dir, mock_spark):
     mock_spark.createDataFrame.assert_called_once()
 
 
-def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
+def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark, mock_sink):
     """Stations + datainventory + parameters should each become their own table."""
     smn_dir = smn_bronze_dir / "smn"
     (smn_dir / "ogd-smn_meta_stations.csv").write_text("station_abbr;station_name\nABO;Adelboden\nBER;Bern\n")
@@ -287,7 +272,7 @@ def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
         "station_abbr;parameter_shortname;data_since;data_till\nABO;tre200d0;1900-01-01;2026-01-01\n"
     )
 
-    ok, skip = _ingest_metadata(mock_spark, "smn", smn_dir, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_metadata(mock_sink, "smn", smn_dir, "`main`", "`meteoswiss`")
     assert ok == 3
     assert skip == 0
 
@@ -299,10 +284,10 @@ def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
     assert any(t.endswith("`smn_meta_datainventory`") for t in tables_written)
 
 
-def test_ingest_metadata_no_files(tmp_path, mock_spark):
+def test_ingest_metadata_no_files(tmp_path, mock_spark, mock_sink):
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
-    ok, skip = _ingest_metadata(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_metadata(mock_sink, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 0
     mock_spark.createDataFrame.assert_not_called()
@@ -311,22 +296,22 @@ def test_ingest_metadata_no_files(tmp_path, mock_spark):
 # ── _ingest_climate_normals ──────────────────────────────────────────────────
 
 
-def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark):
-    ok, skip = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
+def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark, mock_sink):
+    ok, skip = _ingest_climate_normals(mock_sink, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
     assert ok == 1
     assert skip == 0
     mock_spark.createDataFrame.assert_called_once()
 
 
-def test_ingest_climate_normals_no_dir(tmp_path, mock_spark):
-    ok, skip = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
+def test_ingest_climate_normals_no_dir(tmp_path, mock_sink):
+    ok, skip = _ingest_climate_normals(mock_sink, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
 
 
-def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
+def test_ingest_climate_normals_empty_dir(tmp_path, mock_sink):
     (tmp_path / "climate_normals").mkdir()
-    ok, skip = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
+    ok, skip = _ingest_climate_normals(mock_sink, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
 

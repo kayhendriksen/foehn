@@ -22,7 +22,6 @@ Usage (local testing with spark-submit):
 from __future__ import annotations
 
 import argparse
-import contextlib
 import os
 from pathlib import Path
 
@@ -37,6 +36,8 @@ from foehn.ingest._grouping import (
     _table_suffix,
     _validate_identifier,
 )
+from foehn.ingest.adapters.spark_delta import SparkBinaryFileIndex, SparkDeltaSink
+from foehn.ingest.ports import BinaryFileIndex, DeltaSink
 
 TABULAR_COLLECTIONS = [key for key in COLLECTIONS if key not in GRIB2_COLLECTIONS | NETCDF_COLLECTIONS] + [
     "climate_normals"
@@ -78,18 +79,8 @@ def _scan_and_collect(files: list[Path], metadata_types: dict[str, pl.DataType])
         return pl.concat(frames, how="diagonal_relaxed")
 
 
-def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mode: str = "overwrite") -> None:
-    """Convert a Polars DataFrame to Spark via Arrow and write to a Delta table."""
-    spark_df = spark.createDataFrame(polars_df.to_arrow())
-    spark_df.write.mode(mode).option("mergeSchema", "true").saveAsTable(table)
-
-
-def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> None:
-    """Set Delta column comments from the English metadata descriptions.
-
-    Reads _meta_parameters.csv and applies comments like:
-        "Daily mean air temperature 2 m above ground [°C]"
-    """
+def _apply_column_comments(sink: DeltaSink, table: str, csv_dir: Path) -> None:
+    """Read English column descriptions from ``_meta_parameters.csv`` and forward them to ``sink``."""
     meta_files = list(csv_dir.glob("*_meta_parameters.csv"))
     if not meta_files:
         return
@@ -103,23 +94,19 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
     if not required.issubset(meta.columns):
         return
 
-    try:
-        table_cols = {f.name for f in spark.table(table).schema.fields}
-    except Exception:
-        return
-
+    comments: dict[str, str] = {}
     for row in meta.select("parameter_shortname", "parameter_description_en", "parameter_unit").iter_rows():
         shortname, desc_en, unit = row
-        if not shortname or not desc_en or shortname not in table_cols:
+        if not shortname or not desc_en:
             continue
-        comment = f"{desc_en} [{unit}]" if unit else desc_en
-        comment_escaped = comment.replace("'", "\\'")
-        with contextlib.suppress(Exception):
-            spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{shortname}` COMMENT '{comment_escaped}'")
+        comments[shortname] = f"{desc_en} [{unit}]" if unit else desc_en
+
+    if comments:
+        sink.apply_comments(table, comments)
 
 
 def _ingest_metadata(
-    spark: SparkSession,
+    sink: DeltaSink,
     key: str,
     csv_dir: Path,
     catalog: str,
@@ -147,7 +134,7 @@ def _ingest_metadata(
                 infer_schema_length=10000,
                 try_parse_dates=True,
             )
-            _write_to_delta(spark, df, table)
+            sink.write(df, table)
             print(f"  OK  {tbl_name:25s} → {table} ({df.height} rows)", flush=True)
             succeeded += 1
         except Exception as e:
@@ -158,7 +145,7 @@ def _ingest_metadata(
 
 
 def _ingest_collection(
-    spark: SparkSession,
+    sink: DeltaSink,
     key: str,
     csv_dir: Path,
     catalog: str,
@@ -174,7 +161,7 @@ def _ingest_collection(
     metadata_types = _load_metadata_types(csv_dir)
     groups = _group_csv_files(csv_dir, key)
 
-    meta_ok, meta_skip = _ingest_metadata(spark, key, csv_dir, catalog, schema)
+    meta_ok, meta_skip = _ingest_metadata(sink, key, csv_dir, catalog, schema)
 
     if not groups:
         print(f"  --  {key:25s}   skipped (no CSVs)", flush=True)
@@ -196,7 +183,7 @@ def _ingest_collection(
                     chunk = files[i : i + chunk_size]
                     polars_df = _scan_and_collect(chunk, metadata_types)
                     mode = "overwrite" if i == 0 else "append"
-                    _write_to_delta(spark, polars_df, table, mode=mode)
+                    sink.write(polars_df, table, mode=mode)
                     chunk_num = i // chunk_size + 1
                     print(
                         f"  ... {tbl_name:25s}   chunk {chunk_num}/{total_chunks} ({len(chunk)} files, {mode})",
@@ -204,11 +191,11 @@ def _ingest_collection(
                     )
             else:
                 polars_df = _scan_and_collect(files, metadata_types)
-                _write_to_delta(spark, polars_df, table)
+                sink.write(polars_df, table)
 
             print(f"  OK  {tbl_name:25s} → {table} ({len(files)} files)", flush=True)
             succeeded += 1
-            _apply_column_comments(spark, table, csv_dir)
+            _apply_column_comments(sink, table, csv_dir)
 
         except Exception as e:
             print(f"  --  {tbl_name:25s}   skipped ({type(e).__name__})", flush=True)
@@ -221,19 +208,13 @@ RADAR_COLLECTIONS = ("radar_precip", "radar_hail")
 
 
 def _ingest_radar(
-    spark: SparkSession,
+    index: BinaryFileIndex,
     bronze_base: Path,
     cat: str,
     sch: str,
     keys: tuple[str, ...] = RADAR_COLLECTIONS,
 ) -> tuple[int, int]:
-    """Index radar HDF5 files into per-collection Delta catalog tables.
-
-    Scans each collection's landing dir via Spark's binaryFile reader and
-    MERGEs by path, so repeated 5-min runs only insert newly-arrived files.
-    The HDF5 payload itself stays in the volume — the table just holds
-    (path, modification_time, size_bytes).
-    """
+    """Index radar HDF5 files into per-collection Delta catalog tables."""
     total_ok = 0
     total_skip = 0
 
@@ -244,47 +225,15 @@ def _ingest_radar(
             total_skip += 1
             continue
 
-        new_df = (
-            spark.read.format("binaryFile")
-            .option("pathGlobFilter", "*.h5")
-            .load(str(h5_dir))
-            .selectExpr(
-                "path",
-                # Product code from the filename prefix (RZC, TZC, CPC, BZC, MZC, ...).
-                # CombiPrecip reanalysis (CPCH) shares CPC's filename, so it stays "CPC"
-                # here — distinguish reanalysis via modification_time, which trails the
-                # product time embedded in the filename by ~8 days.
-                "regexp_extract(element_at(split(path, '/'), -1), '^[A-Z]+', 0) as product",
-                "modificationTime as modification_time",
-                "length as size_bytes",
-            )
-        )
-
         table = f"{cat}.{sch}.`{key}`"
-        spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {table} "
-            "(path STRING, product STRING, modification_time TIMESTAMP, size_bytes BIGINT) "
-            "USING DELTA"
-        )
-
-        view = f"_{key}_new"
-        new_df.createOrReplaceTempView(view)
-        # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too).
-        spark.sql(
-            f"MERGE INTO {table} t USING {view} s ON t.path = s.path "
-            "WHEN MATCHED AND s.modification_time > t.modification_time THEN UPDATE SET "
-            "  modification_time = s.modification_time, size_bytes = s.size_bytes "
-            "WHEN NOT MATCHED THEN INSERT *"
-        )
-
-        count = new_df.count()
+        count = index.merge_index(h5_dir, table)
         print(f"  OK  {key:25s} → {table} ({count} files indexed)", flush=True)
         total_ok += 1
 
     return total_ok, total_skip
 
 
-def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str, schema: str) -> tuple[int, int]:
+def _ingest_climate_normals(sink: DeltaSink, bronze_base: Path, catalog: str, schema: str) -> tuple[int, int]:
     """Ingest climate normals TXT files into a single Delta table."""
     txt_dir = bronze_base / "climate_normals"
     if not txt_dir.exists():
@@ -318,7 +267,7 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
 
     table = f"{catalog}.{schema}.`climate_normals`"
     combined = pl.concat(frames, how="diagonal_relaxed")
-    _write_to_delta(spark, combined, table)
+    sink.write(combined, table)
     print(f"  OK  {'climate_normals':25s} → {table} ({len(txt_files)} files)", flush=True)
     return 1, 0
 
@@ -364,6 +313,8 @@ def main() -> None:
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {cat}.{sch}")
         spark.sql(f"CREATE VOLUME IF NOT EXISTS {cat}.{sch}.{vol}")
 
+    sink = SparkDeltaSink(spark)
+    index = SparkBinaryFileIndex(spark)
     bronze_base = Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}/bronze")
 
     total_ok = 0
@@ -374,13 +325,13 @@ def main() -> None:
         invalid = [k for k in keys if k not in RADAR_COLLECTIONS]
         if invalid:
             raise SystemExit(f"Unknown radar collection(s): {invalid}. Valid: {list(RADAR_COLLECTIONS)}")
-        ok, skip = _ingest_radar(spark, bronze_base, cat, sch, keys)
+        ok, skip = _ingest_radar(index, bronze_base, cat, sch, keys)
         print(f"\nDone — {ok} tables written, {skip} skipped.")
         return
 
     for key in TABULAR_COLLECTIONS:
         if key == "climate_normals":
-            ok, skip = _ingest_climate_normals(spark, bronze_base, cat, sch)
+            ok, skip = _ingest_climate_normals(sink, bronze_base, cat, sch)
             total_ok += ok
             total_skip += skip
             continue
@@ -392,7 +343,7 @@ def main() -> None:
             continue
 
         ok, skip = _ingest_collection(
-            spark,
+            sink,
             key,
             csv_dir,
             cat,
