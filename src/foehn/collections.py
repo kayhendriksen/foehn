@@ -45,7 +45,7 @@ DATA CATEGORIES (per MeteoSwiss documentation)
   B  Atmosphere measurements         — NOT YET RELEASED (radio soundings etc.)
   C  Climate data                    — CSV + NetCDF + TXT (varies by sub-type)
   D  Radar data                      — HDF5 (binary grid data)
-  E  Forecast data                   — GRIB2 (ICON models) + CSV (local forecasts)
+  E  Forecast data                   — GRIB2 (ICON models + KENDA analysis) + CSV (local forecasts)
 """
 
 STAC_API_BASE = "https://data.geo.admin.ch/api/stac/v1"
@@ -106,6 +106,7 @@ COLLECTIONS = {
     "forecast_icon_ch1": "ch.meteoschweiz.ogd-forecasting-icon-ch1",  # E2 — ICON-CH1-EPS 1km GRIB2
     "forecast_icon_ch2": "ch.meteoschweiz.ogd-forecasting-icon-ch2",  # E3 — ICON-CH2-EPS 2.1km GRIB2
     "forecast_local": "ch.meteoschweiz.ogd-local-forecasting",  # E4 — Local point forecasts (CSV)
+    "analysis_kenda_ch1": "ch.meteoschweiz.ogd-analysis-kenda-ch1",  # E5 — KENDA-CH1 numerical weather analysis GRIB2
     # E1 — Short-term forecast (nowcasting)                       NOT YET RELEASED
 }
 
@@ -357,6 +358,14 @@ COLLECTION_META: dict[str, dict] = {
         "frequencies": ["h", "d"],
         "time_slices": [],
     },
+    "analysis_kenda_ch1": {
+        "category": "E",
+        "subcategory": "E5",
+        "description": "Numerical weather analysis KENDA-CH1",
+        "format": "GRIB2",
+        "frequencies": [],
+        "time_slices": [],
+    },
 }
 
 # These sets control how each collection is downloaded and processed.
@@ -377,6 +386,7 @@ NO_GRANULARITY_COLLECTIONS = {"forecast_local", "climate_scenarios"}
 GRIB2_COLLECTIONS = {
     "forecast_icon_ch1",
     "forecast_icon_ch2",
+    "analysis_kenda_ch1",
     "radar_precip",
     "radar_hail",
 }

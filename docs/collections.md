@@ -54,8 +54,9 @@ Radar collections are large and require `--grids` to download.
 | `forecast_icon_ch1` | E2 | **ICON-CH1-EPS** -- 1 km ensemble forecast model over Switzerland. | GRIB2 (opt-in) |
 | `forecast_icon_ch2` | E3 | **ICON-CH2-EPS** -- 2.1 km ensemble forecast model. | GRIB2 (opt-in) |
 | `forecast_local` | E4 | **Local point forecasts** -- hourly and daily forecasts for ~5,600 points (stations + postal codes) covering temperature, precipitation, wind, radiation, and more (32 parameters). | CSV -> Parquet |
+| `analysis_kenda_ch1` | E5 | **KENDA-CH1 numerical weather analysis** -- 1 km gridded analysis of temperature, humidity, wind, pressure, radiation, pollen, and more from the KENDA-CH1 data assimilation system, plus 1-hour First Guess estimates. Updated hourly, last 24 hours only. | GRIB2 (opt-in) |
 
-GRIB2 forecast collections are large and require `--grids` to download.
+GRIB2 forecast and analysis collections are large and require `--grids` to download.
 
 ---
 

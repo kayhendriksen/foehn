@@ -25,6 +25,7 @@ htmlcov/
 # Local tool state
 .databricks/
 .claude/
+.agents/
 
 # OS
 .DS_Store
