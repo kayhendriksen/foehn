@@ -141,6 +141,65 @@ def test_load_indoor_station_filter(mock_session, mock_items):
     assert len(df) == 2
 
 
+# --- climate_scenarios (C8: metadata preamble + wide model table) ---
+
+_CS_CSV = (
+    "TITLE;X\nVARIABLE;Daily precipitation sum\nGWL;GWL1.5\n\n"
+    "DATE;MODEL_A;MODEL_B\n0001-01-01;0;24.2\n0001-01-02;1.5;0\n"
+)
+
+
+@patch("foehn.api.convert_climate_scenarios_to_parquet")
+def test_to_parquet_climate_scenarios_routes(mock_conv, tmp_path):
+    mock_conv.return_value = 0
+    to_parquet("climate_scenarios", data_dir=tmp_path)
+    mock_conv.assert_called_once_with(tmp_path / "bronze", tmp_path / "parquet")
+
+
+def test_load_climate_scenarios_year_filter_raises():
+    with pytest.raises(ValueError, match="nominal"):
+        load("climate_scenarios", year=2025)
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api._retry_session")
+def test_load_climate_scenarios_returns_dataframe(mock_session, mock_items):
+    href = "https://data.geo.admin.ch/x/ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
+    mock_items.return_value = [{"id": "abe", "assets": {"d": {"href": href}}}]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_CS_CSV))
+    mock_session.return_value = session
+
+    df = load("climate_scenarios")
+    assert isinstance(df, pl.DataFrame)
+    assert df.columns[:4] == ["station_abbr", "variable", "gwl", "date"]
+    assert df["station_abbr"][0] == "abe"
+    assert "MODEL_A" in df.columns
+    assert df["date"].to_list() == ["0001-01-01", "0001-01-02"]
+
+
+# --- forecast_local Date normalization ---
+
+_FORECAST_LOCAL_CSV = "point_id;point_type_id;Date;dkl010h0\n1;1;202605202100;282\n1;1;202605202200;315\n"
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, mock_items):
+    mock_meta.return_value = {"assets": {}}
+    href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
+    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    mock_session.return_value = session
+
+    df = load("forecast_local")
+    assert "reference_timestamp" in df.columns
+    assert df["reference_timestamp"].dtype == pl.Datetime
+    assert df["reference_timestamp"][0].year == 2026
+
+
 @patch("foehn.api.download_collection")
 @patch("foehn.api.download_metadata")
 def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):

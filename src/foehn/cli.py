@@ -23,10 +23,12 @@ from foehn.collections import (
     CSV_ZIP_COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
+    PREAMBLE_CSV_COLLECTIONS,
 )
 from foehn.convert import (
     convert_climate_normals_to_parquet,
     convert_climate_scenarios_indoor_to_parquet,
+    convert_climate_scenarios_to_parquet,
     convert_to_parquet,
 )
 
@@ -150,7 +152,10 @@ def cmd_download(args: argparse.Namespace) -> None:
             download_metadata(ds, bronze_dir, workers=workers)
             download_collection(ds, bronze_dir, data_types=time_slices, since=since, workers=workers)
             if not args.no_parquet:
-                failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
+                if ds in PREAMBLE_CSV_COLLECTIONS:
+                    failures += convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
+                else:
+                    failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
 
     # C6 climate normals (ZIP from opendata.swiss, not STAC)
     if not args.datasets:
@@ -190,6 +195,9 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
             continue
         if ds in CSV_ZIP_COLLECTIONS:
             failures += convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+            continue
+        if ds in PREAMBLE_CSV_COLLECTIONS:
+            failures += convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
             continue
         failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
 

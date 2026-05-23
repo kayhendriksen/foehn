@@ -25,12 +25,16 @@ from foehn.collections import (
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
     NO_GRANULARITY_COLLECTIONS,
+    PREAMBLE_CSV_COLLECTIONS,
 )
 from foehn.convert import (
     _parse_metadata_types,
+    add_forecast_local_timestamp,
     add_indoor_columns,
     convert_climate_scenarios_indoor_to_parquet,
+    convert_climate_scenarios_to_parquet,
     convert_to_parquet,
+    parse_climate_scenarios_csv,
     parse_csv_bytes,
     parse_indoor_filename,
 )
@@ -117,6 +121,8 @@ def to_parquet(
     parquet_dir = data_dir / "parquet"
     if dataset in CSV_ZIP_COLLECTIONS:
         failures = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    elif dataset in PREAMBLE_CSV_COLLECTIONS:
+        failures = convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
     else:
         failures = convert_to_parquet(dataset, bronze_dir, parquet_dir)
     if failures:
@@ -336,6 +342,74 @@ def _load_indoor(
     )
 
 
+def _load_climate_scenarios(
+    dataset: str,
+    *,
+    station: str | list[str] | None = None,
+    columns: list[str] | None = None,
+    drop_null: str | None = None,
+    sort: str | None = None,
+    limit: int | None = None,
+    workers: int = DEFAULT_WORKERS,
+) -> pl.DataFrame:
+    """Load CH2025 climate-scenario CSVs (metadata preamble + wide model table).
+
+    Dates are nominal (0001..0030 on a 365-day calendar), so the calendar-based
+    year/month/date filters do not apply here; ``sort`` orders lexically by the
+    string ``date`` column.
+    """
+    collection_id = COLLECTIONS[dataset]
+
+    station_filter: set[str] | None = None
+    if station is not None:
+        station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
+
+    items = get_collection_items(collection_id, verbose=False)
+    if station_filter is not None:
+        items = [item for item in items if item.get("id", "").lower() in station_filter]
+
+    hrefs: list[str] = []
+    for item in items:
+        for asset_info in item.get("assets", {}).values():
+            href = asset_info.get("href", "")
+            filename = href.split("?")[0].split("/")[-1]
+            if href.endswith(".csv") and "_meta_" not in filename:
+                hrefs.append(href)
+
+    if not hrefs:
+        raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
+
+    local = threading.local()
+
+    def _fetch(href: str) -> pl.DataFrame:
+        if not hasattr(local, "session"):
+            local.session = _retry_session(pool_maxsize=1)
+        validate_download_href(href)
+        resp = local.session.get(href, timeout=120)
+        resp.raise_for_status()
+        return parse_climate_scenarios_csv(resp.content, href.split("?")[0].split("/")[-1])
+
+    if len(hrefs) == 1 or workers <= 1:
+        frames = [_fetch(h) for h in hrefs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            frames = list(pool.map(_fetch, hrefs))
+
+    df = pl.concat(frames, how="diagonal_relaxed")
+
+    if drop_null and drop_null in df.columns:
+        df = df.filter(pl.col(drop_null).is_not_null())
+    if sort in ("asc", "desc"):
+        df = df.sort("date", descending=(sort == "desc"))
+    if columns:
+        keep = [c for c in ("station_abbr", "variable", "gwl", "date") if c in df.columns]
+        keep += [c for c in columns if c not in keep and c in df.columns]
+        df = df.select(keep)
+    if limit is not None:
+        df = df.head(limit)
+    return df
+
+
 def load(
     dataset: str,
     *,
@@ -428,6 +502,24 @@ def load(
             drop_null=drop_null,
             sort=sort,
             limit=limit,
+        )
+
+    if dataset in PREAMBLE_CSV_COLLECTIONS:
+        if frequency is not None:
+            raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
+        if any(x is not None for x in (year, month, date_from, date_to)):
+            raise ValueError(
+                f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
+                "year/month/date_from/date_to filters are not supported."
+            )
+        return _load_climate_scenarios(
+            dataset,
+            station=station,
+            columns=columns,
+            drop_null=drop_null,
+            sort=sort,
+            limit=limit,
+            workers=workers,
         )
 
     if time_slice is None:
@@ -537,6 +629,10 @@ def load(
             frames = list(pool.map(_fetch, csv_hrefs))
 
     df = pl.concat(frames, how="diagonal_relaxed")
+
+    # forecast_local has no reference_timestamp; derive it from the compact Date column.
+    if dataset == "forecast_local":
+        df = add_forecast_local_timestamp(df)
 
     return _apply_post_filters(
         df,

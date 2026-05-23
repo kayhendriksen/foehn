@@ -17,6 +17,7 @@ _PATCHES = [
     "foehn.cli.convert_to_parquet",
     "foehn.cli.convert_climate_normals_to_parquet",
     "foehn.cli.convert_climate_scenarios_indoor_to_parquet",
+    "foehn.cli.convert_climate_scenarios_to_parquet",
     "foehn.cli.save_last_run",
     "foehn.cli.load_last_run",
 ]
@@ -33,6 +34,7 @@ def _start_mocks():
     mocks["convert_to_parquet"].return_value = 0
     mocks["convert_climate_normals_to_parquet"].return_value = 0
     mocks["convert_climate_scenarios_indoor_to_parquet"].return_value = 0
+    mocks["convert_climate_scenarios_to_parquet"].return_value = 0
     return mocks, patchers
 
 
@@ -126,6 +128,14 @@ def test_default_runs_indoor_handler(tmp_path):
     mocks = _run("download", [], tmp_path)
     mocks["download_climate_scenarios_indoor"].assert_called()
     mocks["convert_climate_scenarios_indoor_to_parquet"].assert_called()
+
+
+def test_default_runs_climate_scenarios_handler(tmp_path):
+    """climate_scenarios (preamble CSV) should use its bespoke converter, not convert_to_parquet."""
+    mocks = _run("download", [], tmp_path)
+    mocks["convert_climate_scenarios_to_parquet"].assert_called()
+    for call in mocks["convert_to_parquet"].call_args_list:
+        assert call[0][0] != "climate_scenarios"
 
 
 # --- full-refresh ---
