@@ -239,6 +239,75 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
     return failed
 
 
+def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
+    """Convert extracted indoor climate scenario CSVs to a single Parquet file.
+
+    Each CSV is per-station/per-scenario hourly data: comma-separated, with the
+    timestamp split across time.yy/mm/dd/hh. The filename encodes
+    {station}_{period}_{scenario}_{variant}, which become columns alongside a
+    synthesised reference_timestamp. All files are concatenated into one Parquet.
+    """
+    csv_dir = bronze_dir / "climate_scenarios_indoor"
+    out_dir = parquet_dir / "climate_scenarios_indoor"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_files = sorted(csv_dir.glob("*.csv"))
+    if not csv_files:
+        return 0
+
+    out_path = out_dir / "climate_scenarios_indoor.parquet"
+    if out_path.exists():
+        out_mtime = out_path.stat().st_mtime
+        if all(f.stat().st_mtime <= out_mtime for f in csv_files):
+            print("Converting climate_scenarios_indoor to Parquet:\n  up-to-date — skipping", flush=True)
+            return 0
+
+    print(f"Converting climate_scenarios_indoor to Parquet ({len(csv_files)} files)...", flush=True)
+    time_cols = ["time.yy", "time.mm", "time.dd", "time.hh"]
+    frames: list[pl.LazyFrame] = []
+    skipped = 0
+    for f in csv_files:
+        parts = f.stem.split("_")
+        # Data files are {station}_{period}_{scenario}_{variant} with a 4-digit
+        # year as the period. The archive also ships a metadata CSV that does not
+        # match — skip non-data files rather than treating them as failures.
+        if len(parts) < 4 or not parts[1].isdigit():
+            skipped += 1
+            print(f"  Skipping non-data file: {f.name}", flush=True)
+            continue
+        station, period, scenario = parts[0], parts[1], parts[2]
+        variant = "_".join(parts[3:]) if len(parts) > 3 else ""
+        lf = (
+            pl.scan_csv(f, separator=",", infer_schema_length=10_000, truncate_ragged_lines=True)
+            .with_columns(
+                pl.datetime(
+                    pl.col("time.yy"),
+                    pl.col("time.mm"),
+                    pl.col("time.dd"),
+                    hour=pl.col("time.hh"),
+                ).alias("reference_timestamp"),
+                pl.lit(station).alias("station_abbr"),
+                pl.lit(period).alias("period"),
+                pl.lit(scenario).alias("scenario"),
+                pl.lit(variant).alias("variant"),
+            )
+            .drop(time_cols)
+        )
+        frames.append(lf)
+
+    if not frames:
+        return 0
+
+    try:
+        pl.concat(frames, how="diagonal_relaxed").sink_parquet(out_path, compression="zstd")
+    except Exception as e:
+        print(f"  FAIL: {e}", flush=True)
+        return 1
+
+    print(f"  Done: wrote {out_path.name} ({len(frames)} files, {skipped} non-data skipped)", flush=True)
+    return 0
+
+
 def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert C6 climate normals TXT files to Parquet.
 

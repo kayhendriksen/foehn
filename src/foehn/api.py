@@ -19,6 +19,7 @@ from foehn.client import (
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
+    CSV_ZIP_COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
@@ -65,6 +66,10 @@ def download(
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
         raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset. Use the CLI with --grids instead.")
+    if dataset in CSV_ZIP_COLLECTIONS:
+        raise ValueError(
+            f"Dataset {dataset!r} is a zipped multi-CSV collection. Download it with the CLI: foehn download {dataset}"
+        )
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
@@ -99,6 +104,10 @@ def to_parquet(
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
+    if dataset in CSV_ZIP_COLLECTIONS:
+        raise ValueError(
+            f"Dataset {dataset!r} is a zipped multi-CSV collection. Use the CLI: foehn to-parquet {dataset}"
+        )
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
@@ -284,6 +293,11 @@ def load(
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
         raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
+    if dataset in CSV_ZIP_COLLECTIONS:
+        raise ValueError(
+            f"Dataset {dataset!r} is a zipped multi-CSV collection. Download it with the CLI "
+            f"(foehn download {dataset}) and read the Parquet output; in-memory load() is not supported."
+        )
 
     if time_slice is None:
         time_slice = ["recent"]

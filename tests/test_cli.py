@@ -13,8 +13,10 @@ _PATCHES = [
     "foehn.cli.download_grib2",
     "foehn.cli.download_netcdf",
     "foehn.cli.download_climate_normals_zip",
+    "foehn.cli.download_climate_scenarios_indoor",
     "foehn.cli.convert_to_parquet",
     "foehn.cli.convert_climate_normals_to_parquet",
+    "foehn.cli.convert_climate_scenarios_indoor_to_parquet",
     "foehn.cli.save_last_run",
     "foehn.cli.load_last_run",
 ]
@@ -30,6 +32,7 @@ def _start_mocks():
     mocks["load_last_run"].return_value = None
     mocks["convert_to_parquet"].return_value = 0
     mocks["convert_climate_normals_to_parquet"].return_value = 0
+    mocks["convert_climate_scenarios_indoor_to_parquet"].return_value = 0
     return mocks, patchers
 
 
@@ -116,6 +119,13 @@ def test_default_runs_conversion(tmp_path):
     mocks = _run("download", [], tmp_path)
     mocks["convert_to_parquet"].assert_called()
     mocks["convert_climate_normals_to_parquet"].assert_called()
+
+
+def test_default_runs_indoor_handler(tmp_path):
+    """Indoor scenarios (CSV+ZIP) should be downloaded + converted in the default run."""
+    mocks = _run("download", [], tmp_path)
+    mocks["download_climate_scenarios_indoor"].assert_called()
+    mocks["convert_climate_scenarios_indoor_to_parquet"].assert_called()
 
 
 # --- full-refresh ---

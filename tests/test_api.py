@@ -65,6 +65,21 @@ def test_download_netcdf_dataset_raises():
         download("surface_derived_grid")
 
 
+def test_download_indoor_csv_zip_raises():
+    with pytest.raises(ValueError, match="zipped multi-CSV"):
+        download("climate_scenarios_indoor")
+
+
+def test_to_parquet_indoor_csv_zip_raises():
+    with pytest.raises(ValueError, match="zipped multi-CSV"):
+        to_parquet("climate_scenarios_indoor")
+
+
+def test_load_indoor_csv_zip_raises():
+    with pytest.raises(ValueError, match="zipped multi-CSV"):
+        load("climate_scenarios_indoor")
+
+
 @patch("foehn.api.download_collection")
 @patch("foehn.api.download_metadata")
 def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):

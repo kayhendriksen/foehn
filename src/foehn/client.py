@@ -521,3 +521,63 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
         print(f"  Extracted {len(zf.namelist())} files", flush=True)
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["normwerte.zip"])
+
+
+# --- Indoor climate scenarios ZIP (single .csv.zip of per-station CSVs) ---
+
+
+def download_climate_scenarios_indoor(
+    output_dir: Path,
+    collection_key: str = "climate_scenarios_indoor",
+    force: bool = False,
+) -> DownloadResult:
+    """Download and extract the indoor climate scenarios ZIP.
+
+    The collection ships a single ``.csv.zip`` (per-station, per-scenario hourly
+    CSVs) rather than individual STAC CSV assets, so it needs its own download
+    path. The archive is fetched from the STAC API and its members extracted to
+    ``output_dir/<collection_key>/``.
+    """
+    collection_id = COLLECTIONS[collection_key]
+    out_dir = output_dir / collection_key
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not force and any(out_dir.glob("*.csv")):
+        print(f"\n  {collection_key} already extracted — skipping", flush=True)
+        return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
+
+    items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    zip_href = next(
+        (
+            asset_info.get("href", "")
+            for item in items
+            for asset_info in item.get("assets", {}).values()
+            if asset_info.get("href", "").split("?")[0].endswith(".zip")
+        ),
+        None,
+    )
+    if not zip_href:
+        print(f"  No .zip asset found for {collection_key}", flush=True)
+        return DownloadResult()
+
+    print(f"\n{'=' * 60}", flush=True)
+    print(f"Indoor scenarios ({collection_id}): downloading ZIP", flush=True)
+    print(f"{'=' * 60}", flush=True)
+
+    validate_download_href(zip_href)
+    zip_path = out_dir / zip_href.split("?")[0].split("/")[-1]
+    resp = _retry_session().get(zip_href, timeout=300)
+    resp.raise_for_status()
+    zip_path.write_bytes(resp.content)
+    print(f"  Downloaded: {zip_path.name} ({len(resp.content) / 1e6:.1f} MB)", flush=True)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        resolved_out_dir = out_dir.resolve()
+        for member in zf.infolist():
+            target = (resolved_out_dir / member.filename).resolve()
+            if not str(target).startswith(str(resolved_out_dir) + "/"):
+                raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
+        zf.extractall(out_dir)
+        print(f"  Extracted {len(zf.namelist())} files", flush=True)
+
+    return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=[zip_path.name])

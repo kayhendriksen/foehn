@@ -10,6 +10,7 @@ from foehn.convert import (
     _load_metadata_types,
     _parse_metadata_types,
     convert_climate_normals_to_parquet,
+    convert_climate_scenarios_indoor_to_parquet,
     convert_to_parquet,
     parse_csv_bytes,
 )
@@ -233,3 +234,59 @@ def test_convert_climate_normals_handles_bad_file(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "FAIL" in out
+
+
+# --- indoor climate scenarios (zipped multi-CSV) ---
+
+_INDOOR_CSV = (
+    "time.yy,time.mm,time.dd,time.hh,tre200h0,ure200h0,skycover\n"
+    "2035,1,1,0,0.3,94.5,36\n"
+    "2035,1,1,1,-0.2,94.6,26\n"
+    "2035,1,1,2,-0.5,94.3,20\n"
+)
+
+
+def test_convert_indoor_scenarios_parses_filename_and_timestamp(tmp_path):
+    bronze_dir = tmp_path / "bronze"
+    indoor_dir = bronze_dir / "climate_scenarios_indoor"
+    indoor_dir.mkdir(parents=True)
+    (indoor_dir / "ABO_2035_RCP85_1in10-warmsummer.csv").write_text(_INDOOR_CSV)
+    (indoor_dir / "AIG_2060_RCP26_DRY.csv").write_text(_INDOOR_CSV)
+
+    parquet_dir = tmp_path / "parquet"
+    failed = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    assert failed == 0
+
+    out = parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet"
+    assert out.exists()
+
+    df = pl.read_parquet(out)
+    # 3 rows per file × 2 files
+    assert len(df) == 6
+    # filename-derived columns + synthesised timestamp + dropped time.* cols
+    assert {"station_abbr", "period", "scenario", "variant", "reference_timestamp"} <= set(df.columns)
+    assert not any(c.startswith("time.") for c in df.columns)
+    assert set(df["station_abbr"].unique()) == {"ABO", "AIG"}
+    assert set(df["scenario"].unique()) == {"RCP85", "RCP26"}
+    assert "1in10-warmsummer" in set(df["variant"].unique())
+    assert df["reference_timestamp"].dtype == pl.Datetime
+
+
+def test_convert_indoor_scenarios_no_files_returns_zero(tmp_path):
+    assert convert_climate_scenarios_indoor_to_parquet(tmp_path / "bronze", tmp_path / "parquet") == 0
+
+
+def test_convert_indoor_scenarios_skips_metadata_file(tmp_path):
+    """The archive's non-data metadata CSV must be skipped, not counted as a failure."""
+    bronze_dir = tmp_path / "bronze"
+    indoor_dir = bronze_dir / "climate_scenarios_indoor"
+    indoor_dir.mkdir(parents=True)
+    (indoor_dir / "ABO_2035_RCP85_DRY.csv").write_text(_INDOOR_CSV)
+    (indoor_dir / "Klimaszenarien-Raumklima_Metadata.csv").write_text("foo,bar\n1,2\n")
+
+    parquet_dir = tmp_path / "parquet"
+    failed = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    assert failed == 0
+
+    df = pl.read_parquet(parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet")
+    assert set(df["station_abbr"].unique()) == {"ABO"}

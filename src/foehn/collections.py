@@ -312,8 +312,8 @@ COLLECTION_META: dict[str, dict] = {
         "category": "C",
         "subcategory": "C",
         "description": "Indoor climate scenarios",
-        "format": "NetCDF",
-        "frequencies": [],
+        "format": "CSV+ZIP",
+        "frequencies": ["h"],
         "time_slices": [],
     },
     # ── D: Radar data ────────────────────────────────────────────────────────
@@ -407,6 +407,13 @@ NETCDF_COLLECTIONS = {
     "hail_hazard_20y",
     "hail_hazard_50y",
     "hail_hazard_100y",
+}
+
+# Tabular collections delivered as a single ZIP of CSVs (not per-station STAC
+# assets), with their own separator/timestamp layout. Like the C6 climate
+# normals, these get a bespoke download+convert path rather than the standard
+# CSV flow, and are not exposed through the in-memory load() API.
+CSV_ZIP_COLLECTIONS = {
     "climate_scenarios_indoor",
 }
 
