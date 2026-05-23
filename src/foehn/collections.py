@@ -312,8 +312,8 @@ COLLECTION_META: dict[str, dict] = {
         "category": "C",
         "subcategory": "C",
         "description": "Indoor climate scenarios",
-        "format": "NetCDF",
-        "frequencies": [],
+        "format": "CSV+ZIP",
+        "frequencies": ["h"],
         "time_slices": [],
     },
     # ── D: Radar data ────────────────────────────────────────────────────────
@@ -407,7 +407,23 @@ NETCDF_COLLECTIONS = {
     "hail_hazard_20y",
     "hail_hazard_50y",
     "hail_hazard_100y",
+}
+
+# Tabular collections delivered as a single ZIP of CSVs (not per-station STAC
+# assets), with their own separator/timestamp layout. Like the C6 climate
+# normals, these get a bespoke download+convert path rather than the standard
+# CSV flow.
+CSV_ZIP_COLLECTIONS = {
     "climate_scenarios_indoor",
+}
+
+# CSV collections whose files carry a multi-row "KEY;VALUE" metadata preamble
+# before the real "DATE;<model>;..." table (CH2025 climate scenarios). The
+# standard reader would treat the preamble as the header, so these need a
+# preamble-skipping parser. Downloads are standard per-file CSVs; only the
+# parse differs.
+PREAMBLE_CSV_COLLECTIONS = {
+    "climate_scenarios",
 }
 
 

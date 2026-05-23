@@ -13,18 +13,31 @@ from foehn.client import (
     DEFAULT_WORKERS,
     DownloadResult,
     _retry_session,
+    download_climate_scenarios_indoor,
     download_collection,
     download_metadata,
 )
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
+    CSV_ZIP_COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
     NO_GRANULARITY_COLLECTIONS,
+    PREAMBLE_CSV_COLLECTIONS,
 )
-from foehn.convert import _parse_metadata_types, convert_to_parquet, parse_csv_bytes
+from foehn.convert import (
+    _parse_metadata_types,
+    add_forecast_local_timestamp,
+    add_indoor_columns,
+    convert_climate_scenarios_indoor_to_parquet,
+    convert_climate_scenarios_to_parquet,
+    convert_to_parquet,
+    parse_climate_scenarios_csv,
+    parse_csv_bytes,
+    parse_indoor_filename,
+)
 from foehn.stac import get_collection_items, get_collection_metadata
 
 
@@ -70,6 +83,9 @@ def download(
     bronze_dir = data_dir / "bronze"
     bronze_dir.mkdir(parents=True, exist_ok=True)
 
+    if dataset in CSV_ZIP_COLLECTIONS:
+        return download_climate_scenarios_indoor(bronze_dir, dataset)
+
     meta = download_metadata(dataset, bronze_dir, workers=workers)
     coll = download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers)
 
@@ -103,7 +119,12 @@ def to_parquet(
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     parquet_dir = data_dir / "parquet"
-    failures = convert_to_parquet(dataset, bronze_dir, parquet_dir)
+    if dataset in CSV_ZIP_COLLECTIONS:
+        failures = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    elif dataset in PREAMBLE_CSV_COLLECTIONS:
+        failures = convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
+    else:
+        failures = convert_to_parquet(dataset, bronze_dir, parquet_dir)
     if failures:
         raise RuntimeError(
             f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
@@ -206,6 +227,189 @@ def inventory(dataset: str) -> pl.DataFrame:
     )
 
 
+def _apply_post_filters(
+    df: pl.DataFrame,
+    *,
+    year: int | list[int] | None = None,
+    month: int | list[int] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    drop_null: str | None = None,
+    sort: str | None = None,
+    columns: list[str] | None = None,
+    limit: int | None = None,
+    keep_cols: tuple[str, ...] = ("station_abbr", "reference_timestamp"),
+) -> pl.DataFrame:
+    """Apply the shared in-memory row/column filters used by load() variants."""
+    ts = "reference_timestamp"
+    if year is not None:
+        years = [year] if isinstance(year, int) else year
+        df = df.filter(pl.col(ts).dt.year().is_in(years))
+    if month is not None:
+        months = [month] if isinstance(month, int) else month
+        df = df.filter(pl.col(ts).dt.month().is_in(months))
+    if date_from is not None:
+        df = df.filter(pl.col(ts) >= pl.lit(date_from).str.to_datetime())
+    if date_to is not None:
+        df = df.filter(pl.col(ts) <= pl.lit(date_to).str.to_datetime())
+    if drop_null and drop_null in df.columns:
+        df = df.filter(pl.col(drop_null).is_not_null())
+    if sort in ("asc", "desc"):
+        df = df.sort(ts, descending=(sort == "desc"))
+    if columns:
+        keep = [c for c in keep_cols if c in df.columns]
+        keep += [c for c in columns if c not in keep and c in df.columns]
+        df = df.select(keep)
+    if limit is not None:
+        df = df.head(limit)
+    return df
+
+
+def _load_indoor(
+    dataset: str,
+    *,
+    station: str | list[str] | None = None,
+    year: int | list[int] | None = None,
+    month: int | list[int] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    columns: list[str] | None = None,
+    drop_null: str | None = None,
+    sort: str | None = None,
+    limit: int | None = None,
+) -> pl.DataFrame:
+    """Load a zipped multi-CSV collection (indoor scenarios) into a DataFrame.
+
+    Unlike the per-station collections, this is a single archive, so the whole
+    ZIP is fetched and parsed in memory; ``station`` filters which member CSVs
+    are parsed, the rest of the filters apply to the combined frame.
+    """
+    import io
+    import zipfile
+
+    collection_id = COLLECTIONS[dataset]
+    items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    zip_href = next(
+        (
+            asset_info.get("href", "")
+            for item in items
+            for asset_info in item.get("assets", {}).values()
+            if asset_info.get("href", "").split("?")[0].endswith(".zip")
+        ),
+        None,
+    )
+    if not zip_href:
+        raise ValueError(f"No .zip asset found for {dataset!r}.")
+
+    station_filter: set[str] | None = None
+    if station is not None:
+        station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
+
+    validate_download_href(zip_href)
+    resp = _retry_session().get(zip_href, timeout=300)
+    resp.raise_for_status()
+
+    frames: list[pl.DataFrame] = []
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        for name in zf.namelist():
+            if not name.endswith(".csv"):
+                continue
+            parsed = parse_indoor_filename(Path(name).stem)
+            if parsed is None:
+                continue
+            st, period, scenario, variant = parsed
+            if station_filter is not None and st.lower() not in station_filter:
+                continue
+            with zf.open(name) as fh:
+                frame = pl.read_csv(fh.read(), separator=",", infer_schema_length=10_000, truncate_ragged_lines=True)
+            frames.append(add_indoor_columns(frame, st, period, scenario, variant))
+
+    if not frames:
+        raise ValueError(f"No indoor data found for {dataset!r} with station={station}.")
+
+    df = pl.concat(frames, how="diagonal_relaxed")
+    return _apply_post_filters(
+        df,
+        year=year,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
+        drop_null=drop_null,
+        sort=sort,
+        columns=columns,
+        limit=limit,
+        keep_cols=("station_abbr", "reference_timestamp", "period", "scenario", "variant"),
+    )
+
+
+def _load_climate_scenarios(
+    dataset: str,
+    *,
+    station: str | list[str] | None = None,
+    columns: list[str] | None = None,
+    drop_null: str | None = None,
+    sort: str | None = None,
+    limit: int | None = None,
+    workers: int = DEFAULT_WORKERS,
+) -> pl.DataFrame:
+    """Load CH2025 climate-scenario CSVs (metadata preamble + wide model table).
+
+    Dates are nominal (0001..0030 on a 365-day calendar), so the calendar-based
+    year/month/date filters do not apply here; ``sort`` orders lexically by the
+    string ``date`` column.
+    """
+    collection_id = COLLECTIONS[dataset]
+
+    station_filter: set[str] | None = None
+    if station is not None:
+        station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
+
+    items = get_collection_items(collection_id, verbose=False)
+    if station_filter is not None:
+        items = [item for item in items if item.get("id", "").lower() in station_filter]
+
+    hrefs: list[str] = []
+    for item in items:
+        for asset_info in item.get("assets", {}).values():
+            href = asset_info.get("href", "")
+            filename = href.split("?")[0].split("/")[-1]
+            if href.endswith(".csv") and "_meta_" not in filename:
+                hrefs.append(href)
+
+    if not hrefs:
+        raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
+
+    local = threading.local()
+
+    def _fetch(href: str) -> pl.DataFrame:
+        if not hasattr(local, "session"):
+            local.session = _retry_session(pool_maxsize=1)
+        validate_download_href(href)
+        resp = local.session.get(href, timeout=120)
+        resp.raise_for_status()
+        return parse_climate_scenarios_csv(resp.content, href.split("?")[0].split("/")[-1])
+
+    if len(hrefs) == 1 or workers <= 1:
+        frames = [_fetch(h) for h in hrefs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            frames = list(pool.map(_fetch, hrefs))
+
+    df = pl.concat(frames, how="diagonal_relaxed")
+
+    if drop_null and drop_null in df.columns:
+        df = df.filter(pl.col(drop_null).is_not_null())
+    if sort in ("asc", "desc"):
+        df = df.sort("date", descending=(sort == "desc"))
+    if columns:
+        keep = [c for c in ("station_abbr", "variable", "gwl", "date") if c in df.columns]
+        keep += [c for c in columns if c not in keep and c in df.columns]
+        df = df.select(keep)
+    if limit is not None:
+        df = df.head(limit)
+    return df
+
+
 def load(
     dataset: str,
     *,
@@ -284,6 +488,39 @@ def load(
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
         raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
+    if dataset in CSV_ZIP_COLLECTIONS:
+        if frequency is not None:
+            raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
+        return _load_indoor(
+            dataset,
+            station=station,
+            year=year,
+            month=month,
+            date_from=date_from,
+            date_to=date_to,
+            columns=columns,
+            drop_null=drop_null,
+            sort=sort,
+            limit=limit,
+        )
+
+    if dataset in PREAMBLE_CSV_COLLECTIONS:
+        if frequency is not None:
+            raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
+        if any(x is not None for x in (year, month, date_from, date_to)):
+            raise ValueError(
+                f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
+                "year/month/date_from/date_to filters are not supported."
+            )
+        return _load_climate_scenarios(
+            dataset,
+            station=station,
+            columns=columns,
+            drop_null=drop_null,
+            sort=sort,
+            limit=limit,
+            workers=workers,
+        )
 
     if time_slice is None:
         time_slice = ["recent"]
@@ -393,27 +630,18 @@ def load(
 
     df = pl.concat(frames, how="diagonal_relaxed")
 
-    # Post-load filters.
-    ts = "reference_timestamp"
-    if year is not None:
-        years = [year] if isinstance(year, int) else year
-        df = df.filter(pl.col(ts).dt.year().is_in(years))
-    if month is not None:
-        months = [month] if isinstance(month, int) else month
-        df = df.filter(pl.col(ts).dt.month().is_in(months))
-    if date_from is not None:
-        df = df.filter(pl.col(ts) >= pl.lit(date_from).str.to_datetime())
-    if date_to is not None:
-        df = df.filter(pl.col(ts) <= pl.lit(date_to).str.to_datetime())
-    if drop_null and drop_null in df.columns:
-        df = df.filter(pl.col(drop_null).is_not_null())
-    if sort in ("asc", "desc"):
-        df = df.sort(ts, descending=(sort == "desc"))
-    if columns:
-        keep = ["station_abbr", "reference_timestamp"]
-        keep += [c for c in columns if c not in keep and c in df.columns]
-        df = df.select(keep)
-    if limit is not None:
-        df = df.head(limit)
+    # forecast_local has no reference_timestamp; derive it from the compact Date column.
+    if dataset == "forecast_local":
+        df = add_forecast_local_timestamp(df)
 
-    return df
+    return _apply_post_filters(
+        df,
+        year=year,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
+        drop_null=drop_null,
+        sort=sort,
+        columns=columns,
+        limit=limit,
+    )

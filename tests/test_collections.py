@@ -4,9 +4,11 @@ from foehn.api import list_datasets
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
+    CSV_ZIP_COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
+    PREAMBLE_CSV_COLLECTIONS,
 )
 
 
@@ -21,14 +23,34 @@ def test_routing_sets_are_subsets_of_collections():
     assert keys >= FORECAST_CSV_COLLECTIONS
     assert keys >= GRIB2_COLLECTIONS
     assert keys >= NETCDF_COLLECTIONS
+    assert keys >= CSV_ZIP_COLLECTIONS
+    assert keys >= PREAMBLE_CSV_COLLECTIONS
 
 
 def test_routing_sets_are_mutually_exclusive():
     """A collection should belong to at most one routing set."""
-    all_sets = [FORECAST_CSV_COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS]
+    all_sets = [
+        FORECAST_CSV_COLLECTIONS,
+        GRIB2_COLLECTIONS,
+        NETCDF_COLLECTIONS,
+        CSV_ZIP_COLLECTIONS,
+        PREAMBLE_CSV_COLLECTIONS,
+    ]
     for i, a in enumerate(all_sets):
         for b in all_sets[i + 1 :]:
             assert a.isdisjoint(b), f"Overlap between routing sets: {a & b}"
+
+
+def test_indoor_scenarios_is_csv_zip_not_netcdf():
+    assert "climate_scenarios_indoor" in CSV_ZIP_COLLECTIONS
+    assert "climate_scenarios_indoor" not in NETCDF_COLLECTIONS
+    assert COLLECTION_META["climate_scenarios_indoor"]["format"] == "CSV+ZIP"
+
+
+def test_climate_scenarios_is_preamble_csv():
+    assert "climate_scenarios" in PREAMBLE_CSV_COLLECTIONS
+    assert "climate_scenarios" not in NETCDF_COLLECTIONS
+    assert "climate_scenarios" not in CSV_ZIP_COLLECTIONS
 
 
 def test_collection_ids_are_unique():

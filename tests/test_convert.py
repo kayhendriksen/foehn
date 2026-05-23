@@ -9,8 +9,12 @@ import pytest
 from foehn.convert import (
     _load_metadata_types,
     _parse_metadata_types,
+    add_forecast_local_timestamp,
     convert_climate_normals_to_parquet,
+    convert_climate_scenarios_indoor_to_parquet,
+    convert_climate_scenarios_to_parquet,
     convert_to_parquet,
+    parse_climate_scenarios_csv,
     parse_csv_bytes,
 )
 
@@ -233,3 +237,120 @@ def test_convert_climate_normals_handles_bad_file(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "FAIL" in out
+
+
+# --- indoor climate scenarios (zipped multi-CSV) ---
+
+_INDOOR_CSV = (
+    "time.yy,time.mm,time.dd,time.hh,tre200h0,ure200h0,skycover\n"
+    "2035,1,1,0,0.3,94.5,36\n"
+    "2035,1,1,1,-0.2,94.6,26\n"
+    "2035,1,1,2,-0.5,94.3,20\n"
+)
+
+
+def test_convert_indoor_scenarios_parses_filename_and_timestamp(tmp_path):
+    bronze_dir = tmp_path / "bronze"
+    indoor_dir = bronze_dir / "climate_scenarios_indoor"
+    indoor_dir.mkdir(parents=True)
+    (indoor_dir / "ABO_2035_RCP85_1in10-warmsummer.csv").write_text(_INDOOR_CSV)
+    (indoor_dir / "AIG_2060_RCP26_DRY.csv").write_text(_INDOOR_CSV)
+
+    parquet_dir = tmp_path / "parquet"
+    failed = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    assert failed == 0
+
+    out = parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet"
+    assert out.exists()
+
+    df = pl.read_parquet(out)
+    # 3 rows per file × 2 files
+    assert len(df) == 6
+    # filename-derived columns + synthesised timestamp + dropped time.* cols
+    assert {"station_abbr", "period", "scenario", "variant", "reference_timestamp"} <= set(df.columns)
+    assert not any(c.startswith("time.") for c in df.columns)
+    assert set(df["station_abbr"].unique()) == {"ABO", "AIG"}
+    assert set(df["scenario"].unique()) == {"RCP85", "RCP26"}
+    assert "1in10-warmsummer" in set(df["variant"].unique())
+    assert df["reference_timestamp"].dtype == pl.Datetime
+
+
+def test_convert_indoor_scenarios_no_files_returns_zero(tmp_path):
+    assert convert_climate_scenarios_indoor_to_parquet(tmp_path / "bronze", tmp_path / "parquet") == 0
+
+
+def test_convert_indoor_scenarios_skips_metadata_file(tmp_path):
+    """The archive's non-data metadata CSV must be skipped, not counted as a failure."""
+    bronze_dir = tmp_path / "bronze"
+    indoor_dir = bronze_dir / "climate_scenarios_indoor"
+    indoor_dir.mkdir(parents=True)
+    (indoor_dir / "ABO_2035_RCP85_DRY.csv").write_text(_INDOOR_CSV)
+    (indoor_dir / "Klimaszenarien-Raumklima_Metadata.csv").write_text("foo,bar\n1,2\n")
+
+    parquet_dir = tmp_path / "parquet"
+    failed = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    assert failed == 0
+
+    df = pl.read_parquet(parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet")
+    assert set(df["station_abbr"].unique()) == {"ABO"}
+
+
+# --- climate_scenarios C8 (metadata preamble + wide model table) ---
+
+_CS_CSV = (
+    "TITLE;Climate CH2025\n"
+    "VARIABLE;Daily precipitation sum\n"
+    "STATION_ABBR;ABE\n"
+    "GWL;GWL1.5\n"
+    "\n"
+    "DATE;MODEL_A;MODEL_B\n"
+    "0001-01-01;0;24.2\n"
+    "0001-01-02;1.5;0\n"
+)
+
+
+def test_parse_climate_scenarios_csv_skips_preamble():
+    df = parse_climate_scenarios_csv(_CS_CSV.encode("utf-8"), "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv")
+    assert df.columns[:4] == ["station_abbr", "variable", "gwl", "date"]
+    assert {"MODEL_A", "MODEL_B"} <= set(df.columns)
+    assert df["station_abbr"][0] == "abe"
+    assert df["variable"][0] == "pr"
+    assert df["gwl"][0] == "gwl1.5"
+    assert df["date"].to_list() == ["0001-01-01", "0001-01-02"]
+    assert df["MODEL_A"].dtype == pl.Float64
+    assert len(df) == 2
+
+
+def test_convert_climate_scenarios_to_parquet(tmp_path):
+    bronze_dir = tmp_path / "bronze"
+    cs_dir = bronze_dir / "climate_scenarios"
+    cs_dir.mkdir(parents=True)
+    (cs_dir / "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv").write_text(_CS_CSV)
+    (cs_dir / "ogd-climate-scenarios-ch2025_ber_tas_gwl2.0.csv").write_text(_CS_CSV)
+
+    parquet_dir = tmp_path / "parquet"
+    failed = convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
+    assert failed == 0
+
+    df = pl.read_parquet(parquet_dir / "climate_scenarios" / "climate_scenarios.parquet")
+    assert set(df["station_abbr"].unique()) == {"abe", "ber"}
+    assert set(df["variable"].unique()) == {"pr", "tas"}
+    assert set(df["gwl"].unique()) == {"gwl1.5", "gwl2.0"}
+    assert len(df) == 4
+
+
+# --- forecast_local Date -> reference_timestamp ---
+
+
+def test_add_forecast_local_timestamp():
+    df = pl.DataFrame({"point_id": [1], "Date": [202605202100], "dkl010h0": [282]})
+    out = add_forecast_local_timestamp(df)
+    assert "reference_timestamp" in out.columns
+    assert out["reference_timestamp"].dtype == pl.Datetime
+    ts = out["reference_timestamp"][0]
+    assert (ts.year, ts.month, ts.day, ts.hour) == (2026, 5, 20, 21)
+
+
+def test_add_forecast_local_timestamp_noop_without_date():
+    df = pl.DataFrame({"a": [1]})
+    assert add_forecast_local_timestamp(df).columns == ["a"]

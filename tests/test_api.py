@@ -1,5 +1,7 @@
 """Tests for the public Python API."""
 
+import io
+import zipfile
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -63,6 +65,139 @@ def test_download_grib2_dataset_raises():
 def test_download_netcdf_dataset_raises():
     with pytest.raises(ValueError, match="binary/grid dataset"):
         download("surface_derived_grid")
+
+
+_INDOOR_CSV = "time.yy,time.mm,time.dd,time.hh,tre200h0,ure200h0\n2035,1,1,0,0.3,94.5\n2035,1,1,1,-0.2,94.6\n"
+
+
+def _make_indoor_zip(data_names):
+    """Build an in-memory indoor .csv.zip with the given data CSVs + a metadata file."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for n in data_names:
+            zf.writestr(n, _INDOOR_CSV)
+        zf.writestr("Klimaszenarien-Raumklima_Metadata.csv", "a,b\n1,2\n")
+    return buf.getvalue()
+
+
+@patch("foehn.api.download_climate_scenarios_indoor")
+def test_download_indoor_routes_to_handler(mock_dl, tmp_path):
+    from foehn.client import DownloadResult
+
+    mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
+    res = download("climate_scenarios_indoor", data_dir=tmp_path)
+    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor")
+    assert res.downloaded == 1
+
+
+@patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")
+def test_to_parquet_indoor_routes_to_converter(mock_conv, tmp_path):
+    mock_conv.return_value = 0
+    to_parquet("climate_scenarios_indoor", data_dir=tmp_path)
+    mock_conv.assert_called_once_with(tmp_path / "bronze", tmp_path / "parquet")
+
+
+@patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")
+def test_to_parquet_indoor_raises_on_failure(mock_conv, tmp_path):
+    mock_conv.return_value = 1
+    with pytest.raises(RuntimeError, match="did not convert"):
+        to_parquet("climate_scenarios_indoor", data_dir=tmp_path)
+
+
+def test_load_indoor_frequency_raises():
+    with pytest.raises(ValueError, match="does not support frequency"):
+        load("climate_scenarios_indoor", frequency="h")
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api._retry_session")
+def test_load_indoor_returns_dataframe(mock_session, mock_items):
+    mock_items.return_value = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+    zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(zip_bytes))
+    mock_session.return_value = session
+
+    df = load("climate_scenarios_indoor")
+    assert isinstance(df, pl.DataFrame)
+    assert {"station_abbr", "period", "scenario", "variant", "reference_timestamp"} <= set(df.columns)
+    assert not any(c.startswith("time.") for c in df.columns)
+    assert set(df["station_abbr"].unique()) == {"ABO", "AIG"}
+    # 2 rows per data file × 2 files; the metadata CSV is skipped
+    assert len(df) == 4
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api._retry_session")
+def test_load_indoor_station_filter(mock_session, mock_items):
+    mock_items.return_value = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+    zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(zip_bytes))
+    mock_session.return_value = session
+
+    df = load("climate_scenarios_indoor", station="ABO")
+    assert set(df["station_abbr"].unique()) == {"ABO"}
+    assert len(df) == 2
+
+
+# --- climate_scenarios (C8: metadata preamble + wide model table) ---
+
+_CS_CSV = (
+    "TITLE;X\nVARIABLE;Daily precipitation sum\nGWL;GWL1.5\n\n"
+    "DATE;MODEL_A;MODEL_B\n0001-01-01;0;24.2\n0001-01-02;1.5;0\n"
+)
+
+
+@patch("foehn.api.convert_climate_scenarios_to_parquet")
+def test_to_parquet_climate_scenarios_routes(mock_conv, tmp_path):
+    mock_conv.return_value = 0
+    to_parquet("climate_scenarios", data_dir=tmp_path)
+    mock_conv.assert_called_once_with(tmp_path / "bronze", tmp_path / "parquet")
+
+
+def test_load_climate_scenarios_year_filter_raises():
+    with pytest.raises(ValueError, match="nominal"):
+        load("climate_scenarios", year=2025)
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api._retry_session")
+def test_load_climate_scenarios_returns_dataframe(mock_session, mock_items):
+    href = "https://data.geo.admin.ch/x/ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
+    mock_items.return_value = [{"id": "abe", "assets": {"d": {"href": href}}}]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_CS_CSV))
+    mock_session.return_value = session
+
+    df = load("climate_scenarios")
+    assert isinstance(df, pl.DataFrame)
+    assert df.columns[:4] == ["station_abbr", "variable", "gwl", "date"]
+    assert df["station_abbr"][0] == "abe"
+    assert "MODEL_A" in df.columns
+    assert df["date"].to_list() == ["0001-01-01", "0001-01-02"]
+
+
+# --- forecast_local Date normalization ---
+
+_FORECAST_LOCAL_CSV = "point_id;point_type_id;Date;dkl010h0\n1;1;202605202100;282\n1;1;202605202200;315\n"
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, mock_items):
+    mock_meta.return_value = {"assets": {}}
+    href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
+    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    mock_session.return_value = session
+
+    df = load("forecast_local")
+    assert "reference_timestamp" in df.columns
+    assert df["reference_timestamp"].dtype == pl.Datetime
+    assert df["reference_timestamp"][0].year == 2026
 
 
 @patch("foehn.api.download_collection")
