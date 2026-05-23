@@ -38,7 +38,20 @@ from foehn.convert import (
     parse_csv_bytes,
     parse_indoor_filename,
 )
+from foehn.grids import open_dataset, to_zarr
 from foehn.stac import get_collection_items, get_collection_metadata
+
+__all__ = [
+    "download",
+    "inventory",
+    "list_datasets",
+    "load",
+    "open_dataset",
+    "parameters",
+    "stations",
+    "to_parquet",
+    "to_zarr",
+]
 
 
 def list_datasets() -> list[dict]:

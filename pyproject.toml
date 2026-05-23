@@ -48,12 +48,22 @@ databricks = [
 mcp = [
     "mcp[cli]>=1.0",
 ]
+grids = [
+    "xarray>=2024.1",
+    "netCDF4>=1.6",
+    "h5netcdf>=1.0",
+    "zarr>=3.0",
+]
 dev = [
     "ruff>=0.9",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pyarrow>=14.0",
     "mcp[cli]>=1.0",
+    "xarray>=2024.1",
+    "netCDF4>=1.6",
+    "h5netcdf>=1.0",
+    "zarr>=3.0",
 ]
 
 [project.scripts]

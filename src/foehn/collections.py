@@ -427,6 +427,17 @@ PREAMBLE_CSV_COLLECTIONS = {
 }
 
 
+# xarray backend engine per source format, used by the gridded read path
+# (foehn.open_dataset). Phase 1 wires NetCDF only; GRIB2 (cfgrib) and ODIM
+# radar HDF5 (xradar) land in later phases alongside to_zarr() materialization
+# into data_dir/zarr/<key>/.
+GRID_ENGINES: dict[str, str] = {
+    "NetCDF": "h5netcdf",
+    "GRIB2": "cfgrib",
+    "HDF5": "xradar",
+}
+
+
 # C6 climate normals — separate ZIP from opendata.swiss (not on STAC API).
 # Contains 112 TXT files (tab-separated, Latin-1 encoding) with monthly/yearly
 # station normals for periods 1961-1990 and 1991-2020. Converted to Parquet.
