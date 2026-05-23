@@ -31,8 +31,9 @@ Station-level time series in CSV, split into time slices (`historical`, `recent`
 | `satellite_derived_grid` | C4 | **Satellite-based spatial analyses** -- gridded radiation, cloud cover, and land surface temperature derived from satellite. | NetCDF (opt-in) |
 | `climate_normals` | C6 | **Station normals** -- 30-year reference averages for 1961--1990 and 1991--2020. Monthly values per station. | TXT -> Parquet |
 | `climate_normals_*` | C7 | **Spatial normals** -- gridded 30-year reference maps for precipitation, sunshine, and temperature (both reference periods). | NetCDF / GeoTIFF (opt-in) |
-| `climate_scenarios` | C8 | **CH2025 local scenarios** -- daily station-level climate projections. | CSV -> Parquet |
+| `climate_scenarios` | C8 | **CH2025 local scenarios** -- daily station-level climate projections, one column per climate model. Dates are a nominal 30-year period (0001--0030 on a 365-day calendar), not real calendar dates. | CSV -> Parquet |
 | `climate_scenarios_grid` | C9 | **CH2025 gridded scenarios** -- spatially gridded climate projections. | NetCDF (opt-in) |
+| `climate_scenarios_indoor` | -- | **CH2025 indoor climate** -- hourly indoor-climate scenario series per station, scenario (RCP), and variant, delivered as a single ZIP of CSVs. | CSV+ZIP -> Parquet |
 
 ---
 

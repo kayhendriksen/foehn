@@ -68,6 +68,22 @@ df = foehn.load("smn", station="BER", frequency="d", sort="desc")
 | `drop_null` | `str` | Drop rows where this column is null |
 | `sort` | `str` | Sort by timestamp: "asc" or "desc" |
 
+### Climate scenario collections
+
+The CH2025 scenario collections have their own layout but load the same way:
+
+```python
+# Indoor climate scenarios (CSV+ZIP): the whole archive is fetched once, then
+# filtered in memory by station.
+df = foehn.load("climate_scenarios_indoor", station="ABO")
+
+# Local climate scenarios (C8): a wide table with one column per climate model.
+# Dates are a nominal 30-year period (0001-01-01 .. 0030-12-31), so the calendar
+# filters (year/month/date_from/date_to) don't apply; `sort` orders by the
+# string `date` column.
+df = foehn.load("climate_scenarios", station="ABE")
+```
+
 ---
 
 ## Metadata
