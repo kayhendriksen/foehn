@@ -239,6 +239,39 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
     return failed
 
 
+_INDOOR_TIME_COLS = ["time.yy", "time.mm", "time.dd", "time.hh"]
+
+
+def parse_indoor_filename(stem: str) -> tuple[str, str, str, str] | None:
+    """Parse an indoor scenario filename into (station, period, scenario, variant).
+
+    Data files are ``{station}_{period}_{scenario}_{variant}`` with a 4-digit
+    year as the period. Returns None for anything else (e.g. the archive's
+    metadata CSV), so callers can skip non-data files.
+    """
+    parts = stem.split("_")
+    if len(parts) < 4 or not parts[1].isdigit():
+        return None
+    return parts[0], parts[1], parts[2], "_".join(parts[3:])
+
+
+def add_indoor_columns(frame, station: str, period: str, scenario: str, variant: str):
+    """Add reference_timestamp + filename-derived columns and drop the raw time
+    columns. Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv)."""
+    return frame.with_columns(
+        pl.datetime(
+            pl.col("time.yy"),
+            pl.col("time.mm"),
+            pl.col("time.dd"),
+            hour=pl.col("time.hh"),
+        ).alias("reference_timestamp"),
+        pl.lit(station).alias("station_abbr"),
+        pl.lit(period).alias("period"),
+        pl.lit(scenario).alias("scenario"),
+        pl.lit(variant).alias("variant"),
+    ).drop(_INDOOR_TIME_COLS)
+
+
 def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert extracted indoor climate scenario CSVs to a single Parquet file.
 
@@ -263,35 +296,21 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
             return 0
 
     print(f"Converting climate_scenarios_indoor to Parquet ({len(csv_files)} files)...", flush=True)
-    time_cols = ["time.yy", "time.mm", "time.dd", "time.hh"]
     frames: list[pl.LazyFrame] = []
     skipped = 0
     for f in csv_files:
-        parts = f.stem.split("_")
-        # Data files are {station}_{period}_{scenario}_{variant} with a 4-digit
-        # year as the period. The archive also ships a metadata CSV that does not
-        # match — skip non-data files rather than treating them as failures.
-        if len(parts) < 4 or not parts[1].isdigit():
+        parsed = parse_indoor_filename(f.stem)
+        if parsed is None:
             skipped += 1
             print(f"  Skipping non-data file: {f.name}", flush=True)
             continue
-        station, period, scenario = parts[0], parts[1], parts[2]
-        variant = "_".join(parts[3:]) if len(parts) > 3 else ""
-        lf = (
-            pl.scan_csv(f, separator=",", infer_schema_length=10_000, truncate_ragged_lines=True)
-            .with_columns(
-                pl.datetime(
-                    pl.col("time.yy"),
-                    pl.col("time.mm"),
-                    pl.col("time.dd"),
-                    hour=pl.col("time.hh"),
-                ).alias("reference_timestamp"),
-                pl.lit(station).alias("station_abbr"),
-                pl.lit(period).alias("period"),
-                pl.lit(scenario).alias("scenario"),
-                pl.lit(variant).alias("variant"),
-            )
-            .drop(time_cols)
+        station, period, scenario, variant = parsed
+        lf = add_indoor_columns(
+            pl.scan_csv(f, separator=",", infer_schema_length=10_000, truncate_ragged_lines=True),
+            station,
+            period,
+            scenario,
+            variant,
         )
         frames.append(lf)
 

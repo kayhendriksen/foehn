@@ -1,5 +1,7 @@
 """Tests for the public Python API."""
 
+import io
+import zipfile
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -65,19 +67,78 @@ def test_download_netcdf_dataset_raises():
         download("surface_derived_grid")
 
 
-def test_download_indoor_csv_zip_raises():
-    with pytest.raises(ValueError, match="zipped multi-CSV"):
-        download("climate_scenarios_indoor")
+_INDOOR_CSV = "time.yy,time.mm,time.dd,time.hh,tre200h0,ure200h0\n2035,1,1,0,0.3,94.5\n2035,1,1,1,-0.2,94.6\n"
 
 
-def test_to_parquet_indoor_csv_zip_raises():
-    with pytest.raises(ValueError, match="zipped multi-CSV"):
-        to_parquet("climate_scenarios_indoor")
+def _make_indoor_zip(data_names):
+    """Build an in-memory indoor .csv.zip with the given data CSVs + a metadata file."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for n in data_names:
+            zf.writestr(n, _INDOOR_CSV)
+        zf.writestr("Klimaszenarien-Raumklima_Metadata.csv", "a,b\n1,2\n")
+    return buf.getvalue()
 
 
-def test_load_indoor_csv_zip_raises():
-    with pytest.raises(ValueError, match="zipped multi-CSV"):
-        load("climate_scenarios_indoor")
+@patch("foehn.api.download_climate_scenarios_indoor")
+def test_download_indoor_routes_to_handler(mock_dl, tmp_path):
+    from foehn.client import DownloadResult
+
+    mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
+    res = download("climate_scenarios_indoor", data_dir=tmp_path)
+    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor")
+    assert res.downloaded == 1
+
+
+@patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")
+def test_to_parquet_indoor_routes_to_converter(mock_conv, tmp_path):
+    mock_conv.return_value = 0
+    to_parquet("climate_scenarios_indoor", data_dir=tmp_path)
+    mock_conv.assert_called_once_with(tmp_path / "bronze", tmp_path / "parquet")
+
+
+@patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")
+def test_to_parquet_indoor_raises_on_failure(mock_conv, tmp_path):
+    mock_conv.return_value = 1
+    with pytest.raises(RuntimeError, match="did not convert"):
+        to_parquet("climate_scenarios_indoor", data_dir=tmp_path)
+
+
+def test_load_indoor_frequency_raises():
+    with pytest.raises(ValueError, match="does not support frequency"):
+        load("climate_scenarios_indoor", frequency="h")
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api._retry_session")
+def test_load_indoor_returns_dataframe(mock_session, mock_items):
+    mock_items.return_value = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+    zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(zip_bytes))
+    mock_session.return_value = session
+
+    df = load("climate_scenarios_indoor")
+    assert isinstance(df, pl.DataFrame)
+    assert {"station_abbr", "period", "scenario", "variant", "reference_timestamp"} <= set(df.columns)
+    assert not any(c.startswith("time.") for c in df.columns)
+    assert set(df["station_abbr"].unique()) == {"ABO", "AIG"}
+    # 2 rows per data file × 2 files; the metadata CSV is skipped
+    assert len(df) == 4
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api._retry_session")
+def test_load_indoor_station_filter(mock_session, mock_items):
+    mock_items.return_value = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+    zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(zip_bytes))
+    mock_session.return_value = session
+
+    df = load("climate_scenarios_indoor", station="ABO")
+    assert set(df["station_abbr"].unique()) == {"ABO"}
+    assert len(df) == 2
 
 
 @patch("foehn.api.download_collection")
