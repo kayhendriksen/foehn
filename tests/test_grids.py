@@ -43,9 +43,11 @@ def test_open_grib2_without_match_raises():
         open_dataset("forecast_icon_ch1")
 
 
-def test_open_radar_dataset_raises():
-    """Radar is HDF5/ODIM — not readable yet (needs xradar)."""
-    with pytest.raises(NotImplementedError, match="radar"):
+def test_open_radar_without_match_raises():
+    """Radar is per-5-min single-file — open_dataset requires a narrowing match."""
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    with pytest.raises(ValueError, match="match="):
         open_dataset("radar_precip")
 
 
@@ -283,6 +285,78 @@ def test_to_zarr_grib2_writes_store(tmp_path):
     assert store.name == "forecast_icon_ch1__t_2m_ctrl.zarr"
     assert store.exists()
     assert "t2m" in xr.open_zarr(store).data_vars
+
+
+_SWISS_PROJ = (
+    "+proj=somerc +lat_0=46.95240555555556 +lon_0=7.439583333333333 +k_0=1 "
+    "+x_0=2600000 +y_0=1200000 +ellps=bessel +towgs84=674.374,15.056,405.346,0,0,0,0 +units=m +no_defs"
+)
+
+
+def _write_odim_composite(path, quantity="ACRR", nodata=float("nan"), undetect=float("inf")):
+    """Write a tiny ODIM-H5 Cartesian COMP composite (offline radar fixture)."""
+    import h5py
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.array([[0.0, 1.5, nodata], [undetect, 2.0, 3.0]], dtype="float64")
+    with h5py.File(path, "w") as f:
+        f.attrs["Conventions"] = "ODIM_H5/V2_4"
+        what = f.create_group("what")
+        what.attrs["object"] = "COMP"
+        what.attrs["date"] = "20260510"
+        what.attrs["time"] = "000000"
+        where = f.create_group("where")
+        where.attrs.update({"xsize": 3, "ysize": 2, "xscale": 1000.0, "yscale": 1000.0, "projdef": _SWISS_PROJ})
+        where.attrs.update({"UL_lon": 2.68942, "UL_lat": 49.3744})
+        d1 = f.create_group("dataset1").create_group("data1")
+        d1.create_dataset("data", data=data)
+        dwhat = d1.create_group("what")
+        dwhat.attrs.update({"gain": 1.0, "offset": 0.0, "nodata": nodata, "undetect": undetect, "quantity": quantity})
+
+
+def test_open_dataset_reads_radar(tmp_path):
+    """End-to-end: read an ODIM COMP composite — scaling, masking, LV95 coords."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    import numpy as np
+
+    base = tmp_path / "bronze" / "radar_precip"
+    _write_odim_composite(base / "cpc2613000000_00060.001.h5")
+
+    ds = open_dataset("radar_precip", data_dir=tmp_path, match="cpc2613000000")
+    assert "acrr" in ds.data_vars
+    assert ds["acrr"].dims == ("y", "x")
+    assert dict(ds.sizes) == {"y": 2, "x": 3}
+
+    a = ds["acrr"].values
+    assert np.isnan(a[0, 2])  # nodata -> NaN
+    assert a[1, 0] == 0.0  # undetect -> 0
+    assert a[0, 1] == 1.5  # scaled value (gain=1, offset=0)
+
+    # Swiss LV95 cell-centre coords, 1 km spacing, north-to-south rows.
+    assert float(ds.x[1] - ds.x[0]) == 1000.0
+    assert float(ds.y[1] - ds.y[0]) == -1000.0
+    assert 2_250_000 < float(ds.x[0]) < 2_300_000
+    assert "time" in ds.coords
+
+
+def test_to_zarr_radar_writes_store(tmp_path):
+    """to_zarr works for radar and encodes the (required) match in the store name."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "radar_precip"
+    _write_odim_composite(base / "cpc2613000000_00060.001.h5")
+
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc2613000000")
+    assert store.name == "radar_precip__cpc2613000000.zarr"
+    assert store.exists()
+    assert "acrr" in xr.open_zarr(store).data_vars
 
 
 @patch("foehn.grids.get_collection_items", return_value=_items_for("grid.rhiresd_ch01h.nc", "grid.ranomm9120_ch01r.nc"))

@@ -436,13 +436,12 @@ def describe_grid(
         raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
     if dataset not in NETCDF_COLLECTIONS:
         fmt = COLLECTION_META[dataset]["format"]
-        if fmt == "GRIB2":
+        if fmt in ("GRIB2", "HDF5"):
+            kind = "GRIB2 forecast" if fmt == "GRIB2" else "HDF5/ODIM radar composite"
             raise ValueError(
-                f"Dataset {dataset!r} is a GRIB2 forecast; describe_grid inspects NetCDF grids only. "
+                f"Dataset {dataset!r} is a {kind}; describe_grid inspects NetCDF grids only. "
                 f"Read it from Python with foehn.open_dataset({dataset!r}, match=...) or `foehn open`."
             )
-        if fmt == "HDF5":
-            raise ValueError(f"Dataset {dataset!r} is HDF5/ODIM radar, which is not readable yet.")
         raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
 
     ds = foehn.open_dataset(dataset, match=match, variables=variables)
@@ -580,10 +579,13 @@ data itself, use the Python API (`foehn.open_dataset` / `foehn.to_zarr`) or the
 
 {grid_list}
 
-## GRIB2/HDF5 datasets (metadata only — not yet readable)
+## GRIB2 / HDF5-radar datasets (read via the Python API / CLI, not MCP)
 
-Forecasts (ICON/KENDA) and radar are GRIB2/HDF5; the gridded read path does not
-handle them yet. Download the raw files with `foehn download <dataset> --grids`.
+Forecasts (ICON/KENDA, GRIB2) and radar composites (CombiPrecip/hail, HDF5) are
+readable with `foehn.open_dataset(dataset, match=...)` or `foehn open` — they
+require a `match` that selects a single file (these collections are thousands of
+files). They are not exposed as an MCP tool. Download raw files with
+`foehn download <dataset> --grids`.
 
 {other_binary_list}
 

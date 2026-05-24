@@ -62,6 +62,13 @@ grib = [
     "cfgrib>=0.9.12",
     "eccodes>=1.7",
 ]
+# HDF5/ODIM radar composites (CombiPrecip, hail). h5py reads the ODIM grid;
+# pyproj turns the swiss-projection metadata into LV95 x/y coordinates.
+radar = [
+    "xarray>=2024.1",
+    "h5py>=3.0",
+    "pyproj>=3.0",
+]
 dev = [
     "ruff>=0.9",
     "pytest>=8.0",
@@ -74,6 +81,8 @@ dev = [
     "zarr>=3.0",
     "cfgrib>=0.9.12",
     "eccodes>=1.7",
+    "h5py>=3.0",
+    "pyproj>=3.0",
 ]
 
 [project.scripts]

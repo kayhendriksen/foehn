@@ -1,10 +1,10 @@
-# Gridded data (NetCDF / GRIB2 → xarray / Zarr)
+# Gridded data (NetCDF / GRIB2 / radar → xarray / Zarr)
 
 Most MeteoSwiss datasets are tabular CSV (station measurements) — see the
 [Python API](python-api.md) for `foehn.load()`. A handful are *gridded*:
-N-dimensional spatial fields stored as NetCDF (climate grids) or GRIB2
-(forecasts). These have no station/row shape, so they are read as
-[xarray](https://docs.xarray.dev) Datasets instead of Polars DataFrames.
+N-dimensional spatial fields stored as NetCDF (climate grids), GRIB2 (forecasts),
+or HDF5/ODIM (radar composites). These have no station/row shape, so they are
+read as [xarray](https://docs.xarray.dev) Datasets instead of Polars DataFrames.
 
 `foehn.open_dataset()` is the gridded analog of `foehn.load()`, and
 `foehn.to_zarr()` is the analog of `foehn.to_parquet()`.
@@ -19,18 +19,20 @@ NetCDF grids need the `grids` extra (xarray, netCDF4, h5netcdf, zarr):
 pip install "foehn[grids]"
 ```
 
-GRIB2 forecasts need the separate `grib` extra (xarray, cfgrib, eccodes):
+GRIB2 forecasts need `grib` (xarray, cfgrib, eccodes); HDF5 radar needs `radar`
+(xarray, h5py, pyproj):
 
 ```bash
-pip install "foehn[grib]"          # forecasts only
-pip install "foehn[grids,grib]"    # both, plus Zarr writing
+pip install "foehn[grib]"             # forecasts
+pip install "foehn[radar]"            # radar composites
+pip install "foehn[grids,grib,radar]" # everything, plus Zarr writing
 ```
 
 `grib` is kept separate because **eccodes** ships a system C library whose
 install can be fragile on some platforms — isolating it means a failed eccodes
 build can't break NetCDF support. Core foehn stays at two dependencies; nothing
 above is imported until you call a grid function. `rechunk=` additionally needs
-`dask` (`pip install dask`), deliberately **not** bundled in either extra.
+`dask` (`pip install dask`), deliberately **not** bundled in any extra.
 
 ---
 
@@ -41,20 +43,19 @@ above is imported until you call a grid function. `rechunk=` additionally needs
 `climate_scenarios_grid`, and the `hail_hazard_*` maps.
 
 **GRIB2** (`grib` extra): the forecasts `forecast_icon_ch1`, `forecast_icon_ch2`,
-and the analysis `analysis_kenda_ch1`. See [Forecasts (GRIB2)](#forecasts-grib2)
-below — they behave differently from the static NetCDF grids.
+and the analysis `analysis_kenda_ch1`. See [Forecasts (GRIB2)](#forecasts-grib2).
 
-List the gridded collections with:
+**HDF5/ODIM radar** (`radar` extra): `radar_precip` (CombiPrecip) and
+`radar_hail`. See [Radar (HDF5/ODIM)](#radar-hdf5odim).
+
+GRIB2 and radar behave differently from the static NetCDF grids (see their
+sections). List the gridded collections with:
 
 ```python
 import foehn
 
-[d["dataset"] for d in foehn.list_datasets() if d["format"] in ("NetCDF", "GRIB2")]
+[d["dataset"] for d in foehn.list_datasets() if d["format"] in ("NetCDF", "GRIB2", "HDF5")]
 ```
-
-HDF5 radar (`radar_precip`, `radar_hail`) is **not** readable yet —
-`open_dataset()` raises `NotImplementedError` (it needs `xradar`). Download the
-raw files with `foehn download <dataset> --grids`.
 
 ---
 
@@ -135,6 +136,34 @@ differently from the static NetCDF grids:
   foehn.to_zarr("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
   # -> data/meteoswiss/zarr/forecast_icon_ch1__202605231500_0_t_2m_ctrl.zarr
   ```
+
+---
+
+## Radar (HDF5/ODIM)
+
+`radar_precip` (CombiPrecip, gauge-adjusted precipitation) and `radar_hail`
+(probability of hail) are ODIM-H5 **Cartesian composites** (`object=COMP`) — a
+single 2-D grid per file on the Swiss projection. They are *not* polar radar
+volumes, so `xradar` doesn't apply; foehn reads them with a small h5py-based
+reader (`radar` extra).
+
+```python
+ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
+ds["acrr"]  # accumulated rainfall (mm), dims (y, x) on Swiss LV95
+```
+
+- **`match` is required and must select a single file**, like GRIB2 — there's one
+  composite per ~5-minute timestep, so a collection is thousands of files. Match
+  a filename prefix (e.g. `cpc<timestamp>` for precip, `bzc<timestamp>` for hail).
+  An over-broad or missing match raises **before downloading**.
+- The reader applies the ODIM `gain`/`offset` scaling, maps `nodata` (outside
+  radar coverage) to `NaN` and `undetect` (nothing detected) to `0`, and derives
+  **Swiss LV95 `x`/`y` coordinates** (metres, EPSG:2056) from the file's
+  projection metadata via `pyproj` — so radar lines up with the NetCDF Swiss
+  grids and `.sel(x=…, y=…, method="nearest")` works. The variable is named by
+  the ODIM quantity (`acrr`, `poh`).
+- Stacking timesteps into a time series is a planned follow-up (the Cartesian
+  grid is regular, so this is tractable — unlike the ICON GRIB2 case).
 
 ---
 

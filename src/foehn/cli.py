@@ -373,24 +373,26 @@ def main():
 
     # --- foehn open ---
     sub_open = subparsers.add_parser(
-        "open", help="Open a gridded dataset (NetCDF, or GRIB2 with --match) and print its xarray summary"
+        "open", help="Open a gridded dataset (NetCDF, or GRIB2/radar with --match) and print its xarray summary"
     )
     sub_open.add_argument("dataset", help="Dataset name (e.g. 'surface_derived_grid', 'forecast_icon_ch1')")
     sub_open.add_argument("--variables", nargs="+", help="Restrict to these data variable(s)")
     sub_open.add_argument(
-        "--match", help="Keep only source files whose name contains this substring (required for GRIB2, selects 1 file)"
+        "--match",
+        help="Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file)",
     )
     _add_common_args(sub_open)
     sub_open.set_defaults(func=cmd_open)
 
     # --- foehn to-zarr ---
     sub_zarr = subparsers.add_parser(
-        "to-zarr", help="Write a gridded dataset (NetCDF, or GRIB2 with --match) to a Zarr store"
+        "to-zarr", help="Write a gridded dataset (NetCDF, or GRIB2/radar with --match) to a Zarr store"
     )
     sub_zarr.add_argument("dataset", help="Dataset name (e.g. 'surface_derived_grid', 'forecast_icon_ch1')")
     sub_zarr.add_argument("--variables", nargs="+", help="Restrict to these data variable(s)")
     sub_zarr.add_argument(
-        "--match", help="Keep only source files whose name contains this substring (required for GRIB2, selects 1 file)"
+        "--match",
+        help="Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file)",
     )
     sub_zarr.add_argument("--out", help="Explicit output path for the .zarr store (overrides the default location)")
     _add_common_args(sub_zarr)

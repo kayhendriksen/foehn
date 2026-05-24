@@ -10,19 +10,21 @@ Routing keys off each collection's ``format`` (see ``_GRID_READERS``):
 
 * NetCDF (climate grids, normals, scenarios) — engine auto-detected, 'grids' extra.
 * GRIB2 (ICON-CH1/CH2 forecasts, KENDA analysis) — cfgrib engine, 'grib' extra.
-  These collections hold thousands of single-field files, so ``open_dataset``
-  requires a ``match`` that resolves to one file (the cap is enforced before
-  downloading). ICON's native unstructured grid comes back as a 1-D ``values``
-  dimension (no lat/lon joined); stacking lead/reference times into a time
-  series (concat-along-step, kerchunk) is a later phase.
+* HDF5/ODIM radar composites (CombiPrecip, hail) — bespoke ODIM reader, 'radar'
+  extra. These are Cartesian ``COMP`` grids (not polar volumes, so not xradar):
+  read via h5py with ODIM gain/offset scaling onto Swiss LV95 x/y coordinates.
+
+GRIB2 and radar collections hold thousands of single-field files, so
+``open_dataset`` requires a ``match`` that resolves to one file (the cap is
+enforced before downloading). ICON GRIB2 comes back as a 1-D ``values`` dimension
+(no lat/lon joined); stacking GRIB2/radar files into a time series
+(concat-along-step, kerchunk) is a later phase.
 
 ``open_dataset()`` downloads the source files to the local bronze cache once and
-reads them lazily from disk; ``to_zarr()`` materialises a collection to a Zarr
-store under ``data_dir/zarr/`` (the tabular ``to_parquet()`` analog).
-
-HDF5 radar (ODIM) is not handled yet — it needs ``xradar`` to map cleanly onto
-xarray, and lands in a later phase. A cloud-lazy GRIB2 path (kerchunk/
-VirtualiZarr, to avoid the full per-run download) is also future work.
+reads them from disk; ``to_zarr()`` materialises a collection to a Zarr store
+under ``data_dir/zarr/`` (the tabular ``to_parquet()`` analog). A cloud-lazy
+GRIB2 path (kerchunk/VirtualiZarr, to avoid the full per-run download) is also
+future work.
 """
 
 from __future__ import annotations
@@ -65,25 +67,49 @@ def _require_cfgrib():
         ) from exc
 
 
+def _require_radar_deps():
+    """Import h5py + pyproj, or raise a helpful error pointing at the 'radar' extra."""
+    try:
+        import h5py  # noqa: F401
+        import pyproj  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "Reading HDF5/ODIM radar composites requires the optional 'radar' dependencies "
+            "(h5py + pyproj). Install them with:\n\n"
+            '  pip install "foehn[radar]"\n'
+        ) from exc
+
+
 # Per-format read configuration, keyed off COLLECTION_META's "format". Routing
-# uses this rather than the GRIB2_COLLECTIONS set, which also lumps in HDF5
-# radar. NetCDF keeps engine=None so xarray auto-detects NetCDF-3 vs -4/HDF5;
-# GRIB2 forces cfgrib and disables its .idx sidecar files (indexpath="").
+# uses this rather than the GRIB2_COLLECTIONS set, which lumps GRIB2 and HDF5
+# together. NetCDF keeps engine=None so xarray auto-detects NetCDF-3 vs -4/HDF5;
+# GRIB2 forces cfgrib and disables its .idx sidecar files (indexpath=""); HDF5
+# radar uses a bespoke ODIM-composite reader (``reader="odim"``) instead of an
+# xarray engine.
 #
 # ``max_files`` caps how many matched files a single open may combine. NetCDF
-# collections combine cleanly via combine_by_coords, so there's no cap. GRIB2 is
-# capped at 1: ICON forecasts are on an unstructured grid (a 1-D ``values`` dim
-# with no dimension coordinate and only scalar step/time coords), which
-# combine_by_coords cannot stack — multi-file consolidation across lead times /
-# reference times (concat-along-step, kerchunk) is a later phase. The cap is
+# collections combine cleanly via combine_by_coords, so there's no cap. GRIB2 and
+# HDF5 are capped at 1: ICON forecasts are on an unstructured grid that
+# combine_by_coords can't stack, and radar is one Cartesian composite per
+# timestep (thousands per collection). Stacking either along time is a later
+# phase. ``match_example`` seeds the "narrow your match" guidance. The cap is
 # enforced *before* downloading so an over-broad match can't pull a whole run.
 _GRID_READERS: dict[str, dict] = {
-    "NetCDF": {"suffixes": (".nc",), "engine": None, "backend_kwargs": None, "max_files": None},
+    "NetCDF": {"suffixes": (".nc",), "engine": None, "backend_kwargs": None, "max_files": None, "match_example": None},
     "GRIB2": {
         "suffixes": (".grib2", ".grib"),
         "engine": "cfgrib",
         "backend_kwargs": {"indexpath": ""},
         "max_files": 1,
+        "match_example": "202605231500-0-t_2m-ctrl",
+    },
+    "HDF5": {
+        "suffixes": (".h5",),
+        "reader": "odim",
+        "engine": None,
+        "backend_kwargs": None,
+        "max_files": 1,
+        "match_example": "cpc2613000000",
     },
 }
 
@@ -257,18 +283,93 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
         return _do(decode_times=False)
 
 
+def _attr(group, key, default=None):
+    """Read an HDF5 attribute, decoding bytes to str."""
+    val = group.attrs.get(key, default)
+    return val.decode() if isinstance(val, bytes) else val
+
+
+def _open_odim_composite(xr, path: Path):
+    """Read a MeteoSwiss ODIM-H5 Cartesian radar composite into an xarray Dataset.
+
+    The OGD radar products (CombiPrecip precipitation, hail) are ODIM ``COMP``
+    images, not polar volumes — a single 2-D grid at ``/dataset1/data1/data`` on
+    the Swiss projection. We apply the ODIM ``gain``/``offset`` scaling, map the
+    ``nodata`` sentinel (outside radar coverage) to NaN and ``undetect`` (nothing
+    detected) to 0, and turn the ``/where`` projection metadata into LV95 x/y
+    coordinates via pyproj so the result lines up with the NetCDF Swiss grids.
+    """
+    import h5py
+    import numpy as np
+    import pyproj
+
+    with h5py.File(path, "r") as f:
+        obj = _attr(f["what"], "object", "")
+        if obj != "COMP":
+            raise ValueError(f"{path.name}: expected an ODIM 'COMP' composite, got object={obj!r}.")
+
+        node = f["dataset1"]["data1"]
+        dwhat = node["what"]
+        gain = float(_attr(dwhat, "gain", 1.0))
+        offset = float(_attr(dwhat, "offset", 0.0))
+        nodata = float(_attr(dwhat, "nodata", np.nan))
+        undetect = float(_attr(dwhat, "undetect", np.nan))
+        quantity = str(_attr(dwhat, "quantity", "data"))
+        raw = node["data"][:].astype("float64")
+
+        where = f["where"]
+        xsize, ysize = int(where.attrs["xsize"]), int(where.attrs["ysize"])
+        xscale, yscale = float(where.attrs["xscale"]), float(where.attrs["yscale"])
+        projdef = _attr(where, "projdef")
+        ul_lon, ul_lat = float(where.attrs["UL_lon"]), float(where.attrs["UL_lat"])
+
+        what = f["what"]
+        date, time = _attr(what, "date", ""), _attr(what, "time", "")
+        long_name = ""
+        if "how" in f and "MeteoSwiss" in f["how"]:
+            long_name = _attr(f["how"]["MeteoSwiss"], "long_name", "")
+
+    # Physical values: scale, then mask the ODIM sentinels (NaN/Inf-safe).
+    values = offset + gain * raw
+    nodata_mask = np.isnan(raw) if np.isnan(nodata) else (raw == nodata)
+    values[nodata_mask] = np.nan
+    if np.isinf(undetect):
+        values[np.isinf(raw)] = 0.0
+    elif not np.isnan(undetect):
+        values[raw == undetect] = 0.0
+
+    # Swiss LV95 cell-centre coordinates. The grid is axis-aligned in the ODIM
+    # projection, so transforming the upper-left corner gives the origin; row 0
+    # is the northernmost row (y decreases with row index).
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", pyproj.CRS.from_proj4(projdef), always_xy=True)
+    x0, y0 = transformer.transform(ul_lon, ul_lat)
+    x = x0 + (np.arange(xsize) + 0.5) * xscale
+    y = y0 - (np.arange(ysize) + 0.5) * yscale
+
+    var_attrs = {"quantity": quantity}
+    if long_name:
+        var_attrs["long_name"] = long_name
+    da = xr.DataArray(values, dims=("y", "x"), coords={"y": y, "x": x}, name=quantity.lower(), attrs=var_attrs)
+    ds = da.to_dataset()
+    ds.coords["x"].attrs.update({"units": "m", "long_name": "Swiss LV95 easting (CHX)"})
+    ds.coords["y"].attrs.update({"units": "m", "long_name": "Swiss LV95 northing (CHY)"})
+    ds.attrs.update({"projdef": projdef, "grid": "swiss_lv95", "odim_object": obj})
+    if date and time:
+        try:
+            ts = np.datetime64(f"{date[:4]}-{date[4:6]}-{date[6:8]}T{time[:2]}:{time[2:4]}:{time[4:6]}")
+            ds = ds.assign_coords(time=ts)
+        except (ValueError, IndexError):
+            pass
+    return ds
+
+
 def _validate_grid_dataset(dataset: str) -> None:
-    """Guard shared by open_dataset/to_zarr. Allows NetCDF + GRIB2; rejects the rest."""
+    """Guard shared by open_dataset/to_zarr. Allows NetCDF/GRIB2/HDF5 grids; rejects tabular."""
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     fmt = COLLECTION_META[dataset]["format"]
     if fmt in _GRID_READERS:
         return
-    if fmt == "HDF5":
-        raise NotImplementedError(
-            f"Dataset {dataset!r} is HDF5/ODIM radar. open_dataset() does not read radar yet "
-            f"(needs xradar). Download the raw files with the CLI: foehn download {dataset} --grids"
-        )
     raise ValueError(f"Dataset {dataset!r} is tabular ({fmt}). Use foehn.load() to get a Polars DataFrame instead.")
 
 
@@ -283,46 +384,53 @@ def open_dataset(
     """Open a gridded dataset as an xarray Dataset.
 
     The grid analog of ``foehn.load()``, for NetCDF collections (climate grids,
-    normals, scenarios) and GRIB2 forecasts (ICON-CH1/CH2, KENDA). This is
-    *download-then-lazy*: the source file(s) are fetched in full to
-    ``data_dir/bronze/<dataset>/`` on first use, then opened and read lazily from
-    that local copy. It is not cloud-lazy — there is no byte-range/partial read
-    of the remote file, so the first call pays the full file size up front.
-    Subsequent calls reuse the cache.
+    normals, scenarios), GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM
+    radar composites (CombiPrecip, hail). This is *download-then-lazy*: the source
+    file(s) are fetched in full to ``data_dir/bronze/<dataset>/`` on first use,
+    then opened and read from that local copy. It is not cloud-lazy — there is no
+    byte-range/partial read of the remote file, so the first call pays the full
+    file size up front. Subsequent calls reuse the cache.
 
-    GRIB2 collections **require** ``match``, and it must resolve to a *single*
-    file. A forecast collection holds thousands of files (one per variable ×
-    ensemble member × lead time × reference time), and ICON's native unstructured
-    (icosahedral) grid — a 1-D ``values`` dimension with no dimension coordinate —
-    can't be stacked by ``combine_by_coords``. So include the reference time and
-    lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``; cfgrib returns that one
-    field with no lat/lon attached (the grid definition ships separately). Stacking
-    lead times / reference times into a time series is a later phase.
+    GRIB2 and radar (HDF5) collections **require** ``match``, and it must resolve
+    to a *single* file:
+
+    * GRIB2 forecast collections hold thousands of files (one per variable ×
+      ensemble member × lead time × reference time), and ICON's native
+      unstructured (icosahedral) grid — a 1-D ``values`` dimension with no
+      dimension coordinate — can't be stacked by ``combine_by_coords``. Include
+      the reference + lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``; cfgrib
+      returns that one field with no lat/lon attached (grid def ships separately).
+    * Radar collections hold one Cartesian composite per timestep (every ~5 min).
+      Match a single file, e.g. ``match="cpc2613000000"``. The composite is read
+      with ODIM gain/offset scaling, ``nodata`` masked to NaN, on Swiss LV95
+      ``x``/``y`` coordinates (matching the NetCDF grids).
+
+    Stacking GRIB2/radar files into a time series is a later phase.
 
     Args:
-        dataset: Dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1").
-            Use list_datasets() to see options. Must be a NetCDF or GRIB2 collection.
+        dataset: Dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",
+            "radar_precip"). Use list_datasets() to see options. Must be a NetCDF,
+            GRIB2, or HDF5/radar collection.
         variables: Restrict to these data variable(s). If None, all are kept.
         match: Keep only source files whose name contains this substring. Narrows
-            a heterogeneous multi-file collection to one coherent set that can be
-            combined — analogous to the station/frequency filters on load().
-            Required for GRIB2 collections.
+            a heterogeneous multi-file collection to one coherent set — analogous
+            to the station/frequency filters on load(). Required for GRIB2 and
+            radar collections, where it must select a single file.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         engine: xarray backend engine. Default None auto-selects per format —
-            xarray auto-detects NetCDF-3 vs NetCDF-4/HDF5, and GRIB2 uses cfgrib.
+            xarray auto-detects NetCDF-3 vs NetCDF-4/HDF5, GRIB2 uses cfgrib, and
+            radar uses a bespoke ODIM-composite reader (ignores ``engine``).
 
     Returns:
-        An xarray Dataset backed by the local file(s). Array values are read
-        lazily from the on-disk copy, but the file itself was already downloaded
-        in full (see the download-then-lazy note above) — e.g. the first
+        An xarray Dataset backed by the local file(s), downloaded in full first
+        (see the download-then-lazy note above) — e.g. the first
         ``climate_scenarios_grid`` call fetches ~900 MB before you read a pixel.
 
     Raises:
-        ValueError: If the dataset is unknown, tabular (CSV), a GRIB2 collection
-            opened without ``match``, or if its files cannot be combined into a
-            single Dataset (narrow it with ``match``).
-        NotImplementedError: If the dataset is HDF5/ODIM radar (needs xradar).
-        ImportError: If the optional 'grids'/'grib' dependencies are not installed.
+        ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
+            collection opened without a single-file ``match``, or if its files
+            cannot be combined into a single Dataset (narrow it with ``match``).
+        ImportError: If the optional 'grids'/'grib'/'radar' deps are not installed.
 
     Example::
 
@@ -334,6 +442,9 @@ def open_dataset(
 
         # GRIB2: a single forecast field — variable + member + reference + lead time
         ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+
+        # Radar: a single CombiPrecip composite (one 5-min timestep)
+        ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
     """
     _validate_grid_dataset(dataset)
     fmt = COLLECTION_META[dataset]["format"]
@@ -342,13 +453,17 @@ def open_dataset(
     xr = _require_xarray()
     if fmt == "GRIB2":
         _require_cfgrib()
-        if match is None:
-            raise ValueError(
-                f"Dataset {dataset!r} is a GRIB2 forecast collection of thousands of single-field "
-                "files; opening it unfiltered would download them all. Narrow to one field with "
-                "match= (variable, member, reference + lead time), e.g. "
-                f'foehn.open_dataset({dataset!r}, match="202605231500-0-t_2m-ctrl").'
-            )
+    elif fmt == "HDF5":
+        _require_radar_deps()
+
+    # Single-file formats (GRIB2, radar) have thousands of files per collection,
+    # so an unfiltered open would download the lot — require a narrowing match.
+    if reader["max_files"] == 1 and match is None:
+        raise ValueError(
+            f"Dataset {dataset!r} is a {fmt} collection of many single-field files; opening it "
+            "unfiltered would download them all. Narrow to one file with match=, e.g. "
+            f'foehn.open_dataset({dataset!r}, match="{reader["match_example"]}").'
+        )
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
@@ -356,18 +471,21 @@ def open_dataset(
         dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=reader["max_files"]
     )
 
-    engine = engine if engine is not None else reader["engine"]
-    try:
-        ds = _open_grid(xr, files, engine, reader["backend_kwargs"])
-    except Exception as exc:
-        if len(files) > 1:
-            raise ValueError(
-                f"Could not combine the {len(files)} {fmt} files for {dataset!r} into one Dataset "
-                f"({type(exc).__name__}: {exc}). This set mixes parameters/levels/resolutions — "
-                "narrow to a coherent set with match=, e.g. "
-                f'foehn.open_dataset({dataset!r}, match="<parameter>").'
-            ) from exc
-        raise
+    if reader.get("reader") == "odim":
+        ds = _open_odim_composite(xr, files[0])
+    else:
+        engine = engine if engine is not None else reader["engine"]
+        try:
+            ds = _open_grid(xr, files, engine, reader["backend_kwargs"])
+        except Exception as exc:
+            if len(files) > 1:
+                raise ValueError(
+                    f"Could not combine the {len(files)} {fmt} files for {dataset!r} into one Dataset "
+                    f"({type(exc).__name__}: {exc}). This set mixes parameters/levels/resolutions — "
+                    "narrow to a coherent set with match=, e.g. "
+                    f'foehn.open_dataset({dataset!r}, match="<parameter>").'
+                ) from exc
+            raise
 
     if variables is not None:
         wanted = [variables] if isinstance(variables, str) else list(variables)
@@ -393,9 +511,10 @@ def to_zarr(
 ) -> Path:
     """Materialise a gridded dataset to a Zarr store on disk.
 
-    The grid analog of ``foehn.to_parquet()``: reads the source NetCDF or GRIB2
-    via ``open_dataset()`` and writes a single Zarr store under ``data_dir/zarr/``.
-    (GRIB2 collections require ``match`` — see ``open_dataset``.)
+    The grid analog of ``foehn.to_parquet()``: reads the source (NetCDF, GRIB2,
+    or HDF5/radar) via ``open_dataset()`` and writes a single Zarr store under
+    ``data_dir/zarr/``. (GRIB2 and radar collections require ``match`` — see
+    ``open_dataset``.)
 
     The default store name encodes ``match`` so that different filtered slices of
     the same collection don't silently overwrite each other:
@@ -404,10 +523,10 @@ def to_zarr(
     path that overrides this.
 
     Args:
-        dataset: Dataset name. Must be a NetCDF or GRIB2 collection.
+        dataset: Dataset name. Must be a NetCDF, GRIB2, or HDF5/radar collection.
         variables: Restrict to these data variable(s) before writing.
         match: Narrow a multi-file collection to a coherent set (see open_dataset);
-            required for GRIB2 collections.
+            required for GRIB2 and radar collections.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         store: Explicit output path for the ``.zarr`` store. Overrides the
             derived ``data_dir/zarr/<name>.zarr`` location when given.
