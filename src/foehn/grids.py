@@ -19,6 +19,7 @@ phases. ``to_zarr()`` (writing a user-visible Zarr store under
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -173,9 +174,13 @@ def open_dataset(
 ) -> xr.Dataset:
     """Open a gridded dataset as an xarray Dataset.
 
-    The grid analog of ``foehn.load()``. NetCDF files are cached under
-    ``data_dir/bronze/<dataset>/`` on first use and opened lazily from disk;
-    subsequent calls reuse the cache.
+    The grid analog of ``foehn.load()``. This is *download-then-lazy*: the
+    NetCDF file(s) are fetched in full to ``data_dir/bronze/<dataset>/`` on
+    first use, then opened and read lazily from that local copy. It is not
+    cloud-lazy — there is no byte-range/partial read of the remote file, so the
+    first call pays the entire file size up front. Subsequent calls reuse the
+    cache. Narrow large multi-file collections with ``match=`` to avoid pulling
+    parameters you don't need.
 
     Args:
         dataset: Dataset name (e.g. "surface_derived_grid"). Use list_datasets()
@@ -191,7 +196,11 @@ def open_dataset(
             netCDF4 (shipped in the 'grids' extra) reads both.
 
     Returns:
-        An xarray Dataset. Reading is lazy — data is pulled from disk on demand.
+        An xarray Dataset backed by the local NetCDF file(s). Array values are
+        read lazily from the on-disk copy, but note the file itself was already
+        downloaded in full (see the download-then-lazy note above) — e.g. the
+        first ``climate_scenarios_grid`` call fetches ~900 MB before you can
+        read a single pixel.
 
     Raises:
         ValueError: If the dataset is unknown, tabular (CSV), or if its files
@@ -254,7 +263,9 @@ def to_zarr(
         match: Narrow a multi-file collection to a coherent set (see open_dataset).
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         rechunk: Optional dim→chunk-size mapping applied before writing, e.g.
-            ``{"time": 24}``. Requires ``dask`` to be installed.
+            ``{"time": 24}``. Requires ``dask`` (not part of the 'grids' extra —
+            install separately with ``pip install dask``); raises ImportError
+            if it is missing.
         mode: Zarr write mode (default "w" — overwrite any existing store).
 
     Returns:
@@ -268,7 +279,25 @@ def to_zarr(
     store.parent.mkdir(parents=True, exist_ok=True)
 
     if rechunk:
+        import importlib.util
+
+        if importlib.util.find_spec("dask") is None:
+            raise ImportError(
+                "to_zarr(rechunk=...) requires dask, which is not part of the "
+                "'grids' extra. Install it with:\n\n  pip install dask\n"
+            )
         ds = ds.chunk(rechunk)
 
-    ds.to_zarr(store, mode=mode)
+    with warnings.catch_warnings():
+        # xarray writes consolidated metadata by default. zarr-python 3 warns
+        # that this is outside the Zarr v3 spec, but we keep it on purpose: it
+        # is purely additive (every per-array zarr.json is still written, so
+        # readers that ignore it still work), it makes the common open_zarr()
+        # path fast and warning-free, and zarr-python reads it back natively.
+        # Suppress only that specific, deliberate warning — nothing else.
+        warnings.filterwarnings(
+            "ignore",
+            message="Consolidated metadata is currently not part in the Zarr format 3 specification",
+        )
+        ds.to_zarr(store, mode=mode)
     return store

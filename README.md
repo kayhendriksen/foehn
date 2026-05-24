@@ -77,6 +77,7 @@ pip install -e .
 ```bash
 pip install "foehn[databricks]"   # PySpark + Delta
 pip install "foehn[mcp]"          # MCP server
+pip install "foehn[grids]"        # xarray + Zarr for gridded NetCDF data
 ```
 
 Requires Python 3.10 or later.
@@ -106,6 +107,17 @@ The CLI mirrors the Python API with subcommands for downloading, converting, loa
 
 ---
 
+## Gridded data
+
+```python
+ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")  # xarray Dataset
+foehn.to_zarr("surface_derived_grid", match="rhiresd")            # Zarr store
+```
+
+The NetCDF climate grids, normals, and scenarios open as xarray Datasets instead of DataFrames. Needs `pip install "foehn[grids]"`. See the [gridded data documentation](docs/grids.md).
+
+---
+
 ## MCP server
 
 ```json
@@ -129,6 +141,7 @@ Give any MCP-compatible LLM live access to MeteoSwiss data. See the [full MCP se
 |---|---|
 | [Collections](docs/collections.md) | All 20+ MeteoSwiss datasets, categories, and time slice conventions |
 | [Python API](docs/python-api.md) | Loading data, metadata, downloading, and Parquet conversion |
+| [Gridded data](docs/grids.md) | NetCDF grids as xarray Datasets and Zarr stores |
 | [CLI](docs/cli.md) | All subcommands, flags, and environment variables |
 | [MCP Server](docs/mcp-server.md) | Setup, configuration, and available tools |
 | [Databricks Pipeline](docs/databricks.md) | Declarative Automation Bundle deployment |

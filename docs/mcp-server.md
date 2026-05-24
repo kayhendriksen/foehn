@@ -43,6 +43,12 @@ Add foehn to your MCP client config:
 | `list_datasets` | Browse all MeteoSwiss datasets with metadata |
 | `load_data` | Fetch weather measurements as rows |
 | `describe_data` | Get summary statistics for a dataset |
+| `describe_grid` | Inspect a gridded NetCDF dataset's dimensions and variables |
 | `get_parameters` | Look up what each column measures |
 | `get_stations` | Find station abbreviations and locations |
 | `get_inventory` | Check data availability per station |
+
+`describe_grid` is the gridded counterpart to `describe_data` for NetCDF
+collections. It caches the source file locally on first use (download-then-lazy)
+and needs the `grids` extra (`pip install "foehn[grids]"`). Writing Zarr stores
+is not exposed over MCP — use the Python API or `foehn to-zarr` CLI for that.

@@ -124,3 +124,20 @@ foehn.to_parquet("smn", data_dir="./data/meteoswiss")
 ```
 
 Parquet files are written to `<data_dir>/parquet/<collection>/`.
+
+---
+
+## Gridded data (NetCDF)
+
+NetCDF collections (climate grids, normals, scenarios) are N-dimensional fields,
+not tables, so they open as xarray Datasets via `foehn.open_dataset()` — the
+grid analog of `load()`. Requires `pip install "foehn[grids]"`.
+
+```python
+ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")
+foehn.to_zarr("surface_derived_grid", match="rhiresd")
+```
+
+This path is *download-then-lazy*: the source NetCDF is fetched in full to the
+local cache before any read. See the [gridded data documentation](grids.md) for
+`open_dataset`, `to_zarr`, `match`, and the Swiss-grid coordinate notes.

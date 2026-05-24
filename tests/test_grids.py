@@ -154,9 +154,48 @@ def test_to_zarr_writes_store(tmp_path):
     assert roundtrip["tas"].shape == (2, 3)
 
 
+def test_to_zarr_does_not_leak_consolidated_warning(tmp_path, recwarn):
+    """to_zarr keeps consolidated metadata but must not surface zarr's out-of-spec warning."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    _write_nc(tmp_path / "bronze" / "surface_derived_grid" / "grid.nc", xr, np)
+
+    to_zarr("surface_derived_grid", data_dir=tmp_path)
+
+    messages = [str(w.message) for w in recwarn.list]
+    assert not any("Consolidated metadata is currently not part" in m for m in messages), messages
+
+
 def test_to_zarr_grib2_raises():
     with pytest.raises(NotImplementedError, match="GRIB2/HDF5"):
         to_zarr("forecast_icon_ch1")
+
+
+def test_to_zarr_rechunk_without_dask_raises(tmp_path):
+    """rechunk= must raise a helpful ImportError when dask is unavailable."""
+    import importlib.util
+
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    _write_nc(tmp_path / "bronze" / "surface_derived_grid" / "grid.nc", xr, np)
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        # Pretend dask is not installed, regardless of the test environment.
+        return None if name == "dask" else real_find_spec(name, *args, **kwargs)
+
+    with (
+        patch("importlib.util.find_spec", side_effect=fake_find_spec),
+        pytest.raises(ImportError, match="requires dask"),
+    ):
+        to_zarr("surface_derived_grid", data_dir=tmp_path, rechunk={"x": 1})
 
 
 def test_sanitize_noncf_time_units_moves_bad_units():

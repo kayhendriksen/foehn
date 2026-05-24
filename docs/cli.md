@@ -90,6 +90,38 @@ foehn load smn --station BER --frequency d --columns tre200d0 rre150d0 --sort de
 
 ---
 
+## `foehn open DATASET`
+
+Open a gridded (NetCDF) dataset and print its xarray summary. Requires
+`pip install "foehn[grids]"`. See the [gridded data documentation](grids.md).
+
+```bash
+foehn open surface_derived_grid --match rhiresd
+foehn open climate_scenarios_grid --match _pr_ --variables pr
+```
+
+| Flag | Description |
+|---|---|
+| `--variables` | Restrict to these data variable(s) |
+| `--match` | Keep only source files whose name contains this substring |
+
+---
+
+## `foehn to-zarr DATASET`
+
+Write a gridded (NetCDF) dataset to a Zarr store under `<data_dir>/zarr/`.
+
+```bash
+foehn to-zarr surface_derived_grid --match rhiresd
+```
+
+| Flag | Description |
+|---|---|
+| `--variables` | Restrict to these data variable(s) |
+| `--match` | Keep only source files whose name contains this substring |
+
+---
+
 ## Environment variables
 
 Settings can also be configured via environment variables. CLI flags always take precedence.
