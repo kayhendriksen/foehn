@@ -287,6 +287,96 @@ def test_to_zarr_grib2_writes_store(tmp_path):
     assert "t2m" in xr.open_zarr(store).data_vars
 
 
+# ── GRIB2 lat/lon join (ICON unstructured grid → constants file) ──────────────
+
+
+def test_ensure_constants_file_uses_cache(tmp_path):
+    """A cached horizontal-constants file is returned without a metadata call."""
+    from foehn.grids import _ensure_constants_file
+
+    out = tmp_path / "bronze" / "forecast_icon_ch1"
+    out.mkdir(parents=True)
+    f = out / "horizontal_constants_icon-ch1-eps.grib2"
+    f.write_bytes(b"x")
+
+    with patch("foehn.grids.get_collection_metadata") as mock_meta:
+        result = _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze")
+        mock_meta.assert_not_called()
+    assert result == f
+
+
+@patch(
+    "foehn.grids.get_collection_metadata",
+    return_value={"assets": {"params.csv": {"href": "https://data.geo.admin.ch/x/params.csv"}}},
+)
+def test_ensure_constants_file_none_when_absent(_mock_meta, tmp_path):
+    """A collection without a horizontal-constants asset yields None (no coords to join)."""
+    from foehn.grids import _ensure_constants_file
+
+    assert _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze") is None
+
+
+@patch(
+    "foehn.grids.get_collection_metadata",
+    return_value={
+        "assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": "https://data.geo.admin.ch/x/hc.grib2"}}
+    },
+)
+def test_ensure_constants_file_downloads_when_missing(_mock_meta, tmp_path):
+    """When absent locally, the constants file is downloaded once and returned."""
+    from foehn.grids import _ensure_constants_file
+
+    def fake_download(_session, _href, filepath):
+        Path(filepath).write_bytes(b"x")
+
+    with (
+        patch("foehn.client._retry_session"),
+        patch("foehn.client._download_binary", side_effect=fake_download) as mock_dl,
+    ):
+        path = _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze")
+    mock_dl.assert_called_once()
+    assert path.name == "hc.grib2"
+    assert path.exists()
+
+
+def test_icon_unstructured_lonlat_reads_and_caches(tmp_path):
+    """tlat/tlon are extracted from the constants GRIB and cached per collection."""
+    pytest.importorskip("xarray")
+    cfgrib = pytest.importorskip("cfgrib")
+    import numpy as np
+    import xarray as xr
+
+    from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
+
+    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+    const = xr.Dataset({"tlat": ("values", np.array([46.0, 47.0])), "tlon": ("values", np.array([7.0, 8.0]))})
+    fake_path = tmp_path / "hc.grib2"
+    fake_path.write_bytes(b"x")
+
+    with (
+        patch("foehn.grids._ensure_constants_file", return_value=fake_path),
+        patch.object(cfgrib, "open_datasets", return_value=[const]) as mock_open,
+    ):
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze")
+        _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze")  # cached → no re-parse
+
+    assert list(lat) == [46.0, 47.0]
+    assert list(lon) == [7.0, 8.0]
+    mock_open.assert_called_once()
+    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+
+
+def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
+    """No constants file → (None, None); the caller leaves the grid un-georeferenced."""
+    from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
+
+    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+    with patch("foehn.grids._ensure_constants_file", return_value=None):
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze")
+    assert lat is None and lon is None
+    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+
+
 _SWISS_PROJ = (
     "+proj=somerc +lat_0=46.95240555555556 +lon_0=7.439583333333333 +k_0=1 "
     "+x_0=2600000 +y_0=1200000 +ellps=bessel +towgs84=674.374,15.056,405.346,0,0,0,0 +units=m +no_defs"

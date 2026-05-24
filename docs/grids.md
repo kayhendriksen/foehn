@@ -117,12 +117,22 @@ differently from the static NetCDF grids:
   `ValueError` **before downloading anything** (and lists example filenames so
   you can narrow it).
 
-- **Native unstructured grid.** ICON runs on an icosahedral grid, so cfgrib
-  returns a 1-D `values` dimension (~1.1M cells) with **no lat/lon attached**
-  (the grid-definition file ships separately and is not joined here). Because
-  that dimension has no coordinate, files **cannot** be stacked across lead
-  times / reference times yet — multi-file consolidation (concat-along-step,
-  kerchunk) is a planned follow-up. For now you read one field at a time.
+- **Native unstructured grid, with lat/lon joined.** ICON runs on an icosahedral
+  grid, so cfgrib returns a 1-D `values` dimension (~1.1M cells). foehn fetches
+  the collection's `horizontal_constants_*.grib2` (a collection-level asset,
+  cached once) and attaches the cell-centre **`lat`/`lon`** as coordinates, so
+  the field is geo-referenced even though it's not a regular grid:
+
+  ```python
+  ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+  ds["t_2m"]          # dims (values,), with ds.lat / ds.lon (degrees) attached
+  ```
+
+  (Best-effort: if the constants file can't be reached, the field still opens,
+  just without `lat`/`lon`, and a warning is emitted.) Because the `values`
+  dimension has no *index* coordinate, files still **cannot** be stacked across
+  lead/reference times yet — that multi-file consolidation (concat-along-step,
+  kerchunk) is a planned follow-up, so for now you read one field at a time.
 
 - Writing to Zarr works the same way (and inherits the single-file `match`
   requirement):

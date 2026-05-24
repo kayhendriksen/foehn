@@ -17,11 +17,13 @@ Routing keys off each collection's ``format`` (see ``_GRID_READERS``):
 All formats install via the single optional 'grids' extra (``pip install
 "foehn[grids]"``). GRIB2 and radar collections hold thousands of single-field
 files, so ``open_dataset`` requires a ``match`` that resolves to one file (the
-cap is enforced before downloading). ICON GRIB2 comes back as a 1-D ``values``
-dimension (no lat/lon joined). Radar timesteps can be assembled into one
-``(time, y, x)`` Zarr cube with ``to_zarr(..., stack="time")``; the analogous
-GRIB2 hypercube (step × member × reference time over the unstructured grid,
-concat-along-step / kerchunk) is a later phase.
+cap is enforced before downloading). ICON GRIB2 comes back on a 1-D ``values``
+dimension; cell ``lat``/``lon`` are joined from the collection's horizontal-
+constants file (best-effort), so the unstructured grid is geo-referenced. Radar
+timesteps can be assembled into one ``(time, y, x)`` Zarr cube with
+``to_zarr(..., stack="time")``; the analogous GRIB2 hypercube (step × member ×
+reference time over the unstructured grid, concat-along-step / kerchunk) is a
+later phase.
 
 ``open_dataset()`` downloads the source files to the local bronze cache once and
 reads them from disk; ``to_zarr()`` materialises a collection to a Zarr store
@@ -39,7 +41,7 @@ from typing import TYPE_CHECKING
 
 from foehn._urls import validate_download_href
 from foehn.collections import COLLECTION_META, COLLECTIONS
-from foehn.stac import get_collection_items
+from foehn.stac import get_collection_items, get_collection_metadata
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -366,6 +368,63 @@ def _open_odim_composite(xr, path: Path):
     return ds
 
 
+# Parsed ICON/KENDA cell lat/lon, keyed by collection — the constants GRIB is
+# ~11 MB and the same grid for every field in a collection, so parse it once.
+_ICON_COORDS_CACHE: dict[str, tuple] = {}
+
+
+def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None:
+    """Locate (or download) a GRIB2 collection's horizontal-constants file.
+
+    Returns the local path, or None if the collection exposes no such asset.
+    The constants file is a collection-level STAC asset (not a per-item one).
+    """
+    out_dir = bronze_dir / collection_key
+    cached = sorted(out_dir.glob("horizontal_constants*.grib2"))
+    if cached:
+        return cached[0]
+
+    meta = get_collection_metadata(COLLECTIONS[collection_key])
+    href = next(
+        (a.get("href", "") for k, a in meta.get("assets", {}).items() if "horizontal_constants" in k.lower()),
+        "",
+    )
+    if not href:
+        return None
+
+    from foehn.client import _download_binary, _retry_session
+
+    validate_download_href(href)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / href.split("?")[0].split("/")[-1]
+    if not path.exists():
+        _download_binary(_retry_session(), href, path)
+    return path
+
+
+def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path):
+    """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
+
+    Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
+    the same ``values`` dimension as the forecast fields). Cached per collection.
+    """
+    if collection_key in _ICON_COORDS_CACHE:
+        return _ICON_COORDS_CACHE[collection_key]
+
+    import cfgrib
+
+    lat = lon = None
+    path = _ensure_constants_file(collection_key, bronze_dir)
+    if path is not None:
+        for ds in cfgrib.open_datasets(path, backend_kwargs={"indexpath": ""}):
+            if "tlat" in ds.variables:
+                lat = ds["tlat"].values
+            if "tlon" in ds.variables:
+                lon = ds["tlon"].values
+    _ICON_COORDS_CACHE[collection_key] = (lat, lon)
+    return lat, lon
+
+
 def _validate_grid_dataset(dataset: str) -> None:
     """Guard shared by open_dataset/to_zarr. Allows NetCDF/GRIB2/HDF5 grids; rejects tabular."""
     if dataset not in COLLECTIONS:
@@ -401,8 +460,9 @@ def open_dataset(
       ensemble member × lead time × reference time), and ICON's native
       unstructured (icosahedral) grid — a 1-D ``values`` dimension with no
       dimension coordinate — can't be stacked by ``combine_by_coords``. Include
-      the reference + lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``; cfgrib
-      returns that one field with no lat/lon attached (grid def ships separately).
+      the reference + lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``. The
+      one field comes back on the ``values`` grid with cell ``lat``/``lon``
+      coordinates joined from the collection's horizontal-constants file.
     * Radar collections hold one Cartesian composite per timestep (every ~5 min).
       Match a single file, e.g. ``match="cpc2613000000"``. The composite is read
       with ODIM gain/offset scaling, ``nodata`` masked to NaN, on Swiss LV95
@@ -489,6 +549,25 @@ def open_dataset(
                     f'foehn.open_dataset({dataset!r}, match="<parameter>").'
                 ) from exc
             raise
+
+        # ICON/KENDA are on an unstructured grid (1-D ``values``, no lat/lon in
+        # the GRIB). Attach cell lat/lon from the collection's constants file so
+        # the data is geo-referenced. Best-effort: warn and continue if it's
+        # unavailable (e.g. offline) rather than failing an otherwise-good read.
+        if fmt == "GRIB2" and "values" in ds.dims and "lat" not in ds.coords:
+            try:
+                lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir)
+                if lat is not None and lon is not None and lat.size == ds.sizes["values"]:
+                    ds = ds.assign_coords(
+                        lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
+                        lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
+                    )
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); "
+                    "returning the unstructured grid without coordinates.",
+                    stacklevel=2,
+                )
 
     if variables is not None:
         wanted = [variables] if isinstance(variables, str) else list(variables)
