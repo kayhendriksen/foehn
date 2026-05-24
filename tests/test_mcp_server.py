@@ -518,11 +518,12 @@ class TestDescribeGrid:
             describe_grid("smn")
 
     def test_grib2_dataset_raises(self):
-        with pytest.raises(ValueError, match="GRIB2/HDF5"):
+        """GRIB2 is readable via open_dataset, but describe_grid stays NetCDF-only."""
+        with pytest.raises(ValueError, match="NetCDF grids only"):
             describe_grid("forecast_icon_ch1")
 
     def test_radar_dataset_raises(self):
-        with pytest.raises(ValueError, match="GRIB2/HDF5"):
+        with pytest.raises(ValueError, match="radar"):
             describe_grid("radar_precip")
 
     def test_summary_from_dataset(self):

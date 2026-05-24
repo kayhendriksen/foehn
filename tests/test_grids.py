@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import foehn
-from foehn.grids import _ensure_netcdf_files, open_dataset, to_zarr
+from foehn.grids import _ensure_grid_files, open_dataset, to_zarr
 
 
 def _items_for(*filenames):
@@ -37,14 +37,15 @@ def test_open_csv_dataset_raises():
         open_dataset("smn")
 
 
-def test_open_grib2_dataset_raises():
-    with pytest.raises(NotImplementedError, match="GRIB2/HDF5"):
+def test_open_grib2_without_match_raises():
+    """GRIB2 collections are huge multi-file sets — open_dataset requires match=."""
+    with pytest.raises(ValueError, match="match="):
         open_dataset("forecast_icon_ch1")
 
 
 def test_open_radar_dataset_raises():
-    """Radar is HDF5/ODIM — not handled in the NetCDF-only phase."""
-    with pytest.raises(NotImplementedError, match="GRIB2/HDF5"):
+    """Radar is HDF5/ODIM — not readable yet (needs xradar)."""
+    with pytest.raises(NotImplementedError, match="radar"):
         open_dataset("radar_precip")
 
 
@@ -55,8 +56,8 @@ def test_ensure_netcdf_files_raises_when_no_nc_assets(mock_items, tmp_path):
         {"assets": {"a": {"href": "https://data.geo.admin.ch/x/grid.tif"}}},
         {"assets": {"b": {"href": "https://data.geo.admin.ch/x/bundle.zip"}}},
     ]
-    with pytest.raises(ValueError, match="No NetCDF"):
-        _ensure_netcdf_files("hail_hazard_10y", tmp_path / "bronze")
+    with pytest.raises(ValueError, match=r"No \.nc assets"):
+        _ensure_grid_files("hail_hazard_10y", tmp_path / "bronze")
 
 
 def test_ensure_netcdf_files_match_filters_local_cache(tmp_path):
@@ -69,7 +70,7 @@ def test_ensure_netcdf_files_match_filters_local_cache(tmp_path):
     drop.write_bytes(b"x")
 
     with patch("foehn.grids.get_collection_items") as mock_items:
-        result = _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
         mock_items.assert_not_called()
     assert result == [keep]
 
@@ -80,7 +81,7 @@ def test_ensure_netcdf_files_match_no_remote_match_raises(mock_items, tmp_path):
         {"assets": {"a": {"href": "https://data.geo.admin.ch/x/ranomm9120.nc"}}},
     ]
     with pytest.raises(ValueError, match="matching 'rhiresd'"):
-        _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+        _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
 
 
 def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tmp_path):
@@ -103,7 +104,7 @@ def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tm
         patch("foehn.client._retry_session"),
         patch("foehn.client._download_binary", side_effect=fake_download) as mock_dl,
     ):
-        result = _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze")
+        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze")
 
     mock_items.assert_called_once()
     assert mock_dl.call_count == 1  # only the missing file is fetched; cache reused
@@ -122,7 +123,7 @@ def test_ensure_netcdf_files_offline_falls_back_to_cache(tmp_path):
         patch("foehn.grids.get_collection_items", side_effect=requests.exceptions.ConnectionError("offline")),
         pytest.warns(UserWarning, match="may be an incomplete subset"),
     ):
-        result = _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze")
+        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze")
     assert [p.name for p in result] == ["a.nc"]
 
 
@@ -134,7 +135,7 @@ def test_ensure_netcdf_files_offline_no_cache_reraises(tmp_path):
         patch("foehn.grids.get_collection_items", side_effect=requests.exceptions.ConnectionError("offline")),
         pytest.raises(requests.exceptions.ConnectionError),
     ):
-        _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze")
+        _ensure_grid_files("surface_derived_grid", tmp_path / "bronze")
 
 
 @patch("foehn.grids.get_collection_items", return_value=_items_for("grid.nc"))
@@ -173,6 +174,76 @@ def _write_nc(path, xr, np, var="tas"):
     ds.to_netcdf(path, engine="h5netcdf")
 
 
+def _write_grib2(path, shortname="2t"):
+    """Write a tiny 2x3 regular lat/lon GRIB2 message via eccodes (offline fixture)."""
+    import eccodes
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gid = eccodes.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    eccodes.codes_set(gid, "Ni", 3)
+    eccodes.codes_set(gid, "Nj", 2)
+    eccodes.codes_set(gid, "latitudeOfFirstGridPointInDegrees", 47.0)
+    eccodes.codes_set(gid, "longitudeOfFirstGridPointInDegrees", 7.0)
+    eccodes.codes_set(gid, "latitudeOfLastGridPointInDegrees", 46.0)
+    eccodes.codes_set(gid, "longitudeOfLastGridPointInDegrees", 9.0)
+    eccodes.codes_set(gid, "iDirectionIncrementInDegrees", 1.0)
+    eccodes.codes_set(gid, "jDirectionIncrementInDegrees", 1.0)
+    eccodes.codes_set(gid, "shortName", shortname)
+    eccodes.codes_set_values(gid, np.arange(6, dtype=float))
+    with open(path, "wb") as f:
+        eccodes.codes_write(gid, f)
+    eccodes.codes_release(gid)
+
+
+def test_open_dataset_reads_grib2(tmp_path):
+    """End-to-end: read a real GRIB2 file from the cache via cfgrib (match required)."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    _write_grib2(base / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2")
+
+    # match hits the cached file directly — no network, no .idx sidecar.
+    ds = open_dataset("forecast_icon_ch1", data_dir=tmp_path, match="202605231500-0-t_2m-ctrl")
+    assert "t2m" in ds.data_vars
+    assert ds["t2m"].shape == (2, 3)
+    assert not list(base.glob("*.idx"))
+
+
+def test_open_grib2_overbroad_match_refused_before_download(tmp_path):
+    """A GRIB2 match resolving to >1 file is refused up front, with no download."""
+    items = [
+        {"assets": {"a": {"href": "https://data.geo.admin.ch/x/icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"}}},
+        {"assets": {"b": {"href": "https://data.geo.admin.ch/x/icon-ch1-eps-202605231500-1-t_2m-ctrl.grib2"}}},
+    ]
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items),
+        patch("foehn.client._download_binary") as mock_dl,
+        pytest.raises(ValueError, match="one file at a time"),
+    ):
+        open_dataset("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl")
+    mock_dl.assert_not_called()
+
+
+def test_to_zarr_grib2_writes_store(tmp_path):
+    """to_zarr works for GRIB2 and encodes the (required) match in the store name."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    _write_grib2(base / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2")
+
+    store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl")
+    assert store.name == "forecast_icon_ch1__t_2m_ctrl.zarr"
+    assert store.exists()
+    assert "t2m" in xr.open_zarr(store).data_vars
+
+
 def test_open_dataset_match_selects_subset(tmp_path):
     """match should restrict a multi-file collection to the matching files."""
     xr = pytest.importorskip("xarray")
@@ -194,14 +265,14 @@ def test_open_netcdf_combines_multiple_files_without_dask(tmp_path):
     pytest.importorskip("h5netcdf")
     import numpy as np
 
-    from foehn.grids import _open_netcdf
+    from foehn.grids import _open_grid
 
     a = tmp_path / "a.nc"
     b = tmp_path / "b.nc"
     xr.Dataset({"t": (("x",), np.array([1.0, 2.0], "float32"))}, coords={"x": [0, 1]}).to_netcdf(a, engine="h5netcdf")
     xr.Dataset({"t": (("x",), np.array([3.0, 4.0], "float32"))}, coords={"x": [2, 3]}).to_netcdf(b, engine="h5netcdf")
 
-    ds = _open_netcdf(xr, [a, b], engine=None)
+    ds = _open_grid(xr, [a, b], engine=None)
     assert ds["t"].shape == (4,)
     assert list(ds["x"].values) == [0, 1, 2, 3]
 
@@ -212,7 +283,7 @@ def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
     pytest.importorskip("h5netcdf")
     import numpy as np
 
-    from foehn.grids import _open_netcdf
+    from foehn.grids import _open_grid
 
     a = tmp_path / "a.nc"
     b = tmp_path / "b.nc"
@@ -227,7 +298,7 @@ def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
         attrs={"title": "rhiresd", "history": "made tuesday", "source": "B"},
     ).to_netcdf(b, engine="h5netcdf")
 
-    ds = _open_netcdf(xr, [a, b], engine=None)
+    ds = _open_grid(xr, [a, b], engine=None)
     assert ds["t"].shape == (4,)
     # Shared attrs survive; conflicting ones are dropped rather than raising.
     assert ds.attrs.get("title") == "rhiresd"
@@ -308,8 +379,9 @@ def test_to_zarr_does_not_leak_consolidated_warning(_mock_items, tmp_path, recwa
     assert not any("Consolidated metadata is currently not part" in m for m in messages), messages
 
 
-def test_to_zarr_grib2_raises():
-    with pytest.raises(NotImplementedError, match="GRIB2/HDF5"):
+def test_to_zarr_grib2_without_match_raises():
+    """to_zarr inherits open_dataset's GRIB2 match= requirement."""
+    with pytest.raises(ValueError, match="match="):
         to_zarr("forecast_icon_ch1")
 
 

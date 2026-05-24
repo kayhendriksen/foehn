@@ -92,30 +92,35 @@ foehn load smn --station BER --frequency d --columns tre200d0 rre150d0 --sort de
 
 ## `foehn open DATASET`
 
-Open a gridded (NetCDF) dataset and print its xarray summary. Requires
-`pip install "foehn[grids]"`. See the [gridded data documentation](grids.md).
+Open a gridded dataset and print its xarray summary. NetCDF grids need
+`pip install "foehn[grids]"`; GRIB2 forecasts need `pip install "foehn[grib]"`
+**and** a `--match` filter (a forecast collection is thousands of files). See the
+[gridded data documentation](grids.md).
 
 ```bash
 foehn open surface_derived_grid --match rhiresd
 foehn open climate_scenarios_grid --match _pr_ --variables pr
+foehn open forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl   # one GRIB2 field (match must select 1 file)
 ```
 
 | Flag | Description |
 |---|---|
 | `--variables` | Restrict to these data variable(s) |
-| `--match` | Keep only source files whose name contains this substring |
+| `--match` | Keep only source files whose name contains this substring (required for GRIB2) |
 
 ---
 
 ## `foehn to-zarr DATASET`
 
-Write a gridded (NetCDF) dataset to a Zarr store under `<data_dir>/zarr/`. The
-default name encodes `--match` (`<dataset>__<match>.zarr`), so different slices
-don't overwrite each other; use `--out` for an explicit path.
+Write a gridded (NetCDF or GRIB2) dataset to a Zarr store under `<data_dir>/zarr/`.
+The default name encodes `--match` (`<dataset>__<match>.zarr`), so different
+slices don't overwrite each other; use `--out` for an explicit path. (GRIB2
+collections require `--match`, like `foehn open`.)
 
 ```bash
 foehn to-zarr surface_derived_grid --match rhiresd
 foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
+foehn to-zarr forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl
 ```
 
 | Flag | Description |

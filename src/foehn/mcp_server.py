@@ -412,8 +412,11 @@ def describe_grid(
 
     Only NetCDF grid collections are supported (e.g. surface_derived_grid,
     satellite_derived_grid, the climate_normals_* grids, climate_scenarios_grid,
-    hail_hazard_*). GRIB2 forecasts (ICON/KENDA) and HDF5 radar are not handled
-    yet. CSV datasets should use describe_data()/load_data() instead.
+    hail_hazard_*). GRIB2 forecasts (ICON/KENDA) are readable from Python via
+    foehn.open_dataset(dataset, match=...) or the `foehn open` CLI, but are not
+    exposed here (they need a required match= filter and produce huge per-run
+    downloads). HDF5 radar is not handled yet. CSV datasets should use
+    describe_data()/load_data() instead.
 
     **Cost warning:** foehn is download-then-lazy — the first call downloads the
     *entire* NetCDF to the local cache (hundreds of MB for some collections,
@@ -432,12 +435,14 @@ def describe_grid(
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
     if dataset not in NETCDF_COLLECTIONS:
-        if dataset in GRIB2_COLLECTIONS:
-            fmt = COLLECTION_META[dataset]["format"]
+        fmt = COLLECTION_META[dataset]["format"]
+        if fmt == "GRIB2":
             raise ValueError(
-                f"Dataset {dataset!r} is {fmt} (GRIB2/HDF5 grid) and cannot be inspected yet — "
-                "the gridded read path supports NetCDF only."
+                f"Dataset {dataset!r} is a GRIB2 forecast; describe_grid inspects NetCDF grids only. "
+                f"Read it from Python with foehn.open_dataset({dataset!r}, match=...) or `foehn open`."
             )
+        if fmt == "HDF5":
+            raise ValueError(f"Dataset {dataset!r} is HDF5/ODIM radar, which is not readable yet.")
         raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
 
     ds = foehn.open_dataset(dataset, match=match, variables=variables)

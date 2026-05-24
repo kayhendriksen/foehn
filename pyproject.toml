@@ -54,6 +54,14 @@ grids = [
     "h5netcdf>=1.0",
     "zarr>=3.0",
 ]
+# GRIB2 forecasts (ICON-CH1/CH2, KENDA). Kept separate from 'grids' because
+# eccodes ships a system C library whose install can be fragile on some
+# platforms — isolating it means a failed eccodes build can't break NetCDF use.
+grib = [
+    "xarray>=2024.1",
+    "cfgrib>=0.9.12",
+    "eccodes>=1.7",
+]
 dev = [
     "ruff>=0.9",
     "pytest>=8.0",
@@ -64,6 +72,8 @@ dev = [
     "netCDF4>=1.6",
     "h5netcdf>=1.0",
     "zarr>=3.0",
+    "cfgrib>=0.9.12",
+    "eccodes>=1.7",
 ]
 
 [project.scripts]
