@@ -206,6 +206,35 @@ def test_open_netcdf_combines_multiple_files_without_dask(tmp_path):
     assert list(ds["x"].values) == [0, 1, 2, 3]
 
 
+def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
+    """Differing global attrs (history/source) must not block an otherwise-clean combine."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    from foehn.grids import _open_netcdf
+
+    a = tmp_path / "a.nc"
+    b = tmp_path / "b.nc"
+    xr.Dataset(
+        {"t": (("x",), np.array([1.0, 2.0], "float32"))},
+        coords={"x": [0, 1]},
+        attrs={"title": "rhiresd", "history": "made monday", "source": "A"},
+    ).to_netcdf(a, engine="h5netcdf")
+    xr.Dataset(
+        {"t": (("x",), np.array([3.0, 4.0], "float32"))},
+        coords={"x": [2, 3]},
+        attrs={"title": "rhiresd", "history": "made tuesday", "source": "B"},
+    ).to_netcdf(b, engine="h5netcdf")
+
+    ds = _open_netcdf(xr, [a, b], engine=None)
+    assert ds["t"].shape == (4,)
+    # Shared attrs survive; conflicting ones are dropped rather than raising.
+    assert ds.attrs.get("title") == "rhiresd"
+    assert "history" not in ds.attrs
+    assert "source" not in ds.attrs
+
+
 @patch("foehn.grids.get_collection_items", return_value=_items_for("grid.nc"))
 def test_to_zarr_writes_store(_mock_items, tmp_path):
     """to_zarr should write a readable Zarr store under data_dir/zarr/."""

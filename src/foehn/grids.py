@@ -162,6 +162,12 @@ def _open_netcdf(xr, files: list[Path], engine: str | None):
     is not part of the 'grids' extra. Per-file opens keep the netCDF backend's
     own lazy reads, so combining stays dask-free.
 
+    ``combine_attrs="drop_conflicts"`` keeps global attributes shared by every
+    file (title, institution, …) but drops those that legitimately differ
+    between files (history, source, creation date). The default ("no_conflicts")
+    raises a MergeError on any such difference, even when the arrays combine
+    cleanly — which is common across a real multi-file MeteoSwiss set.
+
     Retries with ``decode_times=False`` when the source uses non-CF time units
     that xarray/cftime cannot decode — MeteoSwiss climate normals, for example,
     label their time axis "years since 1991-01-01", which is not CF-compliant.
@@ -171,7 +177,7 @@ def _open_netcdf(xr, files: list[Path], engine: str | None):
         if len(files) == 1:
             return xr.open_dataset(files[0], engine=engine, decode_times=decode_times)
         datasets = [xr.open_dataset(f, engine=engine, decode_times=decode_times) for f in files]
-        return xr.combine_by_coords(datasets)
+        return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
 
     try:
         return _do(decode_times=True)

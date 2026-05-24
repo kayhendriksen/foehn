@@ -1,8 +1,10 @@
 """MCP server for foehn — exposes MeteoSwiss data to LLM clients.
 
-Provides read-only access to Swiss meteorological open data through five
-tools, a reference guide resource, and a prompt template. All data is
-fetched live from the MeteoSwiss STAC API; no local state is modified.
+Provides mostly read-only access to Swiss meteorological open data through a set
+of query tools, a reference guide resource, and a prompt template. The tabular
+tools fetch live from the MeteoSwiss STAC API without touching local state; the
+one exception is ``describe_grid``, which downloads the source NetCDF into the
+local bronze cache (and is annotated ``readOnlyHint=False`` accordingly).
 """
 
 from __future__ import annotations
