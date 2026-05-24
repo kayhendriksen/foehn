@@ -1,11 +1,21 @@
 """Tests for the gridded read path (foehn.open_dataset)."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 import foehn
 from foehn.grids import _ensure_netcdf_files, open_dataset, to_zarr
+
+
+def _items_for(*filenames):
+    """STAC items whose .nc asset hrefs map to the given (already cached) filenames.
+
+    Used to mock get_collection_items so an unfiltered open finds everything it
+    expects already on disk and performs no download.
+    """
+    return [{"assets": {"d": {"href": f"https://data.geo.admin.ch/x/{name}"}}} for name in filenames]
 
 
 def test_open_dataset_is_exported():
@@ -73,20 +83,62 @@ def test_ensure_netcdf_files_match_no_remote_match_raises(mock_items, tmp_path):
         _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
 
 
-def test_ensure_netcdf_files_uses_local_cache(tmp_path):
-    """Existing local .nc files should be returned without any network call."""
-    out_dir = tmp_path / "bronze" / "surface_derived_grid"
-    out_dir.mkdir(parents=True)
-    f = out_dir / "data.nc"
-    f.write_bytes(b"not really netcdf")
+def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tmp_path):
+    """An unfiltered call must enumerate remote and fetch files missing from a partial cache."""
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+    cached = base / "ogd.rhiresd.nc"
+    cached.write_bytes(b"x")  # simulate a prior filtered (match="rhiresd") download
 
-    with patch("foehn.grids.get_collection_items") as mock_items:
+    items = [
+        {"assets": {"a": {"href": "https://data.geo.admin.ch/x/ogd.rhiresd.nc"}}},
+        {"assets": {"b": {"href": "https://data.geo.admin.ch/x/ogd.tabsd.nc"}}},
+    ]
+
+    def fake_download(_session, _href, filepath):
+        Path(filepath).write_bytes(b"y")
+
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items) as mock_items,
+        patch("foehn.client._retry_session"),
+        patch("foehn.client._download_binary", side_effect=fake_download) as mock_dl,
+    ):
         result = _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze")
-        mock_items.assert_not_called()
-    assert result == [f]
+
+    mock_items.assert_called_once()
+    assert mock_dl.call_count == 1  # only the missing file is fetched; cache reused
+    assert {p.name for p in result} == {"ogd.rhiresd.nc", "ogd.tabsd.nc"}
 
 
-def test_open_dataset_reads_local_netcdf(tmp_path):
+def test_ensure_netcdf_files_offline_falls_back_to_cache(tmp_path):
+    """If the STAC API is unreachable, fall back to the cached files with a warning."""
+    import requests
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+    (base / "a.nc").write_bytes(b"x")
+
+    with (
+        patch("foehn.grids.get_collection_items", side_effect=requests.exceptions.ConnectionError("offline")),
+        pytest.warns(UserWarning, match="may be an incomplete subset"),
+    ):
+        result = _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze")
+    assert [p.name for p in result] == ["a.nc"]
+
+
+def test_ensure_netcdf_files_offline_no_cache_reraises(tmp_path):
+    """Offline with an empty cache must surface the network error, not swallow it."""
+    import requests
+
+    with (
+        patch("foehn.grids.get_collection_items", side_effect=requests.exceptions.ConnectionError("offline")),
+        pytest.raises(requests.exceptions.ConnectionError),
+    ):
+        _ensure_netcdf_files("surface_derived_grid", tmp_path / "bronze")
+
+
+@patch("foehn.grids.get_collection_items", return_value=_items_for("grid.nc"))
+def test_open_dataset_reads_local_netcdf(_mock_items, tmp_path):
     """End-to-end: open a real NetCDF from the local cache and select a variable."""
     xr = pytest.importorskip("xarray")
     pytest.importorskip("h5netcdf")
@@ -136,7 +188,26 @@ def test_open_dataset_match_selects_subset(tmp_path):
     assert "anom" not in ds.data_vars
 
 
-def test_to_zarr_writes_store(tmp_path):
+def test_open_netcdf_combines_multiple_files_without_dask(tmp_path):
+    """Multiple files combine via combine_by_coords — no dask chunk manager required."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    from foehn.grids import _open_netcdf
+
+    a = tmp_path / "a.nc"
+    b = tmp_path / "b.nc"
+    xr.Dataset({"t": (("x",), np.array([1.0, 2.0], "float32"))}, coords={"x": [0, 1]}).to_netcdf(a, engine="h5netcdf")
+    xr.Dataset({"t": (("x",), np.array([3.0, 4.0], "float32"))}, coords={"x": [2, 3]}).to_netcdf(b, engine="h5netcdf")
+
+    ds = _open_netcdf(xr, [a, b], engine=None)
+    assert ds["t"].shape == (4,)
+    assert list(ds["x"].values) == [0, 1, 2, 3]
+
+
+@patch("foehn.grids.get_collection_items", return_value=_items_for("grid.nc"))
+def test_to_zarr_writes_store(_mock_items, tmp_path):
     """to_zarr should write a readable Zarr store under data_dir/zarr/."""
     xr = pytest.importorskip("xarray")
     pytest.importorskip("h5netcdf")
@@ -154,7 +225,46 @@ def test_to_zarr_writes_store(tmp_path):
     assert roundtrip["tas"].shape == (2, 3)
 
 
-def test_to_zarr_does_not_leak_consolidated_warning(tmp_path, recwarn):
+def test_to_zarr_match_yields_distinct_stores(tmp_path):
+    """Different match= filters must write to distinct stores, not clobber each other."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    _write_nc(base / "g.rhiresd.nc", xr, np, var="rain")
+    _write_nc(base / "g.tabsd.nc", xr, np, var="temp")
+
+    s1 = to_zarr("surface_derived_grid", data_dir=tmp_path, match="rhiresd")
+    s2 = to_zarr("surface_derived_grid", data_dir=tmp_path, match="tabsd")
+
+    assert s1.name == "surface_derived_grid__rhiresd.zarr"
+    assert s2.name == "surface_derived_grid__tabsd.zarr"
+    assert s1 != s2
+    assert s1.exists() and s2.exists()
+    assert "rain" in xr.open_zarr(s1).data_vars
+    assert "temp" in xr.open_zarr(s2).data_vars
+
+
+@patch("foehn.grids.get_collection_items", return_value=_items_for("g.nc"))
+def test_to_zarr_explicit_store_path(_mock_items, tmp_path):
+    """An explicit store= path overrides the derived data_dir/zarr/<name>.zarr location."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    _write_nc(tmp_path / "bronze" / "surface_derived_grid" / "g.nc", xr, np)
+
+    out = tmp_path / "custom" / "mine.zarr"
+    store = to_zarr("surface_derived_grid", data_dir=tmp_path, store=out)
+    assert store == out
+    assert store.exists()
+
+
+@patch("foehn.grids.get_collection_items", return_value=_items_for("grid.nc"))
+def test_to_zarr_does_not_leak_consolidated_warning(_mock_items, tmp_path, recwarn):
     """to_zarr keeps consolidated metadata but must not surface zarr's out-of-spec warning."""
     xr = pytest.importorskip("xarray")
     pytest.importorskip("h5netcdf")
@@ -192,6 +302,7 @@ def test_to_zarr_rechunk_without_dask_raises(tmp_path):
         return None if name == "dask" else real_find_spec(name, *args, **kwargs)
 
     with (
+        patch("foehn.grids.get_collection_items", return_value=_items_for("grid.nc")),
         patch("importlib.util.find_spec", side_effect=fake_find_spec),
         pytest.raises(ImportError, match="requires dask"),
     ):
@@ -231,7 +342,8 @@ def test_sanitize_keeps_valid_cf_time_units():
     assert "units_noncf" not in out["time"].attrs
 
 
-def test_to_zarr_with_noncf_time_reopens_cleanly(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("normals_yearly.nc"))
+def test_to_zarr_with_noncf_time_reopens_cleanly(_mock_items, tmp_path):
     """End-to-end: a NetCDF with non-CF time units must produce a re-openable store."""
     xr = pytest.importorskip("xarray")
     pytest.importorskip("zarr")

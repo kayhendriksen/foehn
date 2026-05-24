@@ -268,6 +268,7 @@ def cmd_to_zarr(args: argparse.Namespace) -> None:
         variables=args.variables,
         match=args.match,
         data_dir=_resolve_data_dir(args.data_dir),
+        store=args.out,
     )
     print(f"Zarr store written to: {store}")
 
@@ -383,6 +384,7 @@ def main():
     sub_zarr.add_argument("dataset", help="Dataset name (e.g. 'surface_derived_grid')")
     sub_zarr.add_argument("--variables", nargs="+", help="Restrict to these data variable(s)")
     sub_zarr.add_argument("--match", help="Keep only source files whose name contains this substring")
+    sub_zarr.add_argument("--out", help="Explicit output path for the .zarr store (overrides the default location)")
     _add_common_args(sub_zarr)
     sub_zarr.set_defaults(func=cmd_to_zarr)
 

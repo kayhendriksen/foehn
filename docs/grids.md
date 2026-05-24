@@ -29,8 +29,8 @@ is deliberately **not** bundled in the extra.
 
 NetCDF collections (readable today): the spatial climate analyses
 (`surface_derived_grid`, `satellite_derived_grid`), the `climate_normals_*`
-reference grids, `climate_scenarios_grid`, the `hail_hazard_*` maps, and
-`climate_scenarios_indoor`. Find them with:
+reference grids, `climate_scenarios_grid`, and the `hail_hazard_*` maps. Find
+them with:
 
 ```python
 import foehn
@@ -91,11 +91,22 @@ ds["TabsD"].sel(x=2_600_000, y=1_200_000, method="nearest")  # nearest grid cell
 ## Writing to Zarr
 
 `foehn.to_zarr()` materialises a dataset to a Zarr store under
-`<data_dir>/zarr/<dataset>.zarr`:
+`<data_dir>/zarr/`. The default name encodes `match`, so different filtered
+slices of a collection don't overwrite each other:
 
 ```python
 store = foehn.to_zarr("surface_derived_grid", match="rhiresd")
-# -> data/meteoswiss/zarr/surface_derived_grid.zarr
+# -> data/meteoswiss/zarr/surface_derived_grid__rhiresd.zarr
+
+foehn.to_zarr("surface_derived_grid", match="tabsd")
+# -> data/meteoswiss/zarr/surface_derived_grid__tabsd.zarr  (distinct store)
+
+# Unfiltered keeps the bare name
+foehn.to_zarr("hail_hazard_50y")
+# -> data/meteoswiss/zarr/hail_hazard_50y.zarr
+
+# Override the location explicitly
+foehn.to_zarr("surface_derived_grid", match="rhiresd", store="out/rain.zarr")
 
 # Re-chunk before writing (requires `pip install dask`)
 foehn.to_zarr("surface_derived_grid", match="rhiresd", rechunk={"time": 24})
@@ -116,8 +127,11 @@ foehn open surface_derived_grid --match rhiresd
 # Restrict to specific variables
 foehn open climate_scenarios_grid --match _pr_ --variables pr
 
-# Write a Zarr store
+# Write a Zarr store (default name: surface_derived_grid__rhiresd.zarr)
 foehn to-zarr surface_derived_grid --match rhiresd
+
+# Write to an explicit path
+foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 ```
 
 ---

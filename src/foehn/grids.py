@@ -4,21 +4,22 @@ This is the gridded counterpart to the tabular ``foehn.load()`` path: where
 ``load()`` returns a Polars DataFrame for CSV station data, ``open_dataset()``
 returns an xarray Dataset for the N-dimensional grid collections.
 
-PHASE 1 — NetCDF only
----------------------
-Only the NetCDF collections (``NETCDF_COLLECTIONS``) are wired up. xarray reads
-NetCDF4/HDF5 natively, so no Zarr conversion is involved — files are downloaded
-to the local bronze cache once and opened lazily from disk.
+NetCDF only
+-----------
+Only the NetCDF collections (``NETCDF_COLLECTIONS``) are wired up. ``open_dataset()``
+downloads the source files to the local bronze cache once and reads them lazily
+from disk; ``to_zarr()`` materialises a collection to a Zarr store under
+``data_dir/zarr/`` (the tabular ``to_parquet()`` analog).
 
 GRIB2 (ICON/KENDA) and HDF5 radar (ODIM) are deliberately not handled yet: GRIB2
 needs cfgrib/eccodes and benefits from a kerchunk/VirtualiZarr consolidation step,
 and ODIM radar needs ``xradar`` to map cleanly onto xarray. Those land in later
-phases. ``to_zarr()`` (writing a user-visible Zarr store under
-``data_dir/zarr/<key>/``) is the Phase 2 follow-up.
+phases.
 """
 
 from __future__ import annotations
 
+import re
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,11 +52,19 @@ def _ensure_netcdf_files(collection_key: str, bronze_dir: Path, match: str | Non
     collections are redundant copies of the .nc data) are ignored. ``match``
     keeps only files whose name contains the given substring, which is how
     callers narrow a heterogeneous multi-file collection to a coherent set.
+
+    A filtered request (``match`` given) is served from the local cache without
+    a network call when matching files exist — that subset is exactly what was
+    asked for. An unfiltered request always consults the remote listing first,
+    so it can never hand back a partial cache that an earlier filtered open left
+    behind; only files missing from disk are actually downloaded. If the listing
+    is unreachable, it falls back to the cache (with a warning) rather than
+    failing a call that could be served locally.
     """
     out_dir = bronze_dir / collection_key
     local = sorted(out_dir.glob("*.nc"))
-    if local:
-        files = [f for f in local if match is None or match in f.name]
+    if match is not None and local:
+        files = [f for f in local if match in f.name]
         if files:
             return files
         # Local cache exists but nothing matches — fall through to the network
@@ -63,10 +72,24 @@ def _ensure_netcdf_files(collection_key: str, bronze_dir: Path, match: str | Non
 
     # Lazy import to avoid a hard dependency on requests at module import time
     # for callers that only touch the registry helpers.
+    import requests
+
     from foehn.client import _download_binary, _retry_session
 
     collection_id = COLLECTIONS[collection_key]
-    items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    try:
+        items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    except requests.exceptions.RequestException as exc:
+        cached = [f for f in local if match is None or match in f.name]
+        if cached:
+            warnings.warn(
+                f"Could not reach the STAC API to verify the {collection_key!r} cache "
+                f"({type(exc).__name__}); using {len(cached)} locally cached file(s), "
+                "which may be an incomplete subset of the collection.",
+                stacklevel=2,
+            )
+            return cached
+        raise
 
     nc_hrefs: list[str] = []
     other_exts: set[str] = set()
@@ -134,16 +157,21 @@ def _sanitize_noncf_time_units(ds):
 def _open_netcdf(xr, files: list[Path], engine: str | None):
     """Open one or many NetCDF files into a single Dataset.
 
+    Multiple files are opened individually and merged with ``combine_by_coords``
+    rather than ``open_mfdataset``: the latter needs a dask chunk manager, which
+    is not part of the 'grids' extra. Per-file opens keep the netCDF backend's
+    own lazy reads, so combining stays dask-free.
+
     Retries with ``decode_times=False`` when the source uses non-CF time units
     that xarray/cftime cannot decode — MeteoSwiss climate normals, for example,
     label their time axis "years since 1991-01-01", which is not CF-compliant.
     """
-    multi = len(files) > 1
 
     def _do(decode_times: bool):
-        if multi:
-            return xr.open_mfdataset(files, engine=engine, combine="by_coords", decode_times=decode_times)
-        return xr.open_dataset(files[0], engine=engine, decode_times=decode_times)
+        if len(files) == 1:
+            return xr.open_dataset(files[0], engine=engine, decode_times=decode_times)
+        datasets = [xr.open_dataset(f, engine=engine, decode_times=decode_times) for f in files]
+        return xr.combine_by_coords(datasets)
 
     try:
         return _do(decode_times=True)
@@ -242,31 +270,46 @@ def open_dataset(
     return ds
 
 
+def _store_slug(match: str) -> str:
+    """Filesystem-safe fragment derived from a ``match`` filter for store names."""
+    return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
+
+
 def to_zarr(
     dataset: str,
     *,
     variables: str | list[str] | None = None,
     match: str | None = None,
     data_dir: Path | str | None = None,
+    store: Path | str | None = None,
     rechunk: dict[str, int] | None = None,
     mode: str = "w",
 ) -> Path:
     """Materialise a gridded dataset to a Zarr store on disk.
 
     The grid analog of ``foehn.to_parquet()``: reads the source NetCDF via
-    ``open_dataset()`` and writes a single Zarr store to
-    ``data_dir/zarr/<dataset>.zarr``.
+    ``open_dataset()`` and writes a single Zarr store under ``data_dir/zarr/``.
+
+    The default store name encodes ``match`` so that different filtered slices of
+    the same collection don't silently overwrite each other:
+    ``<dataset>.zarr`` when unfiltered, ``<dataset>__<match>.zarr`` otherwise
+    (e.g. ``surface_derived_grid__rhiresd.zarr``). Pass ``store`` for an explicit
+    path that overrides this.
 
     Args:
         dataset: Dataset name. Must be a NetCDF collection.
         variables: Restrict to these data variable(s) before writing.
         match: Narrow a multi-file collection to a coherent set (see open_dataset).
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
+        store: Explicit output path for the ``.zarr`` store. Overrides the
+            derived ``data_dir/zarr/<name>.zarr`` location when given.
         rechunk: Optional dim→chunk-size mapping applied before writing, e.g.
             ``{"time": 24}``. Requires ``dask`` (not part of the 'grids' extra —
             install separately with ``pip install dask``); raises ImportError
             if it is missing.
-        mode: Zarr write mode (default "w" — overwrite any existing store).
+        mode: Zarr write mode (default "w" — overwrite the store at this path).
+            Note distinct ``match`` values map to distinct default paths, so this
+            only overwrites a prior run of the *same* slice, not a different one.
 
     Returns:
         Path to the written ``.zarr`` store.
@@ -274,8 +317,12 @@ def to_zarr(
     ds = open_dataset(dataset, variables=variables, match=match, data_dir=data_dir)
     ds = _sanitize_noncf_time_units(ds)
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    store = data_dir / "zarr" / f"{dataset}.zarr"
+    if store is not None:
+        store = Path(store)
+    else:
+        data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
+        name = dataset if match is None else f"{dataset}__{_store_slug(match)}"
+        store = data_dir / "zarr" / f"{name}.zarr"
     store.parent.mkdir(parents=True, exist_ok=True)
 
     if rechunk:

@@ -109,16 +109,20 @@ foehn open climate_scenarios_grid --match _pr_ --variables pr
 
 ## `foehn to-zarr DATASET`
 
-Write a gridded (NetCDF) dataset to a Zarr store under `<data_dir>/zarr/`.
+Write a gridded (NetCDF) dataset to a Zarr store under `<data_dir>/zarr/`. The
+default name encodes `--match` (`<dataset>__<match>.zarr`), so different slices
+don't overwrite each other; use `--out` for an explicit path.
 
 ```bash
 foehn to-zarr surface_derived_grid --match rhiresd
+foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 ```
 
 | Flag | Description |
 |---|---|
 | `--variables` | Restrict to these data variable(s) |
 | `--match` | Keep only source files whose name contains this substring |
+| `--out` | Explicit output path for the .zarr store |
 
 ---
 
