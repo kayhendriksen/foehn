@@ -127,17 +127,23 @@ Parquet files are written to `<data_dir>/parquet/<collection>/`.
 
 ---
 
-## Gridded data (NetCDF)
+## Gridded data (NetCDF / GRIB2)
 
-NetCDF collections (climate grids, normals, scenarios) are N-dimensional fields,
-not tables, so they open as xarray Datasets via `foehn.open_dataset()` — the
-grid analog of `load()`. Requires `pip install "foehn[grids]"`.
+Gridded collections are N-dimensional fields, not tables, so they open as xarray
+Datasets via `foehn.open_dataset()` — the grid analog of `load()`.
 
 ```python
+# NetCDF climate grids/normals/scenarios — needs pip install "foehn[grids]"
 ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")
 foehn.to_zarr("surface_derived_grid", match="rhiresd")
+
+# GRIB2 forecasts (ICON-CH1/CH2, KENDA) — needs pip install "foehn[grib]".
+# match= is required and must select a single file (variable, member,
+# reference + lead time):
+ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
 ```
 
-This path is *download-then-lazy*: the source NetCDF is fetched in full to the
+This path is *download-then-lazy*: the source file is fetched in full to the
 local cache before any read. See the [gridded data documentation](grids.md) for
-`open_dataset`, `to_zarr`, `match`, and the Swiss-grid coordinate notes.
+`open_dataset`, `to_zarr`, `match`, the GRIB2 single-file requirement, and the
+Swiss-grid coordinate notes.

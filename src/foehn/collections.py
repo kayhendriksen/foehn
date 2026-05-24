@@ -427,15 +427,8 @@ PREAMBLE_CSV_COLLECTIONS = {
 }
 
 
-# xarray backend engine per source format, used by the gridded read path
-# (foehn.open_dataset). Phase 1 wires NetCDF only; GRIB2 (cfgrib) and ODIM
-# radar HDF5 (xradar) land in later phases alongside to_zarr() materialization
-# into data_dir/zarr/<key>/.
-GRID_ENGINES: dict[str, str] = {
-    "NetCDF": "h5netcdf",
-    "GRIB2": "cfgrib",
-    "HDF5": "xradar",
-}
+# (The gridded read path's per-format engine/suffix config now lives in
+# foehn.grids._GRID_READERS, keyed off each collection's COLLECTION_META format.)
 
 
 # C6 climate normals — separate ZIP from opendata.swiss (not on STAC API).

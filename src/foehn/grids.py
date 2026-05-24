@@ -116,17 +116,21 @@ def _ensure_grid_files(
     substring, which is how callers narrow a heterogeneous multi-file collection
     to a coherent set.
 
-    A filtered request (``match`` given) is served from the local cache without
-    a network call when matching files exist — that subset is exactly what was
-    asked for. An unfiltered request always consults the remote listing first,
-    so it can never hand back a partial cache that an earlier filtered open left
-    behind; only files missing from disk are actually downloaded. If the listing
-    is unreachable, it falls back to the cache (with a warning) rather than
-    failing a call that could be served locally.
+    A filtered request for a single-file format (``max_files == 1``, i.e. GRIB2)
+    is served straight from the local cache when a matching file exists — one
+    file is a complete answer. Every other request — unfiltered, or a multi-file
+    NetCDF match whose cache could be an incomplete leftover from an interrupted
+    download — consults the remote listing first, so it never hands back a
+    partial cache; only files missing from disk are actually downloaded. If the
+    listing is unreachable, it falls back to the cache (with a warning) rather
+    than failing a call that could be served locally.
     """
     out_dir = bronze_dir / collection_key
     local = sorted(f for s in suffixes for f in out_dir.glob(f"*{s}"))
-    if match is not None and local:
+    if match is not None and local and max_files == 1:
+        # Single-file formats only: a matching cached file is the whole answer.
+        # Multi-file formats fall through to the listing so a partial cache
+        # (e.g. 2 of 5 files from an interrupted download) can't pass as complete.
         files = [f for f in local if match in f.name]
         if files:
             _raise_if_too_many(collection_key, match, [f.name for f in files], max_files)

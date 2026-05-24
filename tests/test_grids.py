@@ -60,8 +60,8 @@ def test_ensure_netcdf_files_raises_when_no_nc_assets(mock_items, tmp_path):
         _ensure_grid_files("hail_hazard_10y", tmp_path / "bronze")
 
 
-def test_ensure_netcdf_files_match_filters_local_cache(tmp_path):
-    """match should keep only local files whose name contains the substring."""
+def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
+    """A NetCDF match consults the remote listing (to verify completeness) and keeps the subset."""
     out_dir = tmp_path / "bronze" / "surface_derived_grid"
     out_dir.mkdir(parents=True)
     keep = out_dir / "x.rhiresd_ch01h.nc"
@@ -69,10 +69,51 @@ def test_ensure_netcdf_files_match_filters_local_cache(tmp_path):
     keep.write_bytes(b"x")
     drop.write_bytes(b"x")
 
-    with patch("foehn.grids.get_collection_items") as mock_items:
+    items = _items_for("x.rhiresd_ch01h.nc", "x.ranomm9120_ch01r.nc")
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items) as mock_items,
+        patch("foehn.client._download_binary") as mock_dl,
+    ):
         result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
-        mock_items.assert_not_called()
+    mock_items.assert_called_once()  # multi-file format always verifies against remote
+    mock_dl.assert_not_called()  # both already cached
     assert result == [keep]
+
+
+def test_ensure_netcdf_files_match_downloads_missing_from_partial_cache(tmp_path):
+    """A multi-file NetCDF match must not return a partial cache — it fetches what's missing."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    (out_dir / "rhiresd_part1.nc").write_bytes(b"x")  # interrupted earlier download left only part 1
+
+    items = _items_for("rhiresd_part1.nc", "rhiresd_part2.nc")
+
+    def fake_download(_session, _href, filepath):
+        Path(filepath).write_bytes(b"y")
+
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items),
+        patch("foehn.client._retry_session"),
+        patch("foehn.client._download_binary", side_effect=fake_download) as mock_dl,
+    ):
+        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+    assert mock_dl.call_count == 1  # the missing part 2 is fetched
+    assert {p.name for p in result} == {"rhiresd_part1.nc", "rhiresd_part2.nc"}
+
+
+def test_ensure_grib2_match_uses_cache_without_network(tmp_path):
+    """Single-file formats (GRIB2) still serve a cached match without a listing call."""
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    f = out_dir / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"
+    f.write_bytes(b"x")
+
+    with patch("foehn.grids.get_collection_items") as mock_items:
+        result = _ensure_grid_files(
+            "forecast_icon_ch1", tmp_path / "bronze", suffixes=(".grib2", ".grib"), match="t_2m-ctrl", max_files=1
+        )
+        mock_items.assert_not_called()
+    assert result == [f]
 
 
 @patch("foehn.grids.get_collection_items")
@@ -244,7 +285,8 @@ def test_to_zarr_grib2_writes_store(tmp_path):
     assert "t2m" in xr.open_zarr(store).data_vars
 
 
-def test_open_dataset_match_selects_subset(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("grid.rhiresd_ch01h.nc", "grid.ranomm9120_ch01r.nc"))
+def test_open_dataset_match_selects_subset(_mock_items, tmp_path):
     """match should restrict a multi-file collection to the matching files."""
     xr = pytest.importorskip("xarray")
     pytest.importorskip("h5netcdf")
@@ -325,7 +367,8 @@ def test_to_zarr_writes_store(_mock_items, tmp_path):
     assert roundtrip["tas"].shape == (2, 3)
 
 
-def test_to_zarr_match_yields_distinct_stores(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("g.rhiresd.nc", "g.tabsd.nc"))
+def test_to_zarr_match_yields_distinct_stores(_mock_items, tmp_path):
     """Different match= filters must write to distinct stores, not clobber each other."""
     xr = pytest.importorskip("xarray")
     pytest.importorskip("h5netcdf")
