@@ -8,16 +8,17 @@ Supported formats
 -----------------
 Routing keys off each collection's ``format`` (see ``_GRID_READERS``):
 
-* NetCDF (climate grids, normals, scenarios) — engine auto-detected, 'grids' extra.
-* GRIB2 (ICON-CH1/CH2 forecasts, KENDA analysis) — cfgrib engine, 'grib' extra.
-* HDF5/ODIM radar composites (CombiPrecip, hail) — bespoke ODIM reader, 'radar'
-  extra. These are Cartesian ``COMP`` grids (not polar volumes, so not xradar):
-  read via h5py with ODIM gain/offset scaling onto Swiss LV95 x/y coordinates.
+* NetCDF (climate grids, normals, scenarios) — xarray auto-detects the engine.
+* GRIB2 (ICON-CH1/CH2 forecasts, KENDA analysis) — cfgrib engine.
+* HDF5/ODIM radar composites (CombiPrecip, hail) — bespoke ODIM reader. These are
+  Cartesian ``COMP`` grids (not polar volumes, so not xradar): read via h5py with
+  ODIM gain/offset scaling onto Swiss LV95 x/y coordinates.
 
-GRIB2 and radar collections hold thousands of single-field files, so
-``open_dataset`` requires a ``match`` that resolves to one file (the cap is
-enforced before downloading). ICON GRIB2 comes back as a 1-D ``values`` dimension
-(no lat/lon joined); stacking GRIB2/radar files into a time series
+All formats install via the single optional 'grids' extra (``pip install
+"foehn[grids]"``). GRIB2 and radar collections hold thousands of single-field
+files, so ``open_dataset`` requires a ``match`` that resolves to one file (the
+cap is enforced before downloading). ICON GRIB2 comes back as a 1-D ``values``
+dimension (no lat/lon joined); stacking GRIB2/radar files into a time series
 (concat-along-step, kerchunk) is a later phase.
 
 ``open_dataset()`` downloads the source files to the local bronze cache once and
@@ -56,27 +57,27 @@ def _require_xarray():
 
 
 def _require_cfgrib():
-    """Import cfgrib, or raise a helpful error pointing at the 'grib' extra."""
+    """Import cfgrib, or raise a helpful error pointing at the 'grids' extra."""
     try:
         import cfgrib  # noqa: F401
     except ImportError as exc:
         raise ImportError(
-            "Reading GRIB2 forecasts requires the optional 'grib' dependencies "
-            "(cfgrib + eccodes). Install them with:\n\n"
-            '  pip install "foehn[grib]"\n'
+            "Reading GRIB2 forecasts requires cfgrib + eccodes, part of the optional "
+            "'grids' dependencies. Install them with:\n\n"
+            '  pip install "foehn[grids]"\n'
         ) from exc
 
 
 def _require_radar_deps():
-    """Import h5py + pyproj, or raise a helpful error pointing at the 'radar' extra."""
+    """Import h5py + pyproj, or raise a helpful error pointing at the 'grids' extra."""
     try:
         import h5py  # noqa: F401
         import pyproj  # noqa: F401
     except ImportError as exc:
         raise ImportError(
-            "Reading HDF5/ODIM radar composites requires the optional 'radar' dependencies "
-            "(h5py + pyproj). Install them with:\n\n"
-            '  pip install "foehn[radar]"\n'
+            "Reading HDF5/ODIM radar composites requires h5py + pyproj, part of the optional "
+            "'grids' dependencies. Install them with:\n\n"
+            '  pip install "foehn[grids]"\n'
         ) from exc
 
 
@@ -254,7 +255,7 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
 
     Multiple files are opened individually and merged with ``combine_by_coords``
     rather than ``open_mfdataset``: the latter needs a dask chunk manager, which
-    is not in the 'grids'/'grib' extras. Per-file opens keep the backend's own
+    is not in the 'grids' extra. Per-file opens keep the backend's own
     lazy reads, so combining stays dask-free.
 
     ``combine_attrs="drop_conflicts"`` keeps global attributes shared by every
@@ -430,7 +431,7 @@ def open_dataset(
         ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
             collection opened without a single-file ``match``, or if its files
             cannot be combined into a single Dataset (narrow it with ``match``).
-        ImportError: If the optional 'grids'/'grib'/'radar' deps are not installed.
+        ImportError: If the optional 'grids' dependencies are not installed.
 
     Example::
 

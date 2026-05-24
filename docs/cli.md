@@ -92,10 +92,9 @@ foehn load smn --station BER --frequency d --columns tre200d0 rre150d0 --sort de
 
 ## `foehn open DATASET`
 
-Open a gridded dataset and print its xarray summary. NetCDF grids need
-`foehn[grids]`; GRIB2 forecasts need `foehn[grib]`; HDF5 radar needs
-`foehn[radar]`. GRIB2 and radar additionally require a `--match` that selects a
-single file (those collections are thousands of files). See the
+Open a gridded dataset and print its xarray summary. All gridded formats need
+`pip install "foehn[grids]"`. GRIB2 and radar additionally require a `--match`
+that selects a single file (those collections are thousands of files). See the
 [gridded data documentation](grids.md).
 
 ```bash

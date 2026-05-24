@@ -77,9 +77,7 @@ pip install -e .
 ```bash
 pip install "foehn[databricks]"   # PySpark + Delta
 pip install "foehn[mcp]"          # MCP server
-pip install "foehn[grids]"        # xarray + Zarr for gridded NetCDF data
-pip install "foehn[grib]"         # cfgrib + eccodes for GRIB2 forecasts
-pip install "foehn[radar]"        # h5py + pyproj for HDF5/ODIM radar
+pip install "foehn[grids]"        # xarray + Zarr for all gridded data (NetCDF, GRIB2, radar)
 ```
 
 Requires Python 3.10 or later.
@@ -118,7 +116,7 @@ ds = foehn.open_dataset("radar_precip", match="cpc2613000000")    # one radar co
 foehn.to_zarr("surface_derived_grid", match="rhiresd")            # Zarr store
 ```
 
-NetCDF climate grids/normals/scenarios (`foehn[grids]`), GRIB2 forecasts — ICON-CH1/CH2, KENDA (`foehn[grib]`) — and HDF5/ODIM radar composites (`foehn[radar]`) open as xarray Datasets instead of DataFrames. See the [gridded data documentation](docs/grids.md).
+NetCDF climate grids/normals/scenarios, GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM radar composites all open as xarray Datasets instead of DataFrames. One extra covers them: `pip install "foehn[grids]"`. See the [gridded data documentation](docs/grids.md).
 
 ---
 

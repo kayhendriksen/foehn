@@ -13,40 +13,35 @@ read as [xarray](https://docs.xarray.dev) Datasets instead of Polars DataFrames.
 
 ## Installation
 
-NetCDF grids need the `grids` extra (xarray, netCDF4, h5netcdf, zarr):
+A single `grids` extra covers all three gridded formats — NetCDF (xarray,
+netCDF4, h5netcdf), GRIB2 (cfgrib, eccodes), HDF5/ODIM radar (h5py, pyproj), plus
+zarr for writing:
 
 ```bash
 pip install "foehn[grids]"
 ```
 
-GRIB2 forecasts need `grib` (xarray, cfgrib, eccodes); HDF5 radar needs `radar`
-(xarray, h5py, pyproj):
-
-```bash
-pip install "foehn[grib]"             # forecasts
-pip install "foehn[radar]"            # radar composites
-pip install "foehn[grids,grib,radar]" # everything, plus Zarr writing
-```
-
-`grib` is kept separate because **eccodes** ships a system C library whose
-install can be fragile on some platforms — isolating it means a failed eccodes
-build can't break NetCDF support. Core foehn stays at two dependencies; nothing
-above is imported until you call a grid function. `rechunk=` additionally needs
-`dask` (`pip install dask`), deliberately **not** bundled in any extra.
+Core foehn stays at two dependencies; nothing above is imported until you call a
+grid function. One caveat: **eccodes** (pulled in for GRIB2) ships a system C
+library whose wheel can fail to build on some platforms — if so, that breaks the
+whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
+(`pip install dask`), deliberately **not** bundled in the extra.
 
 ---
 
 ## Which datasets are gridded?
 
-**NetCDF** (`grids` extra): the spatial climate analyses (`surface_derived_grid`,
+All three install via `pip install "foehn[grids]"`.
+
+**NetCDF**: the spatial climate analyses (`surface_derived_grid`,
 `satellite_derived_grid`), the `climate_normals_*` reference grids,
 `climate_scenarios_grid`, and the `hail_hazard_*` maps.
 
-**GRIB2** (`grib` extra): the forecasts `forecast_icon_ch1`, `forecast_icon_ch2`,
-and the analysis `analysis_kenda_ch1`. See [Forecasts (GRIB2)](#forecasts-grib2).
+**GRIB2**: the forecasts `forecast_icon_ch1`, `forecast_icon_ch2`, and the
+analysis `analysis_kenda_ch1`. See [Forecasts (GRIB2)](#forecasts-grib2).
 
-**HDF5/ODIM radar** (`radar` extra): `radar_precip` (CombiPrecip) and
-`radar_hail`. See [Radar (HDF5/ODIM)](#radar-hdf5odim).
+**HDF5/ODIM radar**: `radar_precip` (CombiPrecip) and `radar_hail`. See
+[Radar (HDF5/ODIM)](#radar-hdf5odim).
 
 GRIB2 and radar behave differently from the static NetCDF grids (see their
 sections). List the gridded collections with:
@@ -104,7 +99,7 @@ ds["TabsD"].sel(x=2_600_000, y=1_200_000, method="nearest")  # nearest grid cell
 
 ## Forecasts (GRIB2)
 
-ICON-CH1/CH2 forecasts and KENDA analysis are GRIB2 (`grib` extra) and behave
+ICON-CH1/CH2 forecasts and KENDA analysis are GRIB2 (read via cfgrib) and behave
 differently from the static NetCDF grids:
 
 - **`match` is required and must resolve to a single file.** A forecast
@@ -145,7 +140,7 @@ differently from the static NetCDF grids:
 (probability of hail) are ODIM-H5 **Cartesian composites** (`object=COMP`) — a
 single 2-D grid per file on the Swiss projection. They are *not* polar radar
 volumes, so `xradar` doesn't apply; foehn reads them with a small h5py-based
-reader (`radar` extra).
+reader (h5py + pyproj, part of the `grids` extra).
 
 ```python
 ds = foehn.open_dataset("radar_precip", match="cpc2613000000")

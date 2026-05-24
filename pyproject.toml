@@ -48,25 +48,20 @@ databricks = [
 mcp = [
     "mcp[cli]>=1.0",
 ]
+# Everything for the gridded (xarray) read path, across all formats:
+#   NetCDF (climate grids)  -> netCDF4, h5netcdf, h5py
+#   GRIB2  (forecasts)      -> cfgrib, eccodes   (eccodes ships a system C lib)
+#   HDF5   (ODIM radar)      -> h5py, pyproj
+# plus zarr for to_zarr(). One extra keeps install simple; note eccodes can be
+# the fragile piece on some platforms.
 grids = [
     "xarray>=2024.1",
     "netCDF4>=1.6",
     "h5netcdf>=1.0",
+    "h5py>=3.0",
     "zarr>=3.0",
-]
-# GRIB2 forecasts (ICON-CH1/CH2, KENDA). Kept separate from 'grids' because
-# eccodes ships a system C library whose install can be fragile on some
-# platforms — isolating it means a failed eccodes build can't break NetCDF use.
-grib = [
-    "xarray>=2024.1",
     "cfgrib>=0.9.12",
     "eccodes>=1.7",
-]
-# HDF5/ODIM radar composites (CombiPrecip, hail). h5py reads the ODIM grid;
-# pyproj turns the swiss-projection metadata into LV95 x/y coordinates.
-radar = [
-    "xarray>=2024.1",
-    "h5py>=3.0",
     "pyproj>=3.0",
 ]
 dev = [

@@ -132,18 +132,19 @@ Parquet files are written to `<data_dir>/parquet/<collection>/`.
 Gridded collections are N-dimensional fields, not tables, so they open as xarray
 Datasets via `foehn.open_dataset()` — the grid analog of `load()`.
 
+All gridded formats install via `pip install "foehn[grids]"`.
+
 ```python
-# NetCDF climate grids/normals/scenarios — needs pip install "foehn[grids]"
+# NetCDF climate grids/normals/scenarios
 ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")
 foehn.to_zarr("surface_derived_grid", match="rhiresd")
 
-# GRIB2 forecasts (ICON-CH1/CH2, KENDA) — needs pip install "foehn[grib]".
-# match= is required and must select a single file (variable, member,
-# reference + lead time):
+# GRIB2 forecasts (ICON-CH1/CH2, KENDA). match= is required and must select a
+# single file (variable, member, reference + lead time):
 ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
 
-# HDF5/ODIM radar composites (CombiPrecip, hail) — needs pip install "foehn[radar]".
-# match= is required and must select a single file (one ~5-min timestep):
+# HDF5/ODIM radar composites (CombiPrecip, hail). match= is required and must
+# select a single file (one ~5-min timestep):
 ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
 ```
 
