@@ -293,7 +293,9 @@ _SWISS_PROJ = (
 )
 
 
-def _write_odim_composite(path, quantity="ACRR", nodata=float("nan"), undetect=float("inf")):
+def _write_odim_composite(
+    path, quantity="ACRR", nodata=float("nan"), undetect=float("inf"), date="20260510", time="000000"
+):
     """Write a tiny ODIM-H5 Cartesian COMP composite (offline radar fixture)."""
     import h5py
     import numpy as np
@@ -304,8 +306,8 @@ def _write_odim_composite(path, quantity="ACRR", nodata=float("nan"), undetect=f
         f.attrs["Conventions"] = "ODIM_H5/V2_4"
         what = f.create_group("what")
         what.attrs["object"] = "COMP"
-        what.attrs["date"] = "20260510"
-        what.attrs["time"] = "000000"
+        what.attrs["date"] = date
+        what.attrs["time"] = time
         where = f.create_group("where")
         where.attrs.update({"xsize": 3, "ysize": 2, "xscale": 1000.0, "yscale": 1000.0, "projdef": _SWISS_PROJ})
         where.attrs.update({"UL_lon": 2.68942, "UL_lat": 49.3744})
@@ -357,6 +359,49 @@ def test_to_zarr_radar_writes_store(tmp_path):
     assert store.name == "radar_precip__cpc2613000000.zarr"
     assert store.exists()
     assert "acrr" in xr.open_zarr(store).data_vars
+
+
+@patch(
+    "foehn.grids.get_collection_items",
+    return_value=_items_for("cpc26130000000.h5", "cpc26130000500.h5", "cpc26130001000.h5"),
+)
+def test_to_zarr_radar_stacked_time_cube(_mock_items, tmp_path):
+    """stack='time' assembles the matched radar timesteps into one (time, y, x) cube."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import numpy as np
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "radar_precip"
+    _write_odim_composite(base / "cpc26130000000.h5", time="000000")
+    _write_odim_composite(base / "cpc26130000500.h5", time="000500")
+    _write_odim_composite(base / "cpc26130001000.h5", time="001000")
+
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack="time")
+    ds = xr.open_zarr(store)
+    assert ds["acrr"].dims == ("time", "y", "x")
+    assert dict(ds.sizes) == {"time": 3, "y": 2, "x": 3}
+    # Time axis must be correct + strictly increasing (the append-encoding trap).
+    times = ds.time.values
+    assert (np.diff(times).astype("int64") > 0).all()
+    assert str(times[0])[:16] == "2026-05-10T00:00"
+    assert str(times[1])[:16] == "2026-05-10T00:05"
+
+
+def test_to_zarr_stack_requires_match(tmp_path):
+    """stack='time' needs a match to scope the time range."""
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    with pytest.raises(ValueError, match="needs match="):
+        to_zarr("radar_precip", data_dir=tmp_path, stack="time")
+
+
+def test_to_zarr_stack_rejected_for_netcdf(tmp_path):
+    """stack= is radar-only; NetCDF matches already combine."""
+    with pytest.raises(ValueError, match="only supported for radar"):
+        to_zarr("surface_derived_grid", data_dir=tmp_path, match="rhiresd", stack="time")
 
 
 @patch("foehn.grids.get_collection_items", return_value=_items_for("grid.rhiresd_ch01h.nc", "grid.ranomm9120_ch01r.nc"))

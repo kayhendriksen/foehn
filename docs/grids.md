@@ -157,8 +157,23 @@ ds["acrr"]  # accumulated rainfall (mm), dims (y, x) on Swiss LV95
   projection metadata via `pyproj` — so radar lines up with the NetCDF Swiss
   grids and `.sel(x=…, y=…, method="nearest")` works. The variable is named by
   the ODIM quantity (`acrr`, `poh`).
-- Stacking timesteps into a time series is a planned follow-up (the Cartesian
-  grid is regular, so this is tractable — unlike the ICON GRIB2 case).
+
+### Stacking a time series
+
+`open_dataset` reads one timestep. To assemble a whole day/range into a single
+**`(time, y, x)`** Zarr cube, use `to_zarr(..., stack="time")` with a `match`
+that selects the timesteps:
+
+```python
+store = foehn.to_zarr("radar_precip", match="cpc26130", stack="time")
+cube = xarray.open_zarr(store)        # dims (time, y, x)
+cube["acrr"].sel(x=2_600_000, y=1_200_000, method="nearest")  # rain time-series at a point
+```
+
+The cube is written **incrementally** — one timestep appended at a time along
+`time` — so it stays dask-free and peak memory is a single file regardless of how
+many timesteps the match spans. (GRIB2 has no equivalent yet: its unstructured
+grid would need a step × member × reference-time hypercube — a later phase.)
 
 ---
 

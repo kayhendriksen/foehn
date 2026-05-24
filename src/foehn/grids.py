@@ -18,8 +18,10 @@ All formats install via the single optional 'grids' extra (``pip install
 "foehn[grids]"``). GRIB2 and radar collections hold thousands of single-field
 files, so ``open_dataset`` requires a ``match`` that resolves to one file (the
 cap is enforced before downloading). ICON GRIB2 comes back as a 1-D ``values``
-dimension (no lat/lon joined); stacking GRIB2/radar files into a time series
-(concat-along-step, kerchunk) is a later phase.
+dimension (no lat/lon joined). Radar timesteps can be assembled into one
+``(time, y, x)`` Zarr cube with ``to_zarr(..., stack="time")``; the analogous
+GRIB2 hypercube (step × member × reference time over the unstructured grid,
+concat-along-step / kerchunk) is a later phase.
 
 ``open_dataset()`` downloads the source files to the local bronze cache once and
 reads them from disk; ``to_zarr()`` materialises a collection to a Zarr store
@@ -500,6 +502,84 @@ def _store_slug(match: str) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
 
 
+def _resolve_store(dataset: str, match: str | None, data_dir, store) -> Path:
+    """Resolve the .zarr output path: explicit ``store`` wins, else data_dir/zarr/<name>."""
+    if store is not None:
+        return Path(store)
+    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
+    name = dataset if match is None else f"{dataset}__{_store_slug(match)}"
+    return root / "zarr" / f"{name}.zarr"
+
+
+# Fixed time encoding for stacked writes. Incremental Zarr appends must share one
+# epoch — otherwise xarray re-infers per-frame units on each append and the time
+# axis is silently corrupted (e.g. 5-minute steps decoded as 5-day steps).
+_STACK_TIME_ENCODING = {"units": "seconds since 1970-01-01", "calendar": "proleptic_gregorian", "dtype": "int64"}
+
+
+def _write_zarr(ds, store: Path, mode: str, append_dim: str | None = None) -> None:
+    """Write a Dataset to a Zarr store, suppressing only zarr's consolidated-metadata notice."""
+    with warnings.catch_warnings():
+        # xarray writes consolidated metadata by default. zarr-python 3 warns that
+        # this is outside the Zarr v3 spec, but we keep it on purpose: it's purely
+        # additive (every per-array zarr.json is still written), makes the common
+        # open_zarr() path fast and warning-free, and zarr-python reads it back
+        # natively. Suppress only that one deliberate warning — nothing else.
+        warnings.filterwarnings(
+            "ignore",
+            message="Consolidated metadata is currently not part in the Zarr format 3 specification",
+        )
+        if append_dim is not None:
+            ds.to_zarr(store, mode=mode, append_dim=append_dim)
+        else:
+            ds.to_zarr(store, mode=mode)
+
+
+def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -> Path:
+    """Stack a matched set of radar composites into one ``(time, y, x)`` Zarr cube.
+
+    Written incrementally — one timestep appended at a time along ``time`` — so
+    peak memory stays at a single file no matter how many timesteps the match
+    spans, and no dask is needed.
+    """
+    if fmt != "HDF5":
+        raise ValueError(
+            f"stack= is only supported for radar (HDF5) collections; {dataset!r} is {fmt}. "
+            "NetCDF multi-file matches already combine via match=; GRIB2 stacking is a later phase."
+        )
+    if match is None:
+        raise ValueError(
+            f"stack='time' needs match= to scope the time range for {dataset!r} "
+            '(e.g. a day prefix like match="cpc26130").'
+        )
+
+    xr = _require_xarray()
+    _require_radar_deps()
+    reader = _GRID_READERS[fmt]
+
+    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
+    # No single-file cap here: stacking deliberately wants the whole matched set.
+    files = _ensure_grid_files(dataset, root / "bronze", suffixes=reader["suffixes"], match=match)
+    store_path = _resolve_store(dataset, match, data_dir, store)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wanted = None
+    if variables is not None:
+        wanted = [variables] if isinstance(variables, str) else list(variables)
+
+    # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
+    for i, path in enumerate(sorted(files)):
+        ds = _open_odim_composite(xr, path)
+        if "time" not in ds.coords:
+            raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
+        if wanted is not None:
+            ds = ds[wanted]
+        ds = _sanitize_noncf_time_units(ds).expand_dims("time")
+        ds["time"].encoding.update(_STACK_TIME_ENCODING)
+        _write_zarr(ds, store_path, mode if i == 0 else "a", append_dim=None if i == 0 else "time")
+    return store_path
+
+
 def to_zarr(
     dataset: str,
     *,
@@ -509,6 +589,7 @@ def to_zarr(
     store: Path | str | None = None,
     rechunk: dict[str, int] | None = None,
     mode: str = "w",
+    stack: str | None = None,
 ) -> Path:
     """Materialise a gridded dataset to a Zarr store on disk.
 
@@ -534,23 +615,36 @@ def to_zarr(
         rechunk: Optional dim→chunk-size mapping applied before writing, e.g.
             ``{"time": 24}``. Requires ``dask`` (not part of the 'grids' extra —
             install separately with ``pip install dask``); raises ImportError
-            if it is missing.
+            if it is missing. Not supported together with ``stack``.
         mode: Zarr write mode (default "w" — overwrite the store at this path).
             Note distinct ``match`` values map to distinct default paths, so this
             only overwrites a prior run of the *same* slice, not a different one.
+        stack: If ``"time"`` (radar only), stack every file the ``match`` selects
+            into one ``(time, y, x)`` cube, written incrementally along ``time``
+            (dask-free, one timestep in memory at a time) — so a day/range of
+            CombiPrecip becomes a single analysis-ready store. Default None reads
+            a single file (one timestep). NetCDF multi-file matches already
+            combine without ``stack``; GRIB2 stacking is a later phase.
 
     Returns:
         Path to the written ``.zarr`` store.
     """
+    _validate_grid_dataset(dataset)
+    fmt = COLLECTION_META[dataset]["format"]
+
+    if stack is not None:
+        if stack != "time":
+            raise ValueError(f"stack={stack!r} is not supported; only stack='time' (radar timesteps).")
+        if rechunk:
+            raise ValueError("rechunk= is not supported with stack= (the store is written incrementally).")
+        return _to_zarr_stacked(
+            dataset, fmt, variables=variables, match=match, data_dir=data_dir, store=store, mode=mode
+        )
+
     ds = open_dataset(dataset, variables=variables, match=match, data_dir=data_dir)
     ds = _sanitize_noncf_time_units(ds)
 
-    if store is not None:
-        store = Path(store)
-    else:
-        data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-        name = dataset if match is None else f"{dataset}__{_store_slug(match)}"
-        store = data_dir / "zarr" / f"{name}.zarr"
+    store = _resolve_store(dataset, match, data_dir, store)
     store.parent.mkdir(parents=True, exist_ok=True)
 
     if rechunk:
@@ -563,16 +657,5 @@ def to_zarr(
             )
         ds = ds.chunk(rechunk)
 
-    with warnings.catch_warnings():
-        # xarray writes consolidated metadata by default. zarr-python 3 warns
-        # that this is outside the Zarr v3 spec, but we keep it on purpose: it
-        # is purely additive (every per-array zarr.json is still written, so
-        # readers that ignore it still work), it makes the common open_zarr()
-        # path fast and warning-free, and zarr-python reads it back natively.
-        # Suppress only that specific, deliberate warning — nothing else.
-        warnings.filterwarnings(
-            "ignore",
-            message="Consolidated metadata is currently not part in the Zarr format 3 specification",
-        )
-        ds.to_zarr(store, mode=mode)
+    _write_zarr(ds, store, mode)
     return store

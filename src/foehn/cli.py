@@ -269,6 +269,7 @@ def cmd_to_zarr(args: argparse.Namespace) -> None:
         match=args.match,
         data_dir=_resolve_data_dir(args.data_dir),
         store=args.out,
+        stack=args.stack,
     )
     print(f"Zarr store written to: {store}")
 
@@ -395,6 +396,11 @@ def main():
         help="Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file)",
     )
     sub_zarr.add_argument("--out", help="Explicit output path for the .zarr store (overrides the default location)")
+    sub_zarr.add_argument(
+        "--stack",
+        choices=["time"],
+        help="Radar only: stack every file the --match selects into one (time, y, x) cube",
+    )
     _add_common_args(sub_zarr)
     sub_zarr.set_defaults(func=cmd_to_zarr)
 
