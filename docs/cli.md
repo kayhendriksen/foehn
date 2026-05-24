@@ -124,6 +124,7 @@ foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 foehn to-zarr forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl
 foehn to-zarr radar_precip --match cpc2613000000              # one timestep
 foehn to-zarr radar_precip --match cpc26130 --stack time      # a day -> one (time, y, x) cube
+foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack auto  # GRIB2 -> (time, step, values) cube
 ```
 
 | Flag | Description |
@@ -131,7 +132,7 @@ foehn to-zarr radar_precip --match cpc26130 --stack time      # a day -> one (ti
 | `--variables` | Restrict to these data variable(s) |
 | `--match` | Keep only source files whose name contains this substring |
 | `--out` | Explicit output path for the .zarr store |
-| `--stack time` | Radar only: stack the matched timesteps into one (time, y, x) cube |
+| `--stack` | Cube the matched files: `time` (radar → time,y,x) or `auto` (GRIB2 → N-D) |
 
 ---
 

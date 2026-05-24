@@ -120,15 +120,21 @@ _GRID_READERS: dict[str, dict] = {
 
 
 def _raise_if_too_many(collection_key: str, match: str | None, names: list[str], max_files: int | None) -> None:
-    """Refuse a match that resolves to more files than a single open can combine."""
+    """Refuse a match that resolves to more files than the caller can handle at once."""
     if max_files is None or len(names) <= max_files:
         return
     examples = "\n".join(f"  {n}" for n in sorted(names)[:4])
     more = "" if len(names) <= 4 else f"\n  ... and {len(names) - 4} more"
+    if max_files == 1:
+        detail = "but this collection is read one file at a time. Narrow match= to pick a single file"
+    else:
+        detail = (
+            f"which exceeds the {max_files}-file cap for cubing (the whole set is loaded into memory "
+            "at once). Narrow match= to a smaller set"
+        )
     raise ValueError(
-        f"match={match!r} matched {len(names)} files for {collection_key!r}, but this collection "
-        "is read one file at a time (multi-file consolidation across lead times / reference times "
-        f"is a later phase). Narrow match= to pick a single file, e.g. one of:\n{examples}{more}"
+        f"match={match!r} matched {len(names)} files for {collection_key!r}, {detail}. "
+        f"Matches include:\n{examples}{more}"
     )
 
 
@@ -623,8 +629,8 @@ def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -
     """
     if fmt != "HDF5":
         raise ValueError(
-            f"stack= is only supported for radar (HDF5) collections; {dataset!r} is {fmt}. "
-            "NetCDF multi-file matches already combine via match=; GRIB2 stacking is a later phase."
+            f"stack='time' is only supported for radar (HDF5) collections; {dataset!r} is {fmt}. "
+            "NetCDF multi-file matches already combine via match=; GRIB2 uses stack='auto'."
         )
     if match is None:
         raise ValueError(
@@ -656,6 +662,84 @@ def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -
         ds = _sanitize_noncf_time_units(ds).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
         _write_zarr(ds, store_path, mode if i == 0 else "a", append_dim=None if i == 0 else "time")
+    return store_path
+
+
+# Cap on how many GRIB2 files a single stack="auto" cube may load. The whole set
+# is held in memory at once (no dask), so this guards against an over-broad match
+# OOM-ing the process; it's enforced before downloading.
+_HYPERCUBE_MAX_FILES = 1000
+
+
+def _to_zarr_hypercube(dataset, fmt, *, variables, match, data_dir, store, mode) -> Path:
+    """Combine matched GRIB2 files into one N-D cube over their varying axes.
+
+    Each ICON/KENDA file is a single (variable, member, lead time, reference time)
+    field on the unstructured ``values`` grid. Whichever of ``number``/``time``/
+    ``step`` differ across the matched set are promoted to dimensions and merged
+    with ``combine_by_coords`` into a cube (e.g. ``(time, step, values)``). The
+    derived ``valid_time`` is dropped before combining (it conflicts on concat)
+    and recomputed afterwards. The whole set is loaded into memory at once.
+    """
+    if fmt != "GRIB2":
+        raise ValueError(
+            f"stack='auto' is only supported for GRIB2 collections; {dataset!r} is {fmt}. "
+            "Radar uses stack='time'; NetCDF multi-file matches already combine via match=."
+        )
+    if match is None:
+        raise ValueError(
+            f"stack='auto' needs match= to scope the cube for {dataset!r}, e.g. "
+            'match="-t_2m-ctrl" (one variable + member across runs and lead times).'
+        )
+
+    xr = _require_xarray()
+    _require_cfgrib()
+    reader = _GRID_READERS[fmt]
+
+    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
+    bronze_dir = root / "bronze"
+    files = _ensure_grid_files(
+        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=_HYPERCUBE_MAX_FILES
+    )
+    store_path = _resolve_store(dataset, match, data_dir, store)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+
+    datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs=reader["backend_kwargs"]) for f in sorted(files)]
+    # Promote whichever independent axes actually differ across the matched files.
+    varying = [
+        coord
+        for coord in ("number", "time", "step")
+        if len({ds[coord].values.tobytes() for ds in datasets if coord in ds.coords}) > 1
+    ]
+    if not varying:
+        raise ValueError(
+            f"match={match!r} selected files that don't differ in number/time/step — "
+            "nothing to assemble into a cube (open it as a single field instead)."
+        )
+    prepared = [ds.drop_vars("valid_time", errors="ignore").expand_dims(varying) for ds in datasets]
+    cube = xr.combine_by_coords(prepared, combine_attrs="drop_conflicts")
+    if "time" in cube.coords and "step" in cube.coords:
+        cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])
+
+    if variables is not None:
+        cube = cube[[variables] if isinstance(variables, str) else list(variables)]
+
+    if "values" in cube.dims and "lat" not in cube.coords:
+        try:
+            lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir)
+            if lat is not None and lon is not None and lat.size == cube.sizes["values"]:
+                cube = cube.assign_coords(
+                    lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
+                    lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
+                )
+        except Exception as exc:
+            warnings.warn(
+                f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); "
+                "the cube is on the bare unstructured grid.",
+                stacklevel=2,
+            )
+
+    _write_zarr(_sanitize_noncf_time_units(cube), store_path, mode)
     return store_path
 
 
@@ -698,12 +782,15 @@ def to_zarr(
         mode: Zarr write mode (default "w" — overwrite the store at this path).
             Note distinct ``match`` values map to distinct default paths, so this
             only overwrites a prior run of the *same* slice, not a different one.
-        stack: If ``"time"`` (radar only), stack every file the ``match`` selects
-            into one ``(time, y, x)`` cube, written incrementally along ``time``
-            (dask-free, one timestep in memory at a time) — so a day/range of
-            CombiPrecip becomes a single analysis-ready store. Default None reads
-            a single file (one timestep). NetCDF multi-file matches already
-            combine without ``stack``; GRIB2 stacking is a later phase.
+        stack: Assemble the matched files into one multi-file cube instead of
+            reading a single file. ``"time"`` (radar only) stacks CombiPrecip
+            timesteps into a ``(time, y, x)`` cube, written incrementally along
+            ``time`` (dask-free, one timestep in memory at a time). ``"auto"``
+            (GRIB2 only) promotes whichever of number/time/step vary across the
+            match into a cube (e.g. ``(time, step, values)``) via
+            ``combine_by_coords`` — the whole set is loaded into memory, capped at
+            1000 files. Default None reads a single file. NetCDF multi-file
+            matches already combine without ``stack``. Incompatible with ``rechunk``.
 
     Returns:
         Path to the written ``.zarr`` store.
@@ -712,13 +799,12 @@ def to_zarr(
     fmt = COLLECTION_META[dataset]["format"]
 
     if stack is not None:
-        if stack != "time":
-            raise ValueError(f"stack={stack!r} is not supported; only stack='time' (radar timesteps).")
+        if stack not in ("time", "auto"):
+            raise ValueError(f"stack={stack!r} is not supported; use 'time' (radar) or 'auto' (GRIB2).")
         if rechunk:
-            raise ValueError("rechunk= is not supported with stack= (the store is written incrementally).")
-        return _to_zarr_stacked(
-            dataset, fmt, variables=variables, match=match, data_dir=data_dir, store=store, mode=mode
-        )
+            raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
+        builder = _to_zarr_stacked if stack == "time" else _to_zarr_hypercube
+        return builder(dataset, fmt, variables=variables, match=match, data_dir=data_dir, store=store, mode=mode)
 
     ds = open_dataset(dataset, variables=variables, match=match, data_dir=data_dir)
     ds = _sanitize_noncf_time_units(ds)

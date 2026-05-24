@@ -217,8 +217,12 @@ def _write_nc(path, xr, np, var="tas"):
     ds.to_netcdf(path, engine="h5netcdf")
 
 
-def _write_grib2(path, shortname="2t"):
-    """Write a tiny 2x3 regular lat/lon GRIB2 message via eccodes (offline fixture)."""
+def _write_grib2(path, shortname="2t", step=0, datatime=0):
+    """Write a tiny 2x3 regular lat/lon GRIB2 message via eccodes (offline fixture).
+
+    ``step`` (lead time, hours) and ``datatime`` (reference HHMM) let a set of
+    files differ along the forecast axes so they can be combined into a cube.
+    """
     import eccodes
     import numpy as np
 
@@ -233,6 +237,8 @@ def _write_grib2(path, shortname="2t"):
     eccodes.codes_set(gid, "iDirectionIncrementInDegrees", 1.0)
     eccodes.codes_set(gid, "jDirectionIncrementInDegrees", 1.0)
     eccodes.codes_set(gid, "shortName", shortname)
+    eccodes.codes_set(gid, "dataTime", datatime)
+    eccodes.codes_set(gid, "endStep", step)
     eccodes.codes_set_values(gid, np.arange(6, dtype=float))
     with open(path, "wb") as f:
         eccodes.codes_write(gid, f)
@@ -375,6 +381,58 @@ def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
         lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze")
     assert lat is None and lon is None
     _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+
+
+# ── GRIB2 hypercube (stack="auto") ────────────────────────────────────────────
+
+
+@patch(
+    "foehn.grids.get_collection_items",
+    return_value=_items_for(
+        "icon-ch1-eps-202605230000-0-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202605230000-6-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202605230600-0-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202605230600-6-t_2m-ctrl.grib2",
+    ),
+)
+def test_to_zarr_grib2_hypercube(_mock_items, tmp_path):
+    """stack='auto' promotes the varying forecast axes (time, step) into one cube."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    for dt in (0, 600):
+        for st in (0, 6):
+            _write_grib2(base / f"icon-ch1-eps-20260523{dt:04d}-{st}-t_2m-ctrl.grib2", step=st, datatime=dt)
+
+    store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack="auto")
+    cube = xr.open_zarr(store)
+    assert "time" in cube.dims and "step" in cube.dims
+    assert cube.sizes["time"] == 2 and cube.sizes["step"] == 2
+    assert cube["t2m"].dims[-2:] == ("latitude", "longitude")  # spatial dims preserved
+
+
+def test_to_zarr_auto_requires_match(tmp_path):
+    """stack='auto' needs a match to scope the cube."""
+    pytest.importorskip("cfgrib")
+    with pytest.raises(ValueError, match="needs match="):
+        to_zarr("forecast_icon_ch1", data_dir=tmp_path, stack="auto")
+
+
+def test_to_zarr_auto_rejected_for_radar(tmp_path):
+    """stack='auto' is GRIB2-only; radar uses stack='time'."""
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    with pytest.raises(ValueError, match="only supported for GRIB2"):
+        to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack="auto")
+
+
+def test_to_zarr_invalid_stack_value(tmp_path):
+    with pytest.raises(ValueError, match="stack="):
+        to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="x", stack="member")
 
 
 _SWISS_PROJ = (

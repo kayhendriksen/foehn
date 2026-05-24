@@ -129,18 +129,34 @@ differently from the static NetCDF grids:
   ```
 
   (Best-effort: if the constants file can't be reached, the field still opens,
-  just without `lat`/`lon`, and a warning is emitted.) Because the `values`
-  dimension has no *index* coordinate, files still **cannot** be stacked across
-  lead/reference times yet — that multi-file consolidation (concat-along-step,
-  kerchunk) is a planned follow-up, so for now you read one field at a time.
+  just without `lat`/`lon`, and a warning is emitted.)
 
-- Writing to Zarr works the same way (and inherits the single-file `match`
-  requirement):
+- `open_dataset` reads a single field. Writing one field to Zarr works the same
+  way (and inherits the single-file `match` requirement):
 
   ```python
   foehn.to_zarr("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
   # -> data/meteoswiss/zarr/forecast_icon_ch1__202605231500_0_t_2m_ctrl.zarr
   ```
+
+### Cubing forecasts (stack="auto")
+
+To assemble a *cube* instead of one field, use `to_zarr(..., stack="auto")` with
+a broader `match`. It opens every matched file, promotes whichever forecast axes
+**vary** (`number` / `time` / `step`) into dimensions, and merges them with
+`combine_by_coords` — so e.g. all lead times of one variable+member across runs
+becomes a `(time, step, values)` cube (carrying the joined `lat`/`lon`):
+
+```python
+store = foehn.to_zarr("forecast_icon_ch1", match="-t_2m-ctrl", stack="auto")
+cube = xarray.open_zarr(store)        # dims e.g. (time, step, values)
+cube["t_2m"].isel(time=-1)            # latest run, all lead times
+```
+
+Unlike the radar `stack="time"` (incremental, dask-free), the GRIB2 cube loads
+the whole matched set into memory at once, so it's **capped at 1000 files** —
+narrow `match` if you hit that. A full ensemble × all variables hypercube
+(plus a cloud-lazy kerchunk path) remains future work.
 
 ---
 
