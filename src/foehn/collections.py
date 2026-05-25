@@ -46,6 +46,40 @@ DATA CATEGORIES (per MeteoSwiss documentation)
   C  Climate data                    — CSV + NetCDF + TXT (varies by sub-type)
   D  Radar data                      — HDF5 (binary grid data)
   E  Forecast data                   — GRIB2 (ICON models + KENDA analysis) + CSV (local forecasts)
+
+WHERE COLLECTION METADATA LIVES (by format)
+-------------------------------------------
+A STAC collection exposes two asset levels: collection-level assets (one shared
+set, at GET /collections/<id> -> "assets") and item-level assets (the per-item
+data files, at /collections/<id>/items). Where the *metadata* sits differs by
+format — this is what each foehn reader relies on:
+
+  CSV     — Collection-level assets: <key>_meta_parameters.csv (column names,
+            units, descriptions), <key>_meta_stations.csv (station name, canton,
+            LV95 + WGS84 coords), <key>_meta_datainventory.csv (per-station date
+            ranges). Surfaced by foehn.parameters() / stations() / inventory().
+            The data CSVs themselves are item-level assets.
+
+  NetCDF  — No collection-level metadata; everything is embedded as CF
+            attributes inside each .nc item asset: per-variable ``units`` /
+            ``long_name`` / ``grid_mapping`` (-> a CRS variable, e.g.
+            ``swiss_lv95_coordinates`` with the projection WKT), plus ``lon``/
+            ``lat`` coordinate variables. xarray surfaces these directly; foehn
+            only special-cases non-CF time units ("months/years since ...",
+            handled via a decode_times=False fallback + sanitise-on-write).
+
+  GRIB2   — Per-field metadata (units, long_name, GRIB_* keys) lives in each
+            message and is surfaced by cfgrib. Collection-level assets add:
+            params_<model>.csv (the full parameter catalogue),
+            horizontal_constants_<model>.grib2 (cell tlat/tlon on the unstructured
+            ``values`` grid — foehn joins these as lat/lon), and
+            vertical_constants_<model>.grib2 (level/height geometry; not used yet).
+
+  HDF5    — ODIM-H5 attributes inside each item file: /what (object, date/time,
+   (radar)  product), /where (projdef, xsize/ysize/xscale/yscale, corner lat/lon),
+            /how (+ /how/MeteoSwiss: long_name, versions, gauge counts), and
+            /dataset1/data1/what (quantity, gain/offset/nodata/undetect). foehn's
+            ODIM reader extracts these to build the scaled, LV95-georeferenced grid.
 """
 
 STAC_API_BASE = "https://data.geo.admin.ch/api/stac/v1"
