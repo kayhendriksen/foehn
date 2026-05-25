@@ -472,7 +472,8 @@ def open_dataset(
       with ODIM gain/offset scaling, ``nodata`` masked to NaN, on Swiss LV95
       ``x``/``y`` coordinates (matching the NetCDF grids).
 
-    Stacking GRIB2/radar files into a time series is a later phase.
+    ``open_dataset`` reads one field; to assemble many matched files into a cube
+    use ``to_zarr(..., stack="auto")`` instead.
 
     Args:
         dataset: Dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",

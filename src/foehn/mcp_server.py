@@ -50,8 +50,10 @@ _GRID_INSPECT = ToolAnnotations(
     openWorldHint=True,
 )
 
-# NetCDF grid collections that describe_grid can open. GRIB2 forecasts and
-# HDF5 radar are not wired into the gridded read path yet.
+# NetCDF grid collections that describe_grid can open. GRIB2 and HDF5/radar are
+# readable via the Python/CLI gridded path (foehn.open_dataset / `foehn open`)
+# but aren't exposed through MCP — they need a single-file match= and pull large
+# per-run/per-timestep downloads.
 _INSPECTABLE_GRIDS = sorted(NETCDF_COLLECTIONS)
 
 mcp = FastMCP(
@@ -412,11 +414,10 @@ def describe_grid(
 
     Only NetCDF grid collections are supported (e.g. surface_derived_grid,
     satellite_derived_grid, the climate_normals_* grids, climate_scenarios_grid,
-    hail_hazard_*). GRIB2 forecasts (ICON/KENDA) are readable from Python via
-    foehn.open_dataset(dataset, match=...) or the `foehn open` CLI, but are not
-    exposed here (they need a required match= filter and produce huge per-run
-    downloads). HDF5 radar is not handled yet. CSV datasets should use
-    describe_data()/load_data() instead.
+    hail_hazard_*). GRIB2 forecasts (ICON/KENDA) and HDF5/ODIM radar are readable
+    from Python via foehn.open_dataset(dataset, match=...) or the `foehn open`
+    CLI, but are not exposed here (they need a single-file match= and pull large
+    downloads). CSV datasets should use describe_data()/load_data() instead.
 
     **Cost warning:** foehn is download-then-lazy — the first call downloads the
     *entire* NetCDF to the local cache (hundreds of MB for some collections,

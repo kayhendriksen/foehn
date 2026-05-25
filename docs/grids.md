@@ -89,11 +89,11 @@ ds["TabsD"].sel(x=2_600_000, y=1_200_000, method="nearest")  # nearest grid cell
 
 | Parameter | Type | Description |
 |---|---|---|
-| `dataset` | `str` | Grid dataset name (NetCDF or GRIB2 collection) |
+| `dataset` | `str` | Grid dataset name (NetCDF, GRIB2, or HDF5/radar collection) |
 | `variables` | `str` or `list[str]` | Restrict to these data variable(s) |
-| `match` | `str` | Keep only source files whose name contains this substring (required for GRIB2) |
+| `match` | `str` | Keep only source files whose name contains this substring (required for GRIB2 and radar, where it must select one file) |
 | `data_dir` | `str` or `Path` | Root data directory (default `./data/meteoswiss`) |
-| `engine` | `str` | xarray backend; default auto-detects (NetCDF-3/4) or uses cfgrib (GRIB2) |
+| `engine` | `str` | xarray backend; default auto-detects (NetCDF-3/4) or uses cfgrib (GRIB2); ignored for radar (bespoke ODIM reader) |
 
 ---
 
@@ -125,7 +125,8 @@ differently from the static NetCDF grids:
 
   ```python
   ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
-  ds["t_2m"]          # dims (values,), with ds.lat / ds.lon (degrees) attached
+  # cfgrib names the variable from the GRIB, not the filename token — check ds.data_vars
+  ds["t2m"]           # dims (values,), with ds.lat / ds.lon (degrees) attached
   ```
 
   (Best-effort: if the constants file can't be reached, the field still opens,
@@ -150,7 +151,7 @@ becomes a `(time, step, values)` cube (carrying the joined `lat`/`lon`):
 ```python
 store = foehn.to_zarr("forecast_icon_ch1", match="-t_2m-ctrl", stack="auto")
 cube = xarray.open_zarr(store)        # dims e.g. (time, step, values)
-cube["t_2m"].isel(time=-1)            # latest run, all lead times
+cube["t2m"].isel(time=-1)             # latest run, all lead times (var named by cfgrib)
 ```
 
 `stack="auto"` works for **any** gridded format — it just dispatches to the best
