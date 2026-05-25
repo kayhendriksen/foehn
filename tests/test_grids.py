@@ -103,18 +103,45 @@ def test_ensure_netcdf_files_match_downloads_missing_from_partial_cache(tmp_path
     assert {p.name for p in result} == {"rhiresd_part1.nc", "rhiresd_part2.nc"}
 
 
-def test_ensure_grib2_match_uses_cache_without_network(tmp_path):
-    """Single-file formats (GRIB2) still serve a cached match without a listing call."""
+def test_ensure_single_file_match_validated_against_remote_not_cache(tmp_path):
+    """A single-file match unique in a sparse cache but ambiguous in the collection is rejected."""
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    (out_dir / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2").write_bytes(b"x")  # only one cached
+
+    # ...but the collection has TWO files matching "t_2m-ctrl".
+    items = _items_for(
+        "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202605231800-0-t_2m-ctrl.grib2",
+    )
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items),
+        patch("foehn.client._download_binary") as mock_dl,
+        pytest.raises(ValueError, match="one file at a time"),
+    ):
+        _ensure_grid_files(
+            "forecast_icon_ch1", tmp_path / "bronze", suffixes=(".grib2", ".grib"), match="t_2m-ctrl", max_files=1
+        )
+    mock_dl.assert_not_called()  # rejected before any download
+
+
+def test_ensure_single_file_serves_cache_when_remote_unique(tmp_path):
+    """When the collection has exactly one match, the cached file is reused (no re-download)."""
     out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
     out_dir.mkdir(parents=True)
     f = out_dir / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"
     f.write_bytes(b"x")
 
-    with patch("foehn.grids.get_collection_items") as mock_items:
+    items = _items_for("icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2")
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items),
+        patch("foehn.client._retry_session"),
+        patch("foehn.client._download_binary") as mock_dl,
+    ):
         result = _ensure_grid_files(
             "forecast_icon_ch1", tmp_path / "bronze", suffixes=(".grib2", ".grib"), match="t_2m-ctrl", max_files=1
         )
-        mock_items.assert_not_called()
+    mock_dl.assert_not_called()
     assert result == [f]
 
 
@@ -164,7 +191,7 @@ def test_ensure_netcdf_files_offline_falls_back_to_cache(tmp_path):
 
     with (
         patch("foehn.grids.get_collection_items", side_effect=requests.exceptions.ConnectionError("offline")),
-        pytest.warns(UserWarning, match="may be an incomplete subset"),
+        pytest.warns(UserWarning, match="without checking the collection"),
     ):
         result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze")
     assert [p.name for p in result] == ["a.nc"]
@@ -245,7 +272,8 @@ def _write_grib2(path, shortname="2t", step=0, datatime=0):
     eccodes.codes_release(gid)
 
 
-def test_open_dataset_reads_grib2(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"))
+def test_open_dataset_reads_grib2(_mock_items, tmp_path):
     """End-to-end: read a real GRIB2 file from the cache via cfgrib (match required)."""
     pytest.importorskip("xarray")
     pytest.importorskip("cfgrib")
@@ -254,7 +282,7 @@ def test_open_dataset_reads_grib2(tmp_path):
     base = tmp_path / "bronze" / "forecast_icon_ch1"
     _write_grib2(base / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2")
 
-    # match hits the cached file directly — no network, no .idx sidecar.
+    # listing confirms the match is unique; the cached file is reused (no .idx sidecar).
     ds = open_dataset("forecast_icon_ch1", data_dir=tmp_path, match="202605231500-0-t_2m-ctrl")
     assert "t2m" in ds.data_vars
     assert ds["t2m"].shape == (2, 3)
@@ -276,7 +304,8 @@ def test_open_grib2_overbroad_match_refused_before_download(tmp_path):
     mock_dl.assert_not_called()
 
 
-def test_to_zarr_grib2_writes_store(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"))
+def test_to_zarr_grib2_writes_store(_mock_items, tmp_path):
     """to_zarr works for GRIB2 and encodes the (required) match in the store name."""
     pytest.importorskip("xarray")
     pytest.importorskip("cfgrib")
@@ -475,7 +504,8 @@ def _write_odim_composite(
         dwhat.attrs.update({"gain": 1.0, "offset": 0.0, "nodata": nodata, "undetect": undetect, "quantity": quantity})
 
 
-def test_open_dataset_reads_radar(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("cpc2613000000_00060.001.h5"))
+def test_open_dataset_reads_radar(_mock_items, tmp_path):
     """End-to-end: read an ODIM COMP composite — scaling, masking, LV95 coords."""
     pytest.importorskip("xarray")
     pytest.importorskip("h5py")
@@ -502,7 +532,8 @@ def test_open_dataset_reads_radar(tmp_path):
     assert "time" in ds.coords
 
 
-def test_to_zarr_radar_writes_store(tmp_path):
+@patch("foehn.grids.get_collection_items", return_value=_items_for("cpc2613000000_00060.001.h5"))
+def test_to_zarr_radar_writes_store(_mock_items, tmp_path):
     """to_zarr works for radar and encodes the (required) match in the store name."""
     pytest.importorskip("xarray")
     pytest.importorskip("h5py")

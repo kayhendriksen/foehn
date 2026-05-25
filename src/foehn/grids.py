@@ -92,11 +92,12 @@ def _require_radar_deps():
 #
 # ``max_files`` caps how many matched files a single open may combine. NetCDF
 # collections combine cleanly via combine_by_coords, so there's no cap. GRIB2 and
-# HDF5 are capped at 1: ICON forecasts are on an unstructured grid that
-# combine_by_coords can't stack, and radar is one Cartesian composite per
-# timestep (thousands per collection). Stacking either along time is a later
-# phase. ``match_example`` seeds the "narrow your match" guidance. The cap is
-# enforced *before* downloading so an over-broad match can't pull a whole run.
+# HDF5 are capped at 1 for open_dataset: ICON forecasts are on an unstructured
+# grid that combine_by_coords can't stack, and radar is one Cartesian composite
+# per timestep (thousands per collection). (to_zarr(stack=...) lifts the cap to
+# build cubes.) ``match_example`` seeds the "narrow your match" guidance. The cap
+# is checked against the *remote* listing before downloading, so an over-broad
+# match is rejected even when one matching file already happens to be cached.
 _GRID_READERS: dict[str, dict] = {
     "NetCDF": {"suffixes": (".nc",), "engine": None, "backend_kwargs": None, "max_files": None, "match_example": None},
     "GRIB2": {
@@ -151,27 +152,16 @@ def _ensure_grid_files(
     substring, which is how callers narrow a heterogeneous multi-file collection
     to a coherent set.
 
-    A filtered request for a single-file format (``max_files == 1``, i.e. GRIB2)
-    is served straight from the local cache when a matching file exists — one
-    file is a complete answer. Every other request — unfiltered, or a multi-file
-    NetCDF match whose cache could be an incomplete leftover from an interrupted
-    download — consults the remote listing first, so it never hands back a
-    partial cache; only files missing from disk are actually downloaded. If the
-    listing is unreachable, it falls back to the cache (with a warning) rather
-    than failing a call that could be served locally.
+    Always consults the remote listing first (when reachable), so it can (a)
+    verify a single-file (GRIB2/radar) match resolves to exactly one file in the
+    *collection* — not merely one file in a sparse local cache — and (b) avoid
+    handing back a partial multi-file cache left by an interrupted download. Only
+    files missing from disk are actually downloaded. If the listing is
+    unreachable, it falls back to the cache (with a warning), still enforcing the
+    per-format file cap on whatever is cached.
     """
     out_dir = bronze_dir / collection_key
     local = sorted(f for s in suffixes for f in out_dir.glob(f"*{s}"))
-    if match is not None and local and max_files == 1:
-        # Single-file formats only: a matching cached file is the whole answer.
-        # Multi-file formats fall through to the listing so a partial cache
-        # (e.g. 2 of 5 files from an interrupted download) can't pass as complete.
-        files = [f for f in local if match in f.name]
-        if files:
-            _raise_if_too_many(collection_key, match, [f.name for f in files], max_files)
-            return files
-        # Local cache exists but nothing matches — fall through to the network
-        # path in case the requested files were simply never downloaded.
 
     # Lazy import to avoid a hard dependency on requests at module import time
     # for callers that only touch the registry helpers.
@@ -186,10 +176,13 @@ def _ensure_grid_files(
     except requests.exceptions.RequestException as exc:
         cached = [f for f in local if match is None or match in f.name]
         if cached:
+            # Offline: can't check the collection, but still enforce the cap on
+            # what's cached so an over-broad match can't slip through silently.
+            _raise_if_too_many(collection_key, match, [f.name for f in cached], max_files)
             warnings.warn(
                 f"Could not reach the STAC API to verify the {collection_key!r} cache "
-                f"({type(exc).__name__}); using {len(cached)} locally cached file(s), "
-                "which may be an incomplete subset of the collection.",
+                f"({type(exc).__name__}); using {len(cached)} locally cached file(s) without "
+                "checking the collection for a complete/unique match.",
                 stacklevel=2,
             )
             return cached
