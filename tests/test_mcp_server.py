@@ -54,8 +54,8 @@ class TestConstants:
         for ds in _LOADABLE_DATASETS:
             assert ds in COLLECTIONS
 
-    def test_inspectable_grids_equals_netcdf(self):
-        assert sorted(NETCDF_COLLECTIONS) == _INSPECTABLE_GRIDS
+    def test_inspectable_grids_are_all_gridded(self):
+        assert sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS) == _INSPECTABLE_GRIDS
 
     def test_valid_frequencies(self):
         assert {"t", "h", "d", "m", "y"} == _VALID_FREQUENCIES
@@ -517,14 +517,31 @@ class TestDescribeGrid:
         with pytest.raises(ValueError, match="CSV/tabular"):
             describe_grid("smn")
 
-    def test_grib2_dataset_raises(self):
-        """GRIB2 is readable via open_dataset, but describe_grid stays NetCDF-only."""
-        with pytest.raises(ValueError, match="NetCDF grids only"):
-            describe_grid("forecast_icon_ch1")
+    def test_grib2_inspectable_via_open_dataset(self):
+        """describe_grid now accepts GRIB2; it delegates to open_dataset (here mocked)."""
+        xr = pytest.importorskip("xarray")
+        import numpy as np
 
-    def test_radar_dataset_raises(self):
-        with pytest.raises(ValueError, match="radar"):
-            describe_grid("radar_precip")
+        ds = xr.Dataset({"t2m": (("values",), np.zeros(5, dtype="float32"))})
+        with patch("foehn.mcp_server.foehn.open_dataset", return_value=ds) as mock_open:
+            result = describe_grid("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+        assert isinstance(result, GridSummary)
+        assert result.dimensions == {"values": 5}
+        mock_open.assert_called_once_with("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl", variables=None)
+
+    def test_radar_inspectable_via_open_dataset(self):
+        """describe_grid now accepts radar (HDF5) too."""
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset(
+            {"acrr": (("y", "x"), np.zeros((2, 3), dtype="float32"))},
+            coords={"y": [0, 1], "x": [0, 1, 2]},
+        )
+        with patch("foehn.mcp_server.foehn.open_dataset", return_value=ds):
+            result = describe_grid("radar_precip", match="cpc2613000000")
+        assert result.dimensions == {"y": 2, "x": 3}
+        assert "acrr" in [v.name for v in result.data_variables]
 
     def test_summary_from_dataset(self):
         xr = pytest.importorskip("xarray")

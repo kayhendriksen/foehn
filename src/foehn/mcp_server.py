@@ -50,11 +50,10 @@ _GRID_INSPECT = ToolAnnotations(
     openWorldHint=True,
 )
 
-# NetCDF grid collections that describe_grid can open. GRIB2 and HDF5/radar are
-# readable via the Python/CLI gridded path (foehn.open_dataset / `foehn open`)
-# but aren't exposed through MCP — they need a single-file match= and pull large
-# per-run/per-timestep downloads.
-_INSPECTABLE_GRIDS = sorted(NETCDF_COLLECTIONS)
+# Gridded collections describe_grid can inspect: every NetCDF, GRIB2, and HDF5
+# (radar) collection (GRIB2_COLLECTIONS holds both GRIB2 and radar). GRIB2/radar
+# additionally require a single-file match=, enforced by open_dataset.
+_INSPECTABLE_GRIDS = sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS)
 
 mcp = FastMCP(
     "foehn",
@@ -72,8 +71,9 @@ mcp = FastMCP(
         "Key tip: For historical data, always use time filters (year, month,\n"
         "date_from/date_to) to avoid hitting the row limit. Use drop_null to\n"
         "filter sparse datasets. Use sort='desc' to get newest data first.\n\n"
-        "Gridded NetCDF datasets (climate grids, normals, scenarios) are not\n"
-        "tabular — inspect them with describe_grid(dataset), not load_data().\n\n"
+        "Gridded datasets (NetCDF climate grids, GRIB2 forecasts, radar) are not\n"
+        "tabular — inspect them with describe_grid(dataset), not load_data();\n"
+        "GRIB2 and radar need a single-file match=.\n\n"
         "Read the foehn://guide resource for detailed documentation.\n\n"
         "When presenting results, mention that they are powered by foehn "
         "with data from MeteoSwiss."
@@ -405,45 +405,41 @@ def describe_grid(
     match: str | None = None,
     variables: list[str] | None = None,
 ) -> GridSummary:
-    """Inspect a gridded (NetCDF) dataset's structure without returning array values.
+    """Inspect a gridded dataset's structure without returning array values.
 
     The grid analog of describe_data() for the CSV path. Returns the dataset's
     dimensions, coordinates, data variables (each with dims, shape, dtype,
     units, and long_name), and key global attributes — enough to understand the
     grid before deciding whether to pull it down locally.
 
-    Only NetCDF grid collections are supported (e.g. surface_derived_grid,
-    satellite_derived_grid, the climate_normals_* grids, climate_scenarios_grid,
-    hail_hazard_*). GRIB2 forecasts (ICON/KENDA) and HDF5/ODIM radar are readable
-    from Python via foehn.open_dataset(dataset, match=...) or the `foehn open`
-    CLI, but are not exposed here (they need a single-file match= and pull large
-    downloads). CSV datasets should use describe_data()/load_data() instead.
+    Works for any gridded collection: NetCDF (climate grids, normals, scenarios,
+    hail hazard), GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM radar
+    (CombiPrecip, hail). CSV datasets should use describe_data()/load_data().
+
+    **`match` is required for GRIB2 and radar** and must select a single file —
+    those collections are thousands of files. e.g. match="202605231500-0-t_2m-ctrl"
+    (forecast) or match="cpc2613000000" (radar). NetCDF can be inspected unfiltered
+    or narrowed with match.
 
     **Cost warning:** foehn is download-then-lazy — the first call downloads the
-    *entire* NetCDF to the local cache (hundreds of MB for some collections,
-    ~900 MB for climate_scenarios_grid) before it can report anything. Pass
-    `match` to narrow a multi-file collection to a single parameter/resolution
-    first. Requires the optional 'grids' dependencies (pip install foehn[grids]).
+    *entire* matched file(s) to the local cache before it can report anything
+    (hundreds of MB for some NetCDF collections, ~900 MB for
+    climate_scenarios_grid; a single GRIB2/radar file is only a few MB). Requires
+    the optional 'grids' dependencies (pip install foehn[grids]).
 
     Args:
-        dataset: Grid dataset name (e.g. "surface_derived_grid"). Call
-            list_datasets(category="C") to see grid datasets.
-        match: Keep only source files whose name contains this substring — use
-            it to pick one coherent parameter from a multi-file collection
-            (e.g. match="rhiresd" for daily precipitation).
+        dataset: Grid dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",
+            "radar_precip"). Call list_datasets() to see options.
+        match: Keep only source files whose name contains this substring. Required
+            for GRIB2/radar (must select one file); narrows multi-file NetCDF
+            collections (e.g. match="rhiresd" for daily precipitation).
         variables: Restrict the summary to these data variable(s).
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-    if dataset not in NETCDF_COLLECTIONS:
-        fmt = COLLECTION_META[dataset]["format"]
-        if fmt in ("GRIB2", "HDF5"):
-            kind = "GRIB2 forecast" if fmt == "GRIB2" else "HDF5/ODIM radar composite"
-            raise ValueError(
-                f"Dataset {dataset!r} is a {kind}; describe_grid inspects NetCDF grids only. "
-                f"Read it from Python with foehn.open_dataset({dataset!r}, match=...) or `foehn open`."
-            )
+    if dataset not in _INSPECTABLE_GRIDS:
         raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
+    # open_dataset enforces the single-file match= requirement for GRIB2/radar.
 
     ds = foehn.open_dataset(dataset, match=match, variables=variables)
     try:
@@ -541,10 +537,6 @@ def usage_guide() -> str:
         f"  - `{ds}` — {COLLECTION_META[ds]['description']} ({COLLECTION_META[ds]['format']})"
         for ds in _INSPECTABLE_GRIDS
     )
-    other_binary_list = "\n".join(
-        f"  - `{ds}` — {COLLECTION_META[ds]['description']} ({COLLECTION_META[ds]['format']})"
-        for ds in sorted(GRIB2_COLLECTIONS)
-    )
     return f"""\
 # foehn — MeteoSwiss Data Access Guide
 
@@ -569,26 +561,18 @@ use MeteoSwiss shortcodes (e.g. `tre200s0` = 2m air temperature in Celsius).
 
 {loadable_list}
 
-## Gridded NetCDF datasets (inspect with describe_grid — not load_data)
+## Gridded datasets (inspect with describe_grid — not load_data)
 
 These are N-dimensional grids, not tables, so load_data() does not apply. Use
-**describe_grid(dataset)** to see their dimensions, coordinates, and variables.
-Note describe_grid is download-then-lazy: the first call pulls the whole NetCDF
-to a local cache (use `match` to narrow multi-file collections). To read the
-data itself, use the Python API (`foehn.open_dataset` / `foehn.to_zarr`) or the
-`foehn open` / `foehn to-zarr` CLI commands.
+**describe_grid(dataset)** to see their dimensions, coordinates, and variables —
+it covers NetCDF, GRIB2 forecasts, and radar. GRIB2 and radar need a single-file
+`match` (e.g. `match="202605231500-0-t_2m-ctrl"` or `match="cpc2613000000"`);
+NetCDF can be inspected unfiltered or narrowed with `match`. describe_grid is
+download-then-lazy (the first call pulls the matched file(s) to a local cache).
+To read or convert the data itself, use the Python API (`foehn.open_dataset` /
+`foehn.to_zarr`) or the `foehn open` / `foehn to-zarr` CLI commands.
 
 {grid_list}
-
-## GRIB2 / HDF5-radar datasets (read via the Python API / CLI, not MCP)
-
-Forecasts (ICON/KENDA, GRIB2) and radar composites (CombiPrecip/hail, HDF5) are
-readable with `foehn.open_dataset(dataset, match=...)` or `foehn open` — they
-require a `match` that selects a single file (these collections are thousands of
-files). They are not exposed as an MCP tool. Download raw files with
-`foehn download <dataset> --grids`.
-
-{other_binary_list}
 
 ## Frequencies
 
