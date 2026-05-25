@@ -398,8 +398,8 @@ def main():
     sub_zarr.add_argument("--out", help="Explicit output path for the .zarr store (overrides the default location)")
     sub_zarr.add_argument(
         "--stack",
-        choices=["time", "auto"],
-        help="Stack the matched files into one cube: 'time' (radar -> time,y,x) or 'auto' (GRIB2 -> N-D)",
+        choices=["auto", "time"],
+        help="Combine the matched files into one cube: 'auto' (any gridded format) or 'time' (radar)",
     )
     _add_common_args(sub_zarr)
     sub_zarr.set_defaults(func=cmd_to_zarr)

@@ -422,17 +422,27 @@ def test_to_zarr_auto_requires_match(tmp_path):
         to_zarr("forecast_icon_ch1", data_dir=tmp_path, stack="auto")
 
 
-def test_to_zarr_auto_rejected_for_radar(tmp_path):
-    """stack='auto' is GRIB2-only; radar uses stack='time'."""
-    pytest.importorskip("h5py")
-    pytest.importorskip("pyproj")
-    with pytest.raises(ValueError, match="only supported for GRIB2"):
-        to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack="auto")
-
-
 def test_to_zarr_invalid_stack_value(tmp_path):
     with pytest.raises(ValueError, match="stack="):
         to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="x", stack="member")
+
+
+@patch("foehn.grids.get_collection_items", return_value=_items_for("g.rain.nc", "g.anom.nc"))
+def test_to_zarr_netcdf_auto_writes_combined(_mock_items, tmp_path):
+    """stack='auto' on NetCDF just writes the already-combined multi-file match (no special path)."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    _write_nc(base / "g.rain.nc", xr, np, var="rain")
+    _write_nc(base / "g.anom.nc", xr, np, var="anom")
+
+    store = to_zarr("surface_derived_grid", data_dir=tmp_path, match="g.", stack="auto")
+    ds = xr.open_zarr(store)
+    assert "rain" in ds.data_vars
+    assert "anom" in ds.data_vars  # both files combined into one store
 
 
 _SWISS_PROJ = (
@@ -509,12 +519,13 @@ def test_to_zarr_radar_writes_store(tmp_path):
     assert "acrr" in xr.open_zarr(store).data_vars
 
 
+@pytest.mark.parametrize("stack", ["time", "auto"])
 @patch(
     "foehn.grids.get_collection_items",
     return_value=_items_for("cpc26130000000.h5", "cpc26130000500.h5", "cpc26130001000.h5"),
 )
-def test_to_zarr_radar_stacked_time_cube(_mock_items, tmp_path):
-    """stack='time' assembles the matched radar timesteps into one (time, y, x) cube."""
+def test_to_zarr_radar_stacked_time_cube(_mock_items, tmp_path, stack):
+    """Both stack='time' and stack='auto' assemble radar timesteps into one (time, y, x) cube."""
     pytest.importorskip("xarray")
     pytest.importorskip("h5py")
     pytest.importorskip("pyproj")
@@ -527,7 +538,7 @@ def test_to_zarr_radar_stacked_time_cube(_mock_items, tmp_path):
     _write_odim_composite(base / "cpc26130000500.h5", time="000500")
     _write_odim_composite(base / "cpc26130001000.h5", time="001000")
 
-    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack="time")
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=stack)
     ds = xr.open_zarr(store)
     assert ds["acrr"].dims == ("time", "y", "x")
     assert dict(ds.sizes) == {"time": 3, "y": 2, "x": 3}

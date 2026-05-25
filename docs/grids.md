@@ -153,10 +153,12 @@ cube = xarray.open_zarr(store)        # dims e.g. (time, step, values)
 cube["t_2m"].isel(time=-1)            # latest run, all lead times
 ```
 
-Unlike the radar `stack="time"` (incremental, dask-free), the GRIB2 cube loads
-the whole matched set into memory at once, so it's **capped at 1000 files** —
-narrow `match` if you hit that. A full ensemble × all variables hypercube
-(plus a cloud-lazy kerchunk path) remains future work.
+`stack="auto"` works for **any** gridded format — it just dispatches to the best
+method: the GRIB2 combine above, radar's incremental time-stack (below), or, for
+NetCDF, nothing special (a multi-file `match` already combines on read). Unlike
+radar's incremental path, the GRIB2 combine loads the whole matched set into
+memory at once, so it's **capped at 1000 files** — narrow `match` if you hit
+that. A cloud-lazy kerchunk path (to avoid the in-memory load) remains future work.
 
 ---
 
@@ -187,8 +189,9 @@ ds["acrr"]  # accumulated rainfall (mm), dims (y, x) on Swiss LV95
 ### Stacking a time series
 
 `open_dataset` reads one timestep. To assemble a whole day/range into a single
-**`(time, y, x)`** Zarr cube, use `to_zarr(..., stack="time")` with a `match`
-that selects the timesteps:
+**`(time, y, x)`** Zarr cube, use `to_zarr(..., stack="time")` (or the generic
+`stack="auto"`, which is identical for radar) with a `match` that selects the
+timesteps:
 
 ```python
 store = foehn.to_zarr("radar_precip", match="cpc26130", stack="time")
@@ -198,8 +201,7 @@ cube["acrr"].sel(x=2_600_000, y=1_200_000, method="nearest")  # rain time-series
 
 The cube is written **incrementally** — one timestep appended at a time along
 `time` — so it stays dask-free and peak memory is a single file regardless of how
-many timesteps the match spans. (GRIB2 has no equivalent yet: its unstructured
-grid would need a step × member × reference-time hypercube — a later phase.)
+many timesteps the match spans.
 
 ---
 

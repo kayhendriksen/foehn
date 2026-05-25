@@ -19,17 +19,15 @@ All formats install via the single optional 'grids' extra (``pip install
 files, so ``open_dataset`` requires a ``match`` that resolves to one file (the
 cap is enforced before downloading). ICON GRIB2 comes back on a 1-D ``values``
 dimension; cell ``lat``/``lon`` are joined from the collection's horizontal-
-constants file (best-effort), so the unstructured grid is geo-referenced. Radar
-timesteps can be assembled into one ``(time, y, x)`` Zarr cube with
-``to_zarr(..., stack="time")``; the analogous GRIB2 hypercube (step × member ×
-reference time over the unstructured grid, concat-along-step / kerchunk) is a
-later phase.
+constants file (best-effort), so the unstructured grid is geo-referenced.
 
-``open_dataset()`` downloads the source files to the local bronze cache once and
-reads them from disk; ``to_zarr()`` materialises a collection to a Zarr store
-under ``data_dir/zarr/`` (the tabular ``to_parquet()`` analog). A cloud-lazy
-GRIB2 path (kerchunk/VirtualiZarr, to avoid the full per-run download) is also
-future work.
+``open_dataset()`` reads a single file; ``to_zarr(..., stack="auto")`` assembles
+the matched set into one cube using the best method per format — radar stacks
+timesteps into ``(time, y, x)`` incrementally, GRIB2 promotes its varying
+forecast axes into an N-D cube via combine_by_coords. ``open_dataset()`` and
+``to_zarr()`` download to the local bronze cache and read from disk (the tabular
+``to_parquet()`` analog). A cloud-lazy GRIB2 path (kerchunk/VirtualiZarr, to
+avoid loading the whole set into memory) is future work.
 """
 
 from __future__ import annotations
@@ -634,7 +632,7 @@ def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -
         )
     if match is None:
         raise ValueError(
-            f"stack='time' needs match= to scope the time range for {dataset!r} "
+            f"Stacking radar timesteps needs match= to scope the time range for {dataset!r} "
             '(e.g. a day prefix like match="cpc26130").'
         )
 
@@ -782,15 +780,15 @@ def to_zarr(
         mode: Zarr write mode (default "w" — overwrite the store at this path).
             Note distinct ``match`` values map to distinct default paths, so this
             only overwrites a prior run of the *same* slice, not a different one.
-        stack: Assemble the matched files into one multi-file cube instead of
-            reading a single file. ``"time"`` (radar only) stacks CombiPrecip
-            timesteps into a ``(time, y, x)`` cube, written incrementally along
-            ``time`` (dask-free, one timestep in memory at a time). ``"auto"``
-            (GRIB2 only) promotes whichever of number/time/step vary across the
-            match into a cube (e.g. ``(time, step, values)``) via
-            ``combine_by_coords`` — the whole set is loaded into memory, capped at
-            1000 files. Default None reads a single file. NetCDF multi-file
-            matches already combine without ``stack``. Incompatible with ``rechunk``.
+        stack: ``"auto"`` assembles the matched files into one cube using the
+            best method for the format — radar stacks CombiPrecip timesteps into
+            a ``(time, y, x)`` cube incrementally (dask-free, one timestep in
+            memory); GRIB2 promotes whichever of number/time/step vary into an
+            N-D cube (e.g. ``(time, step, values)``) via ``combine_by_coords``
+            (whole set in memory, capped at 1000 files); NetCDF needs nothing
+            extra since a multi-file ``match`` already combines on read.
+            ``"time"`` is the explicit radar path (same result as ``"auto"`` for
+            radar). Default None reads a single file. Incompatible with ``rechunk``.
 
     Returns:
         Path to the written ``.zarr`` store.
@@ -799,12 +797,18 @@ def to_zarr(
     fmt = COLLECTION_META[dataset]["format"]
 
     if stack is not None:
-        if stack not in ("time", "auto"):
-            raise ValueError(f"stack={stack!r} is not supported; use 'time' (radar) or 'auto' (GRIB2).")
+        if stack not in ("auto", "time"):
+            raise ValueError(f"stack={stack!r} is not supported; use 'auto' (any gridded format) or 'time' (radar).")
         if rechunk:
             raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
-        builder = _to_zarr_stacked if stack == "time" else _to_zarr_hypercube
-        return builder(dataset, fmt, variables=variables, match=match, data_dir=data_dir, store=store, mode=mode)
+        kwargs = {"variables": variables, "match": match, "data_dir": data_dir, "store": store, "mode": mode}
+        # "auto" routes to each format's best cube builder; "time" is the explicit radar path.
+        if stack == "time" or fmt == "HDF5":
+            return _to_zarr_stacked(dataset, fmt, **kwargs)  # radar: incremental (time, y, x)
+        if fmt == "GRIB2":
+            return _to_zarr_hypercube(dataset, fmt, **kwargs)  # forecasts: N-D combine_by_coords
+        # NetCDF + stack="auto": open_dataset already combines a multi-file match,
+        # so just fall through to the normal single-write path below.
 
     ds = open_dataset(dataset, variables=variables, match=match, data_dir=data_dir)
     ds = _sanitize_noncf_time_units(ds)
