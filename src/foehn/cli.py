@@ -248,6 +248,32 @@ def cmd_metadata(args: argparse.Namespace) -> None:
     print(f"\n[{df.shape[0]} rows]")
 
 
+def cmd_open(args: argparse.Namespace) -> None:
+    from foehn.api import open_dataset
+
+    ds = open_dataset(
+        args.dataset,
+        variables=args.variables,
+        match=args.match,
+        data_dir=_resolve_data_dir(args.data_dir),
+    )
+    print(ds)
+
+
+def cmd_to_zarr(args: argparse.Namespace) -> None:
+    from foehn.api import to_zarr
+
+    store = to_zarr(
+        args.dataset,
+        variables=args.variables,
+        match=args.match,
+        data_dir=_resolve_data_dir(args.data_dir),
+        store=args.out,
+        stack=args.stack,
+    )
+    print(f"Zarr store written to: {store}")
+
+
 def cmd_mcp(args: argparse.Namespace) -> None:
     from foehn.mcp_server import run
 
@@ -345,6 +371,38 @@ def main():
     sub_load.add_argument("--sort", choices=["asc", "desc"], help="Sort by timestamp")
     sub_load.add_argument("-n", type=int, default=None, help="Number of rows to show (default: 20)")
     sub_load.set_defaults(func=cmd_load)
+
+    # --- foehn open ---
+    sub_open = subparsers.add_parser(
+        "open", help="Open a gridded dataset (NetCDF, or GRIB2/radar with --match) and print its xarray summary"
+    )
+    sub_open.add_argument("dataset", help="Dataset name (e.g. 'surface_derived_grid', 'forecast_icon_ch1')")
+    sub_open.add_argument("--variables", nargs="+", help="Restrict to these data variable(s)")
+    sub_open.add_argument(
+        "--match",
+        help="Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file)",
+    )
+    _add_common_args(sub_open)
+    sub_open.set_defaults(func=cmd_open)
+
+    # --- foehn to-zarr ---
+    sub_zarr = subparsers.add_parser(
+        "to-zarr", help="Write a gridded dataset (NetCDF, or GRIB2/radar with --match) to a Zarr store"
+    )
+    sub_zarr.add_argument("dataset", help="Dataset name (e.g. 'surface_derived_grid', 'forecast_icon_ch1')")
+    sub_zarr.add_argument("--variables", nargs="+", help="Restrict to these data variable(s)")
+    sub_zarr.add_argument(
+        "--match",
+        help="Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file)",
+    )
+    sub_zarr.add_argument("--out", help="Explicit output path for the .zarr store (overrides the default location)")
+    sub_zarr.add_argument(
+        "--stack",
+        choices=["auto", "time"],
+        help="Combine the matched files into one cube: 'auto' (any gridded format) or 'time' (radar)",
+    )
+    _add_common_args(sub_zarr)
+    sub_zarr.set_defaults(func=cmd_to_zarr)
 
     # --- foehn mcp ---
     sub_mcp = subparsers.add_parser("mcp", help="Start the MCP server for LLM integration")

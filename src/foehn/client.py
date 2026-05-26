@@ -8,7 +8,7 @@ import zipfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
@@ -117,7 +117,7 @@ def load_last_run(data_dir: Path) -> str | None:
 def save_last_run(data_dir: Path):
     path = data_dir / "_last_run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat()}))
+    path.write_text(json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
 
 
 # --- CSV downloads ---
@@ -319,7 +319,7 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
         return False
     try:
         remote_dt = datetime.fromisoformat(remote_updated.replace("Z", "+00:00"))
-        local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=timezone.utc)
+        local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
     except (ValueError, OSError):
         return False
     return remote_dt > local_dt

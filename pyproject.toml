@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "foehn"
-version = "0.2.23"
+version = "0.3.0"
 description = "Python toolkit for Swiss weather data — download, query, and analyse MeteoSwiss Open Government Data"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [
   { name = "Kay Hendriksen" },
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
     "polars>=1.0",
@@ -24,7 +24,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -48,12 +47,36 @@ databricks = [
 mcp = [
     "mcp[cli]>=1.0",
 ]
+# Everything for the gridded (xarray) read path, across all formats:
+#   NetCDF (climate grids)  -> netCDF4, h5netcdf, h5py
+#   GRIB2  (forecasts)      -> cfgrib, eccodes   (eccodes ships a system C lib)
+#   HDF5   (ODIM radar)      -> h5py, pyproj
+# plus zarr for to_zarr(). One extra keeps install simple; note eccodes can be
+# the fragile piece on some platforms.
+grids = [
+    "xarray>=2024.1",
+    "netCDF4>=1.6",
+    "h5netcdf>=1.0",
+    "h5py>=3.0",
+    "zarr>=3.0",
+    "cfgrib>=0.9.12",
+    "eccodes>=1.7",
+    "pyproj>=3.0",
+]
 dev = [
     "ruff>=0.9",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pyarrow>=14.0",
     "mcp[cli]>=1.0",
+    "xarray>=2024.1",
+    "netCDF4>=1.6",
+    "h5netcdf>=1.0",
+    "zarr>=3.0",
+    "cfgrib>=0.9.12",
+    "eccodes>=1.7",
+    "h5py>=3.0",
+    "pyproj>=3.0",
 ]
 
 [project.scripts]
@@ -61,7 +84,7 @@ foehn = "foehn.cli:main"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "RUF", "A", "PIE", "PERF", "T20"]

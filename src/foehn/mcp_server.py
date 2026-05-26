@@ -1,8 +1,10 @@
 """MCP server for foehn — exposes MeteoSwiss data to LLM clients.
 
-Provides read-only access to Swiss meteorological open data through five
-tools, a reference guide resource, and a prompt template. All data is
-fetched live from the MeteoSwiss STAC API; no local state is modified.
+Provides mostly read-only access to Swiss meteorological open data through a set
+of query tools, a reference guide resource, and a prompt template. The tabular
+tools fetch live from the MeteoSwiss STAC API without touching local state; the
+one exception is ``describe_grid``, which downloads the source grid file (NetCDF,
+GRIB2, or radar) into the local bronze cache (annotated ``readOnlyHint=False``).
 """
 
 from __future__ import annotations
@@ -30,13 +32,29 @@ _VALID_FREQUENCIES = {"t", "h", "d", "m", "y"}
 _VALID_TIME_SLICES = {"historical", "recent", "now"}
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
 
-# All tools are read-only queries against the MeteoSwiss API.
+# The tabular query tools are read-only against the MeteoSwiss API (describe_grid
+# is the exception — it caches to disk, see _GRID_INSPECT below).
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
     idempotentHint=True,
     openWorldHint=True,
 )
+
+# describe_grid inspects a gridded collection (NetCDF, GRIB2, or radar). It is
+# idempotent and never destructive, but it is not read-only: opening a grid
+# downloads the source file in full to the local bronze cache (download-then-lazy).
+_GRID_INSPECT = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
+
+# Gridded collections describe_grid can inspect: every NetCDF, GRIB2, and HDF5
+# (radar) collection (GRIB2_COLLECTIONS holds both GRIB2 and radar). GRIB2/radar
+# additionally require a single-file match=, enforced by open_dataset.
+_INSPECTABLE_GRIDS = sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS)
 
 mcp = FastMCP(
     "foehn",
@@ -54,6 +72,9 @@ mcp = FastMCP(
         "Key tip: For historical data, always use time filters (year, month,\n"
         "date_from/date_to) to avoid hitting the row limit. Use drop_null to\n"
         "filter sparse datasets. Use sort='desc' to get newest data first.\n\n"
+        "Gridded datasets (NetCDF climate grids, GRIB2 forecasts, radar) are not\n"
+        "tabular — inspect them with describe_grid(dataset), not load_data();\n"
+        "GRIB2 and radar need a single-file match=.\n\n"
         "Read the foehn://guide resource for detailed documentation.\n\n"
         "When presenting results, mention that they are powered by foehn "
         "with data from MeteoSwiss."
@@ -119,6 +140,23 @@ class DataSummary(BaseModel):
     date_min: str | None = Field(description="Earliest timestamp in the data (ISO format)")
     date_max: str | None = Field(description="Latest timestamp in the data (ISO format)")
     columns: list[ColumnSummary] = Field(description="Column names, types, and null counts")
+
+
+class GridVariable(BaseModel):
+    name: str = Field(description="Data variable name (e.g. 'TabsD' for daily mean temperature)")
+    dims: list[str] = Field(description="Dimension names in order (e.g. ['time', 'y', 'x'])")
+    shape: list[int] = Field(description="Size of each dimension, matching `dims`")
+    dtype: str = Field(description="Array data type (e.g. 'float32')")
+    long_name: str | None = Field(description="Human-readable description from the file, if present")
+    units: str | None = Field(description="Physical units from the file, if present")
+
+
+class GridSummary(BaseModel):
+    dataset: str = Field(description="Grid dataset name")
+    dimensions: dict[str, int] = Field(description="Dimension name → size (e.g. {'time': 365, 'y': 640, 'x': 370})")
+    coordinates: list[str] = Field(description="Coordinate variable names (e.g. ['time', 'x', 'y', 'lat', 'lon'])")
+    data_variables: list[GridVariable] = Field(description="Data variables with their dims, shape, dtype, and metadata")
+    attributes: dict[str, str] = Field(description="Selected global attributes (title, institution, source, ...)")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -362,6 +400,76 @@ def describe_data(
     )
 
 
+@mcp.tool(title="Describe grid", annotations=_GRID_INSPECT)
+def describe_grid(
+    dataset: str,
+    match: str | None = None,
+    variables: list[str] | None = None,
+) -> GridSummary:
+    """Inspect a gridded dataset's structure without returning array values.
+
+    The grid analog of describe_data() for the CSV path. Returns the dataset's
+    dimensions, coordinates, data variables (each with dims, shape, dtype,
+    units, and long_name), and key global attributes — enough to understand the
+    grid before deciding whether to pull it down locally.
+
+    Works for any gridded collection: NetCDF (climate grids, normals, scenarios,
+    hail hazard), GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM radar
+    (CombiPrecip, hail). CSV datasets should use describe_data()/load_data().
+
+    **`match` is required for GRIB2 and radar** and must select a single file —
+    those collections are thousands of files. e.g. match="202605231500-0-t_2m-ctrl"
+    (forecast) or match="cpc2613000000" (radar). NetCDF can be inspected unfiltered
+    or narrowed with match.
+
+    **Cost warning:** foehn is download-then-lazy — the first call downloads the
+    *entire* matched file(s) to the local cache before it can report anything
+    (hundreds of MB for some NetCDF collections, ~900 MB for
+    climate_scenarios_grid; a single GRIB2/radar file is only a few MB). Requires
+    the optional 'grids' dependencies (pip install foehn[grids]).
+
+    Args:
+        dataset: Grid dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",
+            "radar_precip"). Call list_datasets() to see options.
+        match: Keep only source files whose name contains this substring. Required
+            for GRIB2/radar (must select one file); narrows multi-file NetCDF
+            collections (e.g. match="rhiresd" for daily precipitation).
+        variables: Restrict the summary to these data variable(s).
+    """
+    if dataset not in COLLECTIONS:
+        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
+    if dataset not in _INSPECTABLE_GRIDS:
+        raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
+    # open_dataset enforces the single-file match= requirement for GRIB2/radar.
+
+    ds = foehn.open_dataset(dataset, match=match, variables=variables)
+    try:
+        dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
+        coordinates = sorted(str(c) for c in ds.coords)
+        data_variables = [
+            GridVariable(
+                name=str(name),
+                dims=[str(d) for d in da.dims],
+                shape=[int(s) for s in da.shape],
+                dtype=str(da.dtype),
+                long_name=da.attrs.get("long_name"),
+                units=da.attrs.get("units"),
+            )
+            for name, da in ds.data_vars.items()
+        ]
+        attributes = {str(k): str(v) for k, v in ds.attrs.items()}
+    finally:
+        ds.close()
+
+    return GridSummary(
+        dataset=dataset,
+        dimensions=dimensions,
+        coordinates=coordinates,
+        data_variables=data_variables,
+        attributes=attributes,
+    )
+
+
 @mcp.tool(title="Get parameters", annotations=_READ_ONLY)
 def get_parameters(dataset: str) -> list[Parameter]:
     """Get parameter descriptions for a dataset.
@@ -426,9 +534,9 @@ def usage_guide() -> str:
         f"time slices: {', '.join(COLLECTION_META[ds]['time_slices']) or 'none'})"
         for ds in _LOADABLE_DATASETS
     )
-    binary_list = "\n".join(
+    grid_list = "\n".join(
         f"  - `{ds}` — {COLLECTION_META[ds]['description']} ({COLLECTION_META[ds]['format']})"
-        for ds in sorted(GRIB2_COLLECTIONS | NETCDF_COLLECTIONS)
+        for ds in _INSPECTABLE_GRIDS
     )
     return f"""\
 # foehn — MeteoSwiss Data Access Guide
@@ -454,9 +562,18 @@ use MeteoSwiss shortcodes (e.g. `tre200s0` = 2m air temperature in Celsius).
 
 {loadable_list}
 
-## Binary/grid datasets (metadata only — cannot be loaded with load_data)
+## Gridded datasets (inspect with describe_grid — not load_data)
 
-{binary_list}
+These are N-dimensional grids, not tables, so load_data() does not apply. Use
+**describe_grid(dataset)** to see their dimensions, coordinates, and variables —
+it covers NetCDF, GRIB2 forecasts, and radar. GRIB2 and radar need a single-file
+`match` (e.g. `match="202605231500-0-t_2m-ctrl"` or `match="cpc2613000000"`);
+NetCDF can be inspected unfiltered or narrowed with `match`. describe_grid is
+download-then-lazy (the first call pulls the matched file(s) to a local cache).
+To read or convert the data itself, use the Python API (`foehn.open_dataset` /
+`foehn.to_zarr`) or the `foehn open` / `foehn to-zarr` CLI commands.
+
+{grid_list}
 
 ## Frequencies
 

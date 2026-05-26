@@ -90,6 +90,52 @@ foehn load smn --station BER --frequency d --columns tre200d0 rre150d0 --sort de
 
 ---
 
+## `foehn open DATASET`
+
+Open a gridded dataset and print its xarray summary. All gridded formats need
+`pip install "foehn[grids]"`. GRIB2 and radar additionally require a `--match`
+that selects a single file (those collections are thousands of files). See the
+[gridded data documentation](grids.md).
+
+```bash
+foehn open surface_derived_grid --match rhiresd
+foehn open climate_scenarios_grid --match _pr_ --variables pr
+foehn open forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl   # one GRIB2 field
+foehn open radar_precip --match cpc2613000000                   # one radar composite
+```
+
+| Flag | Description |
+|---|---|
+| `--variables` | Restrict to these data variable(s) |
+| `--match` | Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file) |
+
+---
+
+## `foehn to-zarr DATASET`
+
+Write a gridded (NetCDF, GRIB2, or HDF5/radar) dataset to a Zarr store under
+`<data_dir>/zarr/`. The default name encodes `--match` (`<dataset>__<match>.zarr`),
+so different slices don't overwrite each other; use `--out` for an explicit path.
+(GRIB2 and radar collections require `--match`, like `foehn open`.)
+
+```bash
+foehn to-zarr surface_derived_grid --match rhiresd
+foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
+foehn to-zarr forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl
+foehn to-zarr radar_precip --match cpc2613000000              # one timestep
+foehn to-zarr radar_precip --match cpc26130 --stack time      # a day -> one (time, y, x) cube
+foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack auto  # GRIB2 -> (time, step, values) cube
+```
+
+| Flag | Description |
+|---|---|
+| `--variables` | Restrict to these data variable(s) |
+| `--match` | Keep only source files whose name contains this substring |
+| `--out` | Explicit output path for the .zarr store |
+| `--stack` | Cube the matched files: `time` (radar → time,y,x) or `auto` (GRIB2 → N-D) |
+
+---
+
 ## Environment variables
 
 Settings can also be configured via environment variables. CLI flags always take precedence.

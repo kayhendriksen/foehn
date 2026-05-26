@@ -12,16 +12,19 @@ pytest.importorskip("mcp", reason="mcp not installed")
 
 from foehn.collections import COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
 from foehn.mcp_server import (
+    _INSPECTABLE_GRIDS,
     _LOADABLE_DATASETS,
     _VALID_CATEGORIES,
     _VALID_FREQUENCIES,
     _VALID_TIME_SLICES,
     Dataset,
     DataSummary,
+    GridSummary,
     InventoryEntry,
     Parameter,
     Station,
     describe_data,
+    describe_grid,
     get_inventory,
     get_parameters,
     get_stations,
@@ -50,6 +53,9 @@ class TestConstants:
     def test_loadable_datasets_all_exist_in_collections(self):
         for ds in _LOADABLE_DATASETS:
             assert ds in COLLECTIONS
+
+    def test_inspectable_grids_are_all_gridded(self):
+        assert sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS) == _INSPECTABLE_GRIDS
 
     def test_valid_frequencies(self):
         assert {"t", "h", "d", "m", "y"} == _VALID_FREQUENCIES
@@ -499,6 +505,90 @@ class TestDescribeData:
         assert result.date_max is None
 
 
+# ── describe_grid ────────────────────────────────────────────────────────────
+
+
+class TestDescribeGrid:
+    def test_unknown_dataset_raises(self):
+        with pytest.raises(ValueError, match="Unknown dataset"):
+            describe_grid("nonexistent")
+
+    def test_csv_dataset_raises(self):
+        with pytest.raises(ValueError, match="CSV/tabular"):
+            describe_grid("smn")
+
+    def test_grib2_inspectable_via_open_dataset(self):
+        """describe_grid now accepts GRIB2; it delegates to open_dataset (here mocked)."""
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset({"t2m": (("values",), np.zeros(5, dtype="float32"))})
+        with patch("foehn.mcp_server.foehn.open_dataset", return_value=ds) as mock_open:
+            result = describe_grid("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+        assert isinstance(result, GridSummary)
+        assert result.dimensions == {"values": 5}
+        mock_open.assert_called_once_with("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl", variables=None)
+
+    def test_radar_inspectable_via_open_dataset(self):
+        """describe_grid now accepts radar (HDF5) too."""
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset(
+            {"acrr": (("y", "x"), np.zeros((2, 3), dtype="float32"))},
+            coords={"y": [0, 1], "x": [0, 1, 2]},
+        )
+        with patch("foehn.mcp_server.foehn.open_dataset", return_value=ds):
+            result = describe_grid("radar_precip", match="cpc2613000000")
+        assert result.dimensions == {"y": 2, "x": 3}
+        assert "acrr" in [v.name for v in result.data_variables]
+
+    def test_summary_from_dataset(self):
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset(
+            {
+                "TabsD": (
+                    ("time", "y", "x"),
+                    np.zeros((2, 3, 4), dtype="float32"),
+                    {"long_name": "daily mean temperature", "units": "degC"},
+                ),
+            },
+            coords={"time": [0, 1], "y": [0, 1, 2], "x": [0, 1, 2, 3]},
+            attrs={"title": "Test grid", "institution": "MeteoSwiss"},
+        )
+        with patch("foehn.mcp_server.foehn.open_dataset", return_value=ds) as mock_open:
+            result = describe_grid("surface_derived_grid", match="rhiresd")
+
+        assert isinstance(result, GridSummary)
+        assert result.dataset == "surface_derived_grid"
+        assert result.dimensions == {"time": 2, "y": 3, "x": 4}
+        assert "time" in result.coordinates
+        var = next(v for v in result.data_variables if v.name == "TabsD")
+        assert var.dims == ["time", "y", "x"]
+        assert var.shape == [2, 3, 4]
+        assert var.dtype == "float32"
+        assert var.units == "degC"
+        assert var.long_name == "daily mean temperature"
+        assert result.attributes["title"] == "Test grid"
+        mock_open.assert_called_once_with("surface_derived_grid", match="rhiresd", variables=None)
+
+    def test_missing_var_metadata_is_none(self):
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset(
+            {"v": (("y", "x"), np.zeros((2, 2), dtype="float32"))},
+            coords={"y": [0, 1], "x": [0, 1]},
+        )
+        with patch("foehn.mcp_server.foehn.open_dataset", return_value=ds):
+            result = describe_grid("surface_derived_grid")
+        var = result.data_variables[0]
+        assert var.units is None
+        assert var.long_name is None
+
+
 # ── get_parameters ───────────────────────────────────────────────────────────
 
 
@@ -617,6 +707,12 @@ class TestUsageGuide:
         assert "get_parameters(dataset)" in result
         assert "describe_data(" in result
         assert "load_data(" in result
+
+    def test_contains_describe_grid(self):
+        result = usage_guide()
+        assert "describe_grid(" in result
+        for ds in _INSPECTABLE_GRIDS:
+            assert f"`{ds}`" in result
 
     def test_contains_frequency_docs(self):
         result = usage_guide()
