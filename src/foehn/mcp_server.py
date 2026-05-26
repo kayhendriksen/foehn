@@ -3,8 +3,8 @@
 Provides mostly read-only access to Swiss meteorological open data through a set
 of query tools, a reference guide resource, and a prompt template. The tabular
 tools fetch live from the MeteoSwiss STAC API without touching local state; the
-one exception is ``describe_grid``, which downloads the source NetCDF into the
-local bronze cache (and is annotated ``readOnlyHint=False`` accordingly).
+one exception is ``describe_grid``, which downloads the source grid file (NetCDF,
+GRIB2, or radar) into the local bronze cache (annotated ``readOnlyHint=False``).
 """
 
 from __future__ import annotations
@@ -32,7 +32,8 @@ _VALID_FREQUENCIES = {"t", "h", "d", "m", "y"}
 _VALID_TIME_SLICES = {"historical", "recent", "now"}
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
 
-# All tools are read-only queries against the MeteoSwiss API.
+# The tabular query tools are read-only against the MeteoSwiss API (describe_grid
+# is the exception — it caches to disk, see _GRID_INSPECT below).
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -40,9 +41,9 @@ _READ_ONLY = ToolAnnotations(
     openWorldHint=True,
 )
 
-# describe_grid inspects a NetCDF collection. It is idempotent and never
-# destructive, but it is not read-only: opening a grid downloads the source
-# file in full to the local bronze cache (download-then-lazy).
+# describe_grid inspects a gridded collection (NetCDF, GRIB2, or radar). It is
+# idempotent and never destructive, but it is not read-only: opening a grid
+# downloads the source file in full to the local bronze cache (download-then-lazy).
 _GRID_INSPECT = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
