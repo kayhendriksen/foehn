@@ -3,7 +3,7 @@
 import io
 import threading
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -119,9 +119,9 @@ def test_save_and_load_last_run_roundtrip(tmp_path):
 
 
 def test_save_last_run_is_recent(tmp_path):
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     save_last_run(tmp_path)
-    after = datetime.now(timezone.utc)
+    after = datetime.now(UTC)
 
     saved = datetime.fromisoformat(load_last_run(tmp_path))
     assert before <= saved <= after

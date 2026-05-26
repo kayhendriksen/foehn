@@ -80,7 +80,7 @@ pip install "foehn[mcp]"          # MCP server
 pip install "foehn[grids]"        # xarray + Zarr for all gridded data (NetCDF, GRIB2, radar)
 ```
 
-Requires Python 3.10 or later.
+Requires Python 3.11 or later.
 
 ---
 
