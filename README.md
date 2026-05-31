@@ -3,7 +3,7 @@
 </h1>
 
 <p align="center">
-  <strong>MeteoSwiss Open Data — Python API, CLI, MCP server, Parquet & Delta tables</strong>
+  <strong>MeteoSwiss Open Data — Python API, CLI & MCP server · tabular as DataFrames/Parquet, gridded as xarray/Zarr</strong>
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
 
 ---
 
-foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) collection via the STAC API, converts CSV/TXT to Parquet with [Polars](https://pola.rs), and optionally ingests everything into [Databricks](https://www.databricks.com) Unity Catalog Delta tables on a daily schedule. It also ships an [MCP server](https://modelcontextprotocol.io) so LLMs can query Swiss weather data directly.
+foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) collection via the STAC API, converts CSV/TXT station data to Parquet with [Polars](https://pola.rs), and opens gridded collections — NetCDF climate grids, GRIB2 forecasts, and ODIM radar composites — as [xarray](https://xarray.dev) Datasets or [Zarr](https://zarr.dev) stores. It can optionally ingest everything into [Databricks](https://www.databricks.com) Unity Catalog Delta tables on a daily schedule, and ships an [MCP server](https://modelcontextprotocol.io) so LLMs can query Swiss weather data directly.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/kayhendriksen/foehn/main/assets/mcp_demo.png" alt="Daily weather in Bern, powered by foehn" width="700">
@@ -38,6 +38,7 @@ foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) c
 ## Why foehn?
 
 - **20+ collections in one command** — weather stations, radar, hail maps, forecasts, climate scenarios, and more
+- **Tabular and gridded** — CSV station data as Polars DataFrames or Parquet; NetCDF, GRIB2 and ODIM radar grids as xarray Datasets or Zarr stores
 - **MCP server for LLMs** — give your favorite LLM live access to MeteoSwiss data with the MCP server
 - **Significantly smaller on disk** — columnar Parquet with Zstandard compression vs. raw CSVs
 - **Incremental by default** — only re-downloads files that changed since your last run, tracked via `_last_run.json`
