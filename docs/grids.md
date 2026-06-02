@@ -34,8 +34,9 @@ whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
 All three install via `pip install "foehn[grids]"`.
 
 **NetCDF**: the spatial climate analyses (`surface_derived_grid`,
-`satellite_derived_grid`), the `climate_normals_*` reference grids,
-`climate_scenarios_grid`, and the `hail_hazard_*` maps.
+`satellite_derived_grid`, `radar_derived_grid`), the `climate_normals_grid`
+and `climate_normals_*` reference grids, `climate_scenarios_grid`, and the
+`hail_hazard_*` maps.
 
 **GRIB2**: the forecasts `forecast_icon_ch1`, `forecast_icon_ch2`, and the
 analysis `analysis_kenda_ch1`. See [Forecasts (GRIB2)](#forecasts-grib2).

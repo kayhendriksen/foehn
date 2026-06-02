@@ -109,12 +109,15 @@ COLLECTIONS = {
     # C1/C2 — Homogeneous series (CSV, time-sliced: historical/recent)
     "nbcn": "ch.meteoschweiz.ogd-nbcn",  # C1 — Climate stations, homogeneous (d,m,y)
     "nbcn_precip": "ch.meteoschweiz.ogd-nbcn-precip",  # C2 — Climate precipitation, homogeneous (m,y)
-    # C3/C4 — Spatial climate analyses (NetCDF, static grids)
+    # C3/C4/C5 — Spatial climate analyses (NetCDF, static grids)
     "surface_derived_grid": "ch.meteoschweiz.ogd-surface-derived-grid",  # C3 — Precipitation, temperature, sunshine
     "satellite_derived_grid": "ch.meteoschweiz.ogd-satellite-derived-grid",  # C4 — Radiation, clouds, LST
-    # C5 — Spatial climate analyses, hail                        NOT YET RELEASED
+    "radar_derived_grid": "ch.meteoschweiz.ogd-radar-derived-grid",  # C5 — Hail (days + return periods), radar-derived
     # C6 — Climate normals → downloaded separately as ZIP, see CLIMATE_NORMALS_ZIP_URL
     # C7 — Spatial climate normals (NetCDF/GeoTIFF, static reference grids)
+    # The OGD NetCDF normals grid is the unified successor to the per-parameter
+    # klimanormwerte-* GeoTIFF map layers below (temp/precip/sun + radiation/cloud).
+    "climate_normals_grid": "ch.meteoschweiz.ogd-climate-normals-grid",  # C7 — Spatial normals (NetCDF)
     "climate_normals_precip_9120": "ch.meteoschweiz.klimanormwerte-niederschlag_aktuelle_periode",
     "climate_normals_sun_9120": "ch.meteoschweiz.klimanormwerte-sonnenscheindauer_aktuelle_periode",
     "climate_normals_temp_9120": "ch.meteoschweiz.klimanormwerte-temperatur_aktuelle_periode",
@@ -241,6 +244,22 @@ COLLECTION_META: dict[str, dict] = {
         "category": "C",
         "subcategory": "C4",
         "description": "Radiation, clouds, land surface temperature grids",
+        "format": "NetCDF",
+        "frequencies": [],
+        "time_slices": [],
+    },
+    "radar_derived_grid": {
+        "category": "C",
+        "subcategory": "C5",
+        "description": "Hail spatial climate analyses (hail days, return periods)",
+        "format": "NetCDF",
+        "frequencies": [],
+        "time_slices": [],
+    },
+    "climate_normals_grid": {
+        "category": "C",
+        "subcategory": "C7",
+        "description": "Spatial climate normals (temp/precip/sunshine + radiation/clouds)",
         "format": "NetCDF",
         "frequencies": [],
         "time_slices": [],
@@ -430,7 +449,9 @@ GRIB2_COLLECTIONS = {
 NETCDF_COLLECTIONS = {
     "surface_derived_grid",
     "satellite_derived_grid",
+    "radar_derived_grid",
     "climate_scenarios_grid",
+    "climate_normals_grid",
     "climate_normals_precip_9120",
     "climate_normals_sun_9120",
     "climate_normals_temp_9120",

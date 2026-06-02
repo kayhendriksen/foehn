@@ -102,3 +102,11 @@ def test_collection_meta_matches_live_stac_granularities():
 def test_radar_collections_are_hdf5():
     assert COLLECTION_META["radar_precip"]["format"] == "HDF5"
     assert COLLECTION_META["radar_hail"]["format"] == "HDF5"
+
+
+def test_spatial_climate_analysis_grids_are_netcdf():
+    # The OGD spatial climate analyses (hail) and unified normals grid are
+    # static NetCDF collections, read via open_dataset/to_zarr like the others.
+    for key in ("radar_derived_grid", "climate_normals_grid"):
+        assert COLLECTION_META[key]["format"] == "NetCDF"
+        assert key in NETCDF_COLLECTIONS
