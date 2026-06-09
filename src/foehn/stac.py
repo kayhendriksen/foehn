@@ -36,7 +36,7 @@ def get_collection_items(
         # After first page, check if any item has CSV assets — if not, stop
         if require_csv and page == 1 and features:
             has_csv = any(
-                href.endswith(".csv")
+                href.split("?", 1)[0].endswith(".csv")
                 for feat in features
                 for href in (a.get("href", "") for a in feat.get("assets", {}).values())
             )

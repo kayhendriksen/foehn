@@ -15,7 +15,9 @@ from foehn.client import (
     _retry_session,
     download_climate_scenarios_indoor,
     download_collection,
+    download_grib2,
     download_metadata,
+    download_netcdf,
 )
 from foehn.collections import (
     COLLECTION_META,
@@ -26,6 +28,7 @@ from foehn.collections import (
     NETCDF_COLLECTIONS,
     NO_GRANULARITY_COLLECTIONS,
     PREAMBLE_CSV_COLLECTIONS,
+    time_slice_from_filename,
 )
 from foehn.convert import (
     _parse_metadata_types,
@@ -34,6 +37,7 @@ from foehn.convert import (
     convert_climate_scenarios_indoor_to_parquet,
     convert_climate_scenarios_to_parquet,
     convert_to_parquet,
+    decode_meteoswiss_csv,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
     parse_indoor_filename,
@@ -69,14 +73,15 @@ def download(
     data_dir: Path | str | None = None,
     time_slice: list[str] | None = None,
     since: str | None = None,
-    workers: int = 8,
+    workers: int = DEFAULT_WORKERS,
 ) -> DownloadResult:
     """Download a single dataset.
 
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
-        time_slice: Time slices to download. Defaults to ["recent"].
+        time_slice: Time slices to download. Defaults to ["recent"]. Ignored for
+            binary/grid datasets (GRIB2/NetCDF), which fetch the latest assets.
         since: ISO timestamp for incremental updates. For automatic state
             tracking across runs, use ``foehn.client.load_last_run(data_dir)``
             to read the last timestamp and ``save_last_run(data_dir)`` after
@@ -84,17 +89,23 @@ def download(
         workers: Concurrent HTTP downloads (default 8).
 
     Returns:
-        DownloadResult summarising metadata + collection downloads. Use
-        ``result.downloaded > 0`` to gate expensive downstream processing.
+        DownloadResult summarising the download. Use ``result.downloaded > 0``
+        to gate expensive downstream processing and ``result.failed`` to detect
+        partial failures.
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-    if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
-        raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset. Use the CLI with --grids instead.")
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     bronze_dir.mkdir(parents=True, exist_ok=True)
+
+    # Binary/grid datasets have no Parquet path — download the raw assets so the
+    # Python API mirrors the CLI's --grids behaviour (and open_dataset/to_zarr).
+    if dataset in GRIB2_COLLECTIONS:
+        return download_grib2(dataset, bronze_dir, since=since, workers=workers)
+    if dataset in NETCDF_COLLECTIONS:
+        return download_netcdf(dataset, bronze_dir, since=since, workers=workers)
 
     if dataset in CSV_ZIP_COLLECTIONS:
         return download_climate_scenarios_indoor(bronze_dir, dataset)
@@ -106,6 +117,7 @@ def download(
         total_assets=meta.total_assets + coll.total_assets,
         downloaded=meta.downloaded + coll.downloaded,
         skipped=meta.skipped + coll.skipped,
+        failed=meta.failed + coll.failed,
         filenames=meta.filenames + coll.filenames,
     )
 
@@ -158,19 +170,16 @@ def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
     collection_id = COLLECTIONS[dataset]
-    session = _retry_session()
 
     coll = get_collection_metadata(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
-        if href.endswith(".csv") and suffix in href:
+        if href.split("?", 1)[0].endswith(".csv") and suffix in href:
             validate_download_href(href)
-            resp = session.get(href, timeout=60)
-            resp.raise_for_status()
-            try:
-                content = resp.content.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                content = resp.content.decode("windows-1252")
+            with _retry_session() as session:
+                resp = session.get(href, timeout=60)
+                resp.raise_for_status()
+            content = decode_meteoswiss_csv(resp.content)
             return pl.read_csv(content.encode("utf-8"), separator=";")
 
     raise ValueError(f"No {suffix} metadata found for dataset {dataset!r}.")
@@ -261,10 +270,13 @@ def _apply_post_filters(
     if month is not None:
         months = [month] if isinstance(month, int) else month
         df = df.filter(pl.col(ts).dt.month().is_in(months))
+    # Cast the timestamp column to Datetime before comparing: some daily/monthly
+    # files parse ``reference_timestamp`` as a Date, and comparing Date vs the
+    # Datetime literal would raise. Date→Datetime and Datetime→Datetime are both safe.
     if date_from is not None:
-        df = df.filter(pl.col(ts) >= pl.lit(date_from).str.to_datetime())
+        df = df.filter(pl.col(ts).cast(pl.Datetime) >= pl.lit(date_from).str.to_datetime())
     if date_to is not None:
-        df = df.filter(pl.col(ts) <= pl.lit(date_to).str.to_datetime())
+        df = df.filter(pl.col(ts).cast(pl.Datetime) <= pl.lit(date_to).str.to_datetime())
     if drop_null and drop_null in df.columns:
         df = df.filter(pl.col(drop_null).is_not_null())
     if sort in ("asc", "desc"):
@@ -319,8 +331,9 @@ def _load_indoor(
         station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
 
     validate_download_href(zip_href)
-    resp = _retry_session().get(zip_href, timeout=300)
-    resp.raise_for_status()
+    with _retry_session() as session:
+        resp = session.get(zip_href, timeout=300)
+        resp.raise_for_status()
 
     frames: list[pl.DataFrame] = []
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
@@ -386,12 +399,15 @@ def _load_climate_scenarios(
         for asset_info in item.get("assets", {}).values():
             href = asset_info.get("href", "")
             filename = href.split("?")[0].split("/")[-1]
-            if href.endswith(".csv") and "_meta_" not in filename:
+            if filename.endswith(".csv") and "_meta_" not in filename:
                 hrefs.append(href)
 
     if not hrefs:
         raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
 
+    # requests.Session is not fully thread-safe, so give each worker thread its
+    # own session via threading.local. Resolving _retry_session here (rather than
+    # the shared client helper) keeps it patchable at the foehn.api boundary.
     local = threading.local()
 
     def _fetch(href: str) -> pl.DataFrame:
@@ -559,22 +575,18 @@ def load(
             freq_filter = {f.lower() for f in frequency}
 
     collection_id = COLLECTIONS[dataset]
-    session = _retry_session(pool_maxsize=workers)
 
     # 1. Fetch metadata types for schema inference.
     metadata_types: dict[str, pl.DataType] = {}
     coll = get_collection_metadata(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
-        if href.endswith(".csv") and "_meta_parameters" in href:
+        if href.split("?", 1)[0].endswith(".csv") and "_meta_parameters" in href:
             validate_download_href(href)
-            resp = session.get(href, timeout=60)
-            resp.raise_for_status()
-            try:
-                content = resp.content.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                content = resp.content.decode("windows-1252")
-            metadata_types = _parse_metadata_types(content)
+            with _retry_session() as session:
+                resp = session.get(href, timeout=60)
+                resp.raise_for_status()
+            metadata_types = _parse_metadata_types(decode_meteoswiss_csv(resp.content))
             break
 
     # 2. Get STAC items and collect matching CSV URLs.
@@ -597,9 +609,9 @@ def load(
         assets = item.get("assets", {})
         for asset_info in assets.values():
             href = asset_info.get("href", "")
-            if not href.endswith(".csv"):
+            filename = href.split("?", 1)[0].split("/")[-1]
+            if not filename.endswith(".csv"):
                 continue
-            filename = href.split("?")[0].split("/")[-1]
             # Filter by frequency — encoded as _{f}_ or _{f}. in the filename.
             if freq_filter is not None:
                 parts = filename.rsplit(".", 1)[0].split("_")
@@ -608,8 +620,8 @@ def load(
                 if file_freq not in freq_filter:
                     continue
             if not skip_data_type_filter:
-                has_time_slice = any(ts in href for ts in ("historical", "recent", "now"))
-                if has_time_slice and not any(ts in href for ts in time_slice):
+                slice_ = time_slice_from_filename(filename)
+                if slice_ is not None and slice_ not in time_slice:
                     continue
             csv_hrefs.append(href)
 
@@ -620,7 +632,8 @@ def load(
     # 3. Download and parse each CSV concurrently. requests.Session is not
     # fully thread-safe (cookie jar, headers), so each worker thread gets its
     # own session via threading.local. Sessions are scoped to this call —
-    # garbage-collected when the function returns.
+    # garbage-collected when the function returns. _retry_session is resolved
+    # here (not via the shared client helper) so it stays patchable at foehn.api.
     local = threading.local()
 
     def _fetch(href: str) -> pl.DataFrame:
@@ -629,10 +642,7 @@ def load(
         validate_download_href(href)
         resp = local.session.get(href, timeout=60)
         resp.raise_for_status()
-        try:
-            content = resp.content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            content = resp.content.decode("windows-1252")
+        content = decode_meteoswiss_csv(resp.content)
         return parse_csv_bytes(content.encode("utf-8"), metadata_types)
 
     if len(csv_hrefs) == 1 or workers <= 1:

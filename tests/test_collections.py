@@ -9,7 +9,23 @@ from foehn.collections import (
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
     PREAMBLE_CSV_COLLECTIONS,
+    time_slice_from_filename,
 )
+
+
+def test_time_slice_from_filename_detects_trailing_segment():
+    assert time_slice_from_filename("ogd-smn_ber_d_recent.csv") == "recent"
+    assert time_slice_from_filename("ogd-smn_ber_t_now.csv") == "now"
+    assert time_slice_from_filename("ogd-smn_ber_d_historical.csv") == "historical"
+    # Works on a full URL too (the filename segment is parsed, not the whole path).
+    assert time_slice_from_filename("https://data.geo.admin.ch/x/ogd-smn_ber_d_recent.csv") == "recent"
+
+
+def test_time_slice_from_filename_returns_none_when_absent():
+    assert time_slice_from_filename("ogd-smn_ber_d.csv") is None
+    # 'now' as a coincidental substring elsewhere must not be misread as a slice.
+    assert time_slice_from_filename("ogd-snow_ber_d.csv") is None
+    assert time_slice_from_filename("metadata_meta_parameters.csv") is None
 
 
 def test_collections_keys_are_strings():

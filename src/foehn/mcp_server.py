@@ -334,6 +334,12 @@ def describe_data(
     Accepts the same filters as load_data so you can check exactly how
     many rows a query would return before fetching the data.
 
+    **Cost note:** this still fetches the matching CSVs in full (they are not
+    pre-bucketed by row count) and summarises them in memory — it returns no
+    rows, but it is *not* cheaper than load_data() in network/parse terms. Always
+    narrow with the time filters (year, month, date_from/date_to) for historical
+    slices, exactly as you would for load_data().
+
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
         station: Station abbreviation(s) to filter by.

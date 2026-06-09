@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import zipfile
 from collections.abc import Callable
@@ -21,8 +23,12 @@ from foehn.collections import (
     COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
     STAC_API_BASE,
+    time_slice_from_filename,
 )
+from foehn.convert import decode_meteoswiss_csv
 from foehn.stac import get_collection_items, get_collection_metadata
+
+logger = logging.getLogger(__name__)
 
 # Default concurrency for per-asset downloads. Kept modest to stay polite on the
 # MeteoSwiss/CSCS CDNs — they handle bursts fine but we don't need to hammer them.
@@ -40,6 +46,7 @@ class DownloadResult:
     total_assets: int = 0
     downloaded: int = 0
     skipped: int = 0
+    failed: int = 0
     filenames: list[str] = field(default_factory=list)
 
 
@@ -140,11 +147,8 @@ def _download_csv(
     if resp.status_code == 304:
         return ("skipped", href, filename, None)
     resp.raise_for_status()
-    # MeteoSwiss CSVs are Windows-1252; re-encode to UTF-8
-    try:
-        content = resp.content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        content = resp.content.decode("windows-1252")
+    # MeteoSwiss CSVs are usually UTF-8 but some are Windows-1252; normalise to UTF-8.
+    content = decode_meteoswiss_csv(resp.content)
     filepath.write_text(content, encoding="utf-8")
     return ("downloaded", href, filename, resp.headers.get("ETag"))
 
@@ -177,21 +181,21 @@ def download_collection(
 
     etags = load_etags(output_dir.parent)
 
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"Collection: {collection_id}", flush=True)
-    print(f"Data types: {data_types}", flush=True)
-    print(f"Output dir: {out_dir}", flush=True)
-    print(f"{'=' * 60}", flush=True)
+    logger.info("%s", "=" * 60)
+    logger.info("Collection: %s", collection_id)
+    logger.info("Data types: %s", data_types)
+    logger.info("Output dir: %s", out_dir)
+    logger.info("%s", "=" * 60)
 
     items = get_collection_items(collection_id)
-    print(f"  Found {len(items)} items", flush=True)
+    logger.info("  Found %d items", len(items))
 
     # Filter to items updated since last run
     if since:
         items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
-        print(f"  {len(items)} items updated since last run", flush=True)
+        logger.info("  %d items updated since last run", len(items))
         if not items:
-            print("  Nothing changed — skipping", flush=True)
+            logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
     # For forecast collections, only keep the latest item (newest forecast run)
@@ -201,7 +205,7 @@ def download_collection(
             reverse=True,
         )
         items = items[:1]
-        print(f"  Using latest forecast: {items[0].get('id', '?')}", flush=True)
+        logger.info("  Using latest forecast: %s", items[0].get("id", "?"))
 
     # Collect matching CSV assets
     skip_data_type_filter = collection_key in FORECAST_CSV_COLLECTIONS
@@ -210,15 +214,16 @@ def download_collection(
         assets = item.get("assets", {})
         for asset_info in assets.values():
             href = asset_info.get("href", "")
-            if not href.endswith(".csv"):
+            clean = href.split("?", 1)[0]
+            if not clean.endswith(".csv"):
                 continue
             if not skip_data_type_filter:
-                has_time_slice = any(ts in href for ts in ("historical", "recent", "now"))
-                if has_time_slice and not any(dt in href for dt in data_types):
+                slice_ = time_slice_from_filename(clean)
+                if slice_ is not None and slice_ not in data_types:
                     continue
             csv_assets.append((href, asset_info))
 
-    print(f"  {len(csv_assets)} CSV files to process", flush=True)
+    logger.info("  %d CSV files to process", len(csv_assets))
 
     get_session = _thread_local_session()
 
@@ -228,19 +233,27 @@ def download_collection(
     total = len(csv_assets)
     downloaded = 0
     skipped = 0
+    failed = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
+        future_to_href = {
             pool.submit(
                 _do_csv,
                 href,
                 out_dir / href.split("?")[0].split("/")[-1],
                 etags.get(href),
-            )
+            ): href
             for href, _ in csv_assets
-        ]
-        for i, fut in enumerate(as_completed(futures), 1):
-            status, href, filename, new_etag = fut.result()
+        }
+        for i, fut in enumerate(as_completed(future_to_href), 1):
+            # Isolate per-asset failures: one transient 404/timeout must not abort
+            # the batch (and discard the ETags collected from the other assets).
+            try:
+                status, href, filename, new_etag = fut.result()
+            except Exception as exc:
+                failed += 1
+                logger.warning("  [%d/%d] FAILED: %s — %s", i, total, future_to_href[fut], exc)
+                continue
             if status == "skipped":
                 skipped += 1
                 continue
@@ -248,14 +261,18 @@ def download_collection(
                 etags[href] = new_etag
             downloaded += 1
             filenames.append(filename)
-            print(f"  [{i}/{total}] Downloaded: {filename}", flush=True)
+            logger.info("  [%d/%d] Downloaded: %s", i, total, filename)
 
     save_etags(output_dir.parent, etags)
     if skipped:
-        print(f"  Skipped {skipped} unchanged files", flush=True)
-    print(f"  Done — {downloaded} files downloaded", flush=True)
+        logger.info("  Skipped %d unchanged files", skipped)
+    if failed:
+        logger.warning("  %d file(s) failed to download", failed)
+    logger.info("  Done — %d files downloaded", downloaded)
 
-    return DownloadResult(total_assets=total, downloaded=downloaded, skipped=skipped, filenames=filenames)
+    return DownloadResult(
+        total_assets=total, downloaded=downloaded, skipped=skipped, failed=failed, filenames=filenames
+    )
 
 
 # --- Metadata downloads ---
@@ -275,7 +292,7 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
     targets = [
         (asset_info["href"], out_dir / asset_info["href"].split("?")[0].split("/")[-1])
         for asset_info in assets.values()
-        if asset_info.get("href", "").endswith(".csv")
+        if asset_info.get("href", "").split("?", 1)[0].endswith(".csv")
     ]
     if not targets:
         return DownloadResult()
@@ -286,19 +303,27 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
         return _download_csv(get_session(), href, filepath, None)
 
     downloaded = 0
+    failed = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_do_csv, href, filepath) for href, filepath in targets]
-        for fut in as_completed(futures):
-            filename = fut.result()[2]
+        future_to_href = {pool.submit(_do_csv, href, filepath): href for href, filepath in targets}
+        for fut in as_completed(future_to_href):
+            try:
+                filename = fut.result()[2]
+            except Exception as exc:
+                failed += 1
+                logger.warning("  Metadata FAILED: %s — %s", future_to_href[fut], exc)
+                continue
             downloaded += 1
             filenames.append(filename)
-            print(f"  Metadata: {filename}", flush=True)
+            logger.info("  Metadata: %s", filename)
 
     if downloaded:
-        print(f"  {downloaded} metadata files downloaded", flush=True)
+        logger.info("  %d metadata files downloaded", downloaded)
+    if failed:
+        logger.warning("  %d metadata file(s) failed to download", failed)
 
-    return DownloadResult(total_assets=len(targets), downloaded=downloaded, skipped=0, filenames=filenames)
+    return DownloadResult(total_assets=len(targets), downloaded=downloaded, failed=failed, filenames=filenames)
 
 
 # --- GRIB2 / HDF5 downloads ---
@@ -326,13 +351,25 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
 
 
 def _download_binary(session: requests.Session, href: str, filepath: Path, timeout: int = 120) -> str:
-    """Stream a binary asset to disk. Returns the filename."""
+    """Stream a binary asset to disk atomically. Returns the filename.
+
+    Streams into a sibling ``.part`` file and only ``os.replace``s it onto the
+    final path once the body is fully written. A timeout or connection drop
+    mid-stream therefore leaves no file at ``filepath`` — so the next run's
+    existence/mtime check won't mistake a truncated download for a complete one.
+    """
     validate_download_href(href)
-    with session.get(href, stream=True, timeout=timeout) as resp:
-        resp.raise_for_status()
-        with filepath.open("wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                f.write(chunk)
+    tmp = filepath.with_name(filepath.name + ".part")
+    try:
+        with session.get(href, stream=True, timeout=timeout) as resp:
+            resp.raise_for_status()
+            with tmp.open("wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    f.write(chunk)
+        os.replace(tmp, filepath)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return filepath.name
 
 
@@ -347,23 +384,24 @@ def download_grib2(
     out_dir = output_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"GRIB2 Collection: {collection_id}", flush=True)
-    print(f"Output dir: {out_dir}", flush=True)
-    print(f"{'=' * 60}", flush=True)
+    logger.info("%s", "=" * 60)
+    logger.info("GRIB2 Collection: %s", collection_id)
+    logger.info("Output dir: %s", out_dir)
+    logger.info("%s", "=" * 60)
 
     # Only fetch first page — forecast/radar data is ephemeral
     url = f"{STAC_API_BASE}/collections/{collection_id}/items?limit=100"
-    resp = _retry_session().get(url, timeout=30)
-    resp.raise_for_status()
-    items = resp.json().get("features", [])
-    print(f"  Found {len(items)} items (latest page)", flush=True)
+    with _retry_session() as session:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+        items = resp.json().get("features", [])
+    logger.info("  Found %d items (latest page)", len(items))
 
     if since:
         items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
-        print(f"  {len(items)} items updated since last run", flush=True)
+        logger.info("  %d items updated since last run", len(items))
         if not items:
-            print("  Nothing changed — skipping", flush=True)
+            logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
     binary_assets = []
@@ -380,7 +418,7 @@ def download_grib2(
                 updated = asset_info.get("updated") or item_updated
                 binary_assets.append((href, clean.split("/")[-1], updated))
 
-    print(f"  {len(binary_assets)} binary files to download", flush=True)
+    logger.info("  %d binary files to download", len(binary_assets))
 
     to_fetch = [
         (href, out_dir / filename)
@@ -395,21 +433,30 @@ def download_grib2(
 
     total = len(to_fetch)
     downloaded = 0
+    failed = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_do_binary, href, filepath) for href, filepath in to_fetch]
-        for i, fut in enumerate(as_completed(futures), 1):
-            filename = fut.result()
+        future_to_href = {pool.submit(_do_binary, href, filepath): href for href, filepath in to_fetch}
+        for i, fut in enumerate(as_completed(future_to_href), 1):
+            try:
+                filename = fut.result()
+            except Exception as exc:
+                failed += 1
+                logger.warning("  [%d/%d] FAILED: %s — %s", i, total, future_to_href[fut], exc)
+                continue
             downloaded += 1
             filenames.append(filename)
-            print(f"  [{i}/{total}] Downloaded: {filename}", flush=True)
+            logger.info("  [%d/%d] Downloaded: %s", i, total, filename)
 
-    print(f"\n  Done — {downloaded} binary files downloaded", flush=True)
+    if failed:
+        logger.warning("  %d binary file(s) failed to download", failed)
+    logger.info("  Done — %d binary files downloaded", downloaded)
 
     return DownloadResult(
         total_assets=len(binary_assets),
         downloaded=downloaded,
         skipped=len(binary_assets) - total,
+        failed=failed,
         filenames=filenames,
     )
 
@@ -435,19 +482,19 @@ def download_netcdf(
     out_dir = output_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"NetCDF Collection: {collection_id}", flush=True)
-    print(f"Output dir: {out_dir}", flush=True)
-    print(f"{'=' * 60}", flush=True)
+    logger.info("%s", "=" * 60)
+    logger.info("NetCDF Collection: %s", collection_id)
+    logger.info("Output dir: %s", out_dir)
+    logger.info("%s", "=" * 60)
 
     items = get_collection_items(collection_id, require_csv=False)
-    print(f"  Found {len(items)} items", flush=True)
+    logger.info("  Found %d items", len(items))
 
     if since:
         items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
-        print(f"  {len(items)} items updated since last run", flush=True)
+        logger.info("  %d items updated since last run", len(items))
         if not items:
-            print("  Nothing changed — skipping", flush=True)
+            logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
     total_assets = 0
@@ -470,21 +517,32 @@ def download_netcdf(
         return _download_binary(get_session(), href, filepath)
 
     downloaded = 0
+    failed = 0
     filenames: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_do_binary, href, filepath) for href, filepath in targets]
-        for fut in as_completed(futures):
-            filename = fut.result()
+        future_to_href = {pool.submit(_do_binary, href, filepath): href for href, filepath in targets}
+        for fut in as_completed(future_to_href):
+            try:
+                filename = fut.result()
+            except Exception as exc:
+                failed += 1
+                logger.warning("  FAILED: %s — %s", future_to_href[fut], exc)
+                continue
             downloaded += 1
             filenames.append(filename)
-            print(f"  Downloaded: {filename}", flush=True)
+            logger.info("  Downloaded: %s", filename)
 
-    print(f"  Done — {downloaded} files downloaded", flush=True)
+    if failed:
+        logger.warning("  %d file(s) failed to download", failed)
+    logger.info("  Done — %d files downloaded", downloaded)
 
+    # ``skipped`` is the count of pre-existing files left untouched (total assets
+    # minus the ones we queued); failures are tracked separately in ``failed``.
     return DownloadResult(
         total_assets=total_assets,
         downloaded=downloaded,
-        skipped=total_assets - downloaded,
+        skipped=total_assets - len(targets),
+        failed=failed,
         filenames=filenames,
     )
 
@@ -499,17 +557,18 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
     filepath = out_dir / "normwerte.zip"
 
     if filepath.exists() and not force:
-        print("\n  Climate normals ZIP already downloaded — skipping", flush=True)
+        logger.info("  Climate normals ZIP already downloaded — skipping")
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
-    print(f"\n{'=' * 60}", flush=True)
-    print("Climate normals (C6): downloading from opendata.swiss", flush=True)
-    print(f"{'=' * 60}", flush=True)
+    logger.info("%s", "=" * 60)
+    logger.info("Climate normals (C6): downloading from opendata.swiss")
+    logger.info("%s", "=" * 60)
 
-    resp = _retry_session().get(CLIMATE_NORMALS_ZIP_URL, timeout=120)
-    resp.raise_for_status()
+    with _retry_session() as session:
+        resp = session.get(CLIMATE_NORMALS_ZIP_URL, timeout=120)
+        resp.raise_for_status()
     filepath.write_bytes(resp.content)
-    print(f"  Downloaded: normwerte.zip ({len(resp.content) / 1024:.0f} KB)", flush=True)
+    logger.info("  Downloaded: normwerte.zip (%.0f KB)", len(resp.content) / 1024)
 
     with zipfile.ZipFile(filepath, "r") as zf:
         resolved_out_dir = out_dir.resolve()
@@ -518,7 +577,7 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
             if not str(target).startswith(str(resolved_out_dir) + "/"):
                 raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
         zf.extractall(out_dir)
-        print(f"  Extracted {len(zf.namelist())} files", flush=True)
+        logger.info("  Extracted %d files", len(zf.namelist()))
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["normwerte.zip"])
 
@@ -543,7 +602,7 @@ def download_climate_scenarios_indoor(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not force and any(out_dir.glob("*.csv")):
-        print(f"\n  {collection_key} already extracted — skipping", flush=True)
+        logger.info("  %s already extracted — skipping", collection_key)
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     items = get_collection_items(collection_id, require_csv=False, verbose=False)
@@ -557,19 +616,20 @@ def download_climate_scenarios_indoor(
         None,
     )
     if not zip_href:
-        print(f"  No .zip asset found for {collection_key}", flush=True)
+        logger.warning("  No .zip asset found for %s", collection_key)
         return DownloadResult()
 
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"Indoor scenarios ({collection_id}): downloading ZIP", flush=True)
-    print(f"{'=' * 60}", flush=True)
+    logger.info("%s", "=" * 60)
+    logger.info("Indoor scenarios (%s): downloading ZIP", collection_id)
+    logger.info("%s", "=" * 60)
 
     validate_download_href(zip_href)
     zip_path = out_dir / zip_href.split("?")[0].split("/")[-1]
-    resp = _retry_session().get(zip_href, timeout=300)
-    resp.raise_for_status()
+    with _retry_session() as session:
+        resp = session.get(zip_href, timeout=300)
+        resp.raise_for_status()
     zip_path.write_bytes(resp.content)
-    print(f"  Downloaded: {zip_path.name} ({len(resp.content) / 1e6:.1f} MB)", flush=True)
+    logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, len(resp.content) / 1e6)
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         resolved_out_dir = out_dir.resolve()
@@ -578,6 +638,6 @@ def download_climate_scenarios_indoor(
             if not str(target).startswith(str(resolved_out_dir) + "/"):
                 raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
         zf.extractall(out_dir)
-        print(f"  Extracted {len(zf.namelist())} files", flush=True)
+        logger.info("  Extracted %d files", len(zf.namelist()))
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=[zip_path.name])
