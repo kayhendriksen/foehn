@@ -32,6 +32,7 @@ avoid loading the whole set into memory) is future work.
 
 from __future__ import annotations
 
+import logging
 import re
 import warnings
 from pathlib import Path
@@ -40,6 +41,8 @@ from typing import TYPE_CHECKING
 from foehn._urls import validate_download_href
 from foehn.collections import COLLECTION_META, COLLECTIONS
 from foehn.stac import get_collection_items, get_collection_metadata
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -212,14 +215,14 @@ def _ensure_grid_files(
     _raise_if_too_many(collection_key, match, [h.split("?")[0].split("/")[-1] for h in hrefs], max_files)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    session = _retry_session()
     paths: list[Path] = []
-    for href in hrefs:
-        validate_download_href(href)
-        filepath = out_dir / href.split("?")[0].split("/")[-1]
-        if not filepath.exists():
-            _download_binary(session, href, filepath)
-        paths.append(filepath)
+    with _retry_session() as session:
+        for href in hrefs:
+            validate_download_href(href)
+            filepath = out_dir / href.split("?")[0].split("/")[-1]
+            if not filepath.exists():
+                _download_binary(session, href, filepath)
+            paths.append(filepath)
     return sorted(paths)
 
 
@@ -281,8 +284,16 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
 
     try:
         return _do(decode_times=True)
-    except Exception:
-        return _do(decode_times=False)
+    except (ValueError, OverflowError) as exc:
+        # Non-CF time units (e.g. "years since 1991-01-01") surface as a ValueError
+        # from the CF time decoder; an out-of-range reference can raise OverflowError.
+        # Narrow to those so an unrelated read error isn't masked behind the retry,
+        # and chain the original cause if the fallback also fails.
+        logger.debug("CF time decoding failed (%s); retrying with decode_times=False", exc)
+        try:
+            return _do(decode_times=False)
+        except Exception as retry_exc:
+            raise retry_exc from exc
 
 
 def _attr(group, key, default=None):
@@ -395,7 +406,8 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / href.split("?")[0].split("/")[-1]
     if not path.exists():
-        _download_binary(_retry_session(), href, path)
+        with _retry_session() as session:
+            _download_binary(session, href, path)
     return path
 
 

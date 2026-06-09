@@ -490,3 +490,21 @@ PREAMBLE_CSV_COLLECTIONS = {
 # Contains 112 TXT files (tab-separated, Latin-1 encoding) with monthly/yearly
 # station normals for periods 1961-1990 and 1991-2020. Converted to Parquet.
 CLIMATE_NORMALS_ZIP_URL = "https://data.geo.admin.ch/ch.meteoschweiz.klima/normwerte/normwerte.zip"
+
+
+# Time-slice tokens that appear as the trailing filename segment of standard
+# CSV assets (ogd-{key}_{station}_{granularity}_{timeslice}.csv).
+TIME_SLICES = frozenset({"historical", "recent", "now"})
+
+
+def time_slice_from_filename(filename: str) -> str | None:
+    """Return the time slice of a standard CSV asset, or None if it has none.
+
+    Detects the time slice from the trailing ``_``-separated filename segment
+    (e.g. ``ogd-smn_ber_d_recent.csv`` → ``"recent"``) rather than matching the
+    token anywhere in the path, so a coincidental substring (notably the bare
+    ``"now"``) elsewhere in the URL can't be misread as a time slice.
+    """
+    stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    last = stem.rsplit("_", 1)[-1]
+    return last if last in TIME_SLICES else None

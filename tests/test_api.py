@@ -57,14 +57,24 @@ def test_download_unknown_dataset_raises():
         download("nonexistent")
 
 
-def test_download_grib2_dataset_raises():
-    with pytest.raises(ValueError, match="binary/grid dataset"):
-        download("forecast_icon_ch1")
+@patch("foehn.api.download_grib2")
+def test_download_grib2_dataset_routes_to_handler(mock_dl, tmp_path):
+    from foehn.client import DownloadResult
+
+    mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
+    res = download("forecast_icon_ch1", data_dir=tmp_path)
+    mock_dl.assert_called_once_with("forecast_icon_ch1", tmp_path / "bronze", since=None, workers=8)
+    assert res.downloaded == 1
 
 
-def test_download_netcdf_dataset_raises():
-    with pytest.raises(ValueError, match="binary/grid dataset"):
-        download("surface_derived_grid")
+@patch("foehn.api.download_netcdf")
+def test_download_netcdf_dataset_routes_to_handler(mock_dl, tmp_path):
+    from foehn.client import DownloadResult
+
+    mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
+    res = download("surface_derived_grid", data_dir=tmp_path)
+    mock_dl.assert_called_once_with("surface_derived_grid", tmp_path / "bronze", since=None, workers=8)
+    assert res.downloaded == 1
 
 
 _INDOOR_CSV = "time.yy,time.mm,time.dd,time.hh,tre200h0,ure200h0\n2035,1,1,0,0.3,94.5\n2035,1,1,1,-0.2,94.6\n"
@@ -116,6 +126,7 @@ def test_load_indoor_returns_dataframe(mock_session, mock_items):
     zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(zip_bytes))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("climate_scenarios_indoor")
@@ -134,6 +145,7 @@ def test_load_indoor_station_filter(mock_session, mock_items):
     zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(zip_bytes))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("climate_scenarios_indoor", station="ABO")
@@ -168,6 +180,7 @@ def test_load_climate_scenarios_returns_dataframe(mock_session, mock_items):
     mock_items.return_value = [{"id": "abe", "assets": {"d": {"href": href}}}]
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(_CS_CSV))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("climate_scenarios")
@@ -192,6 +205,7 @@ def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, m
     mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("forecast_local")
@@ -308,6 +322,7 @@ def test_load_returns_dataframe(mock_session, mock_meta, mock_items):
     session = MagicMock()
     responses = [_mock_response(csv1), _mock_response(csv2)]
     session.get = MagicMock(side_effect=responses)
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn")
@@ -341,6 +356,7 @@ def test_load_with_metadata_types(mock_session, mock_meta, mock_items):
             _mock_response(data_csv),
         ]
     )
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn")
@@ -369,6 +385,7 @@ def test_load_filters_time_slice(mock_session, mock_meta, mock_items):
 
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", time_slice=["recent"])
@@ -387,6 +404,7 @@ def test_load_no_csvs_raises(mock_session, mock_meta, mock_items):
     mock_items.return_value = [{"assets": {"data": {"href": "https://data.geo.admin.ch/smn/file_historical.csv"}}}]
 
     session = MagicMock()
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     with pytest.raises(ValueError, match="No CSV files found"):
@@ -419,6 +437,7 @@ def test_load_station_filter_single(mock_session, mock_meta, mock_items):
     csv_data = "station;temp\nBER;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", station="BER")
@@ -439,6 +458,7 @@ def test_load_station_filter_multiple(mock_session, mock_meta, mock_items):
     csv_data = "station;temp\nX;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", station=["BER", "ZUR"])
@@ -459,6 +479,7 @@ def test_load_frequency_filter(mock_session, mock_meta, mock_items):
     csv_data = "station;temp\nBER;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", station="BER", frequency="d")
@@ -479,6 +500,7 @@ def test_load_frequency_filter_multiple(mock_session, mock_meta, mock_items):
     csv_data = "station;temp\nBER;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", station="BER", frequency=["d", "h"])
@@ -499,6 +521,7 @@ def test_load_station_case_insensitive(mock_session, mock_meta, mock_items):
     csv_data = "station;temp\nBER;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", station="ber", frequency="d")
@@ -546,6 +569,7 @@ def test_parameters_returns_dataframe(mock_session, mock_meta):
     mock_meta.return_value = _stac_assets("params", "https://data.geo.admin.ch/smn/ogd-smn_meta_parameters.csv")
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(_PARAMS_CSV.encode("windows-1252")))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = parameters("smn")
@@ -563,6 +587,7 @@ def test_stations_returns_dataframe(mock_session, mock_meta):
     mock_meta.return_value = _stac_assets("stations", "https://data.geo.admin.ch/smn/ogd-smn_meta_stations.csv")
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(_STATIONS_CSV))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = stations("smn")
@@ -627,6 +652,7 @@ def test_inventory_returns_dataframe(mock_session, mock_meta):
     mock_meta.return_value = _stac_assets("inv", "https://data.geo.admin.ch/smn/ogd-smn_meta_datainventory.csv")
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(_INVENTORY_CSV))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = inventory("smn")
@@ -689,6 +715,7 @@ def _setup_filter_mocks(mock_session, mock_meta, mock_items):
     ]
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(_FILTER_CSV))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
 
@@ -756,6 +783,25 @@ def test_load_date_range_filter(mock_session, mock_meta, mock_items):
     _setup_filter_mocks(mock_session, mock_meta, mock_items)
     df = load("smn", station="BER", frequency="d", date_from="2025-06-01", date_to="2025-08-31")
     assert len(df) == 2
+
+
+def test_date_filter_on_date_typed_column_does_not_raise():
+    """date_from/date_to must work when reference_timestamp parsed as Date, not Datetime."""
+    from datetime import date
+
+    from foehn.api import _apply_post_filters
+
+    df = pl.DataFrame(
+        {
+            "station_abbr": ["BER", "BER", "BER"],
+            "reference_timestamp": [date(2025, 1, 1), date(2025, 6, 1), date(2025, 12, 1)],
+        }
+    )
+    assert df["reference_timestamp"].dtype == pl.Date  # guard: column really is Date-typed
+
+    out = _apply_post_filters(df, date_from="2025-03-01", date_to="2025-08-31")
+    assert len(out) == 1
+    assert out["reference_timestamp"][0] == date(2025, 6, 1)
 
 
 @patch("foehn.api.get_collection_items")
@@ -871,6 +917,7 @@ def test_load_workers_one_uses_serial_path(mock_session, mock_meta, mock_items):
     csv_data = "station;temp\nBER;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", station="BER", frequency="d", workers=1)
@@ -888,6 +935,7 @@ def test_load_concurrent_fetch_multiple_files(mock_session, mock_meta, mock_item
     csv_data = "station;temp\nX;20\n"
     session = MagicMock()
     session.get = MagicMock(return_value=_mock_response(csv_data))
+    session.__enter__.return_value = session
     mock_session.return_value = session
 
     df = load("smn", frequency="d", workers=4)

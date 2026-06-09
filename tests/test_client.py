@@ -48,6 +48,18 @@ def _stac_item(asset_url, updated="2026-01-01T00:00:00Z"):
     return {"id": "item-1", "assets": {"data": {"href": asset_url}}, "properties": {"updated": updated}}
 
 
+def _as_session_cm(mock_retry):
+    """Make a patched ``_retry_session`` mock behave like a real Session.
+
+    ``requests.Session.__enter__`` returns ``self``, so code using
+    ``with _retry_session() as s:`` calls ``s.get`` on the session itself. Wire
+    the mock's ``__enter__`` to return the session mock so ``.get`` assertions
+    work whether the call site uses the context manager or the session directly.
+    """
+    mock_retry.return_value.__enter__.return_value = mock_retry.return_value
+    return mock_retry.return_value.get
+
+
 # --- _thread_local_session ---
 
 
@@ -149,6 +161,26 @@ def test_download_collection_saves_csv(mock_retry, mock_items, tmp_path):
 
 @patch("foehn.client.get_collection_items")
 @patch("foehn.client._retry_session")
+def test_download_collection_detects_csv_with_query_string(mock_retry, mock_items, tmp_path):
+    # Regression: a CSV href carrying a query string (e.g. ?token=...) must not be
+    # skipped by the asset filter, which once gated on raw href.endswith(".csv").
+    mock_get = mock_retry.return_value.get
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv?token=abc123"
+    mock_items.return_value = [_stac_item(url)]
+    mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n")
+
+    result = download_collection("smn", tmp_path / "bronze")
+
+    # Detected, downloaded, and saved under the query-stripped filename.
+    assert (tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv").exists()
+    assert result.downloaded == 1
+    assert result.filenames == ["ogd-smn_tst_d_recent.csv"]
+    # The "recent" time slice is still parsed from the query-string URL.
+    assert mock_get.call_args[0][0] == url
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_re_encodes_to_utf8(mock_retry, mock_items, tmp_path):
     mock_get = mock_retry.return_value.get
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -227,6 +259,37 @@ def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
     assert result.filenames == []
 
 
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
+def test_download_collection_resilient_to_single_failure(mock_retry, mock_items, tmp_path):
+    """One failing asset must not abort the batch or discard the others' ETags."""
+    good = "https://data.geo.admin.ch/ogd-smn_aaa_d_recent.csv"
+    bad = "https://data.geo.admin.ch/ogd-smn_bbb_d_recent.csv"
+    mock_items.return_value = [
+        _stac_item(good),
+        {"id": "item-2", "assets": {"data": {"href": bad}}, "properties": {"updated": "2026-01-01T00:00:00Z"}},
+    ]
+
+    def fake_get(url, **kwargs):
+        if "bbb" in url:
+            raise requests.exceptions.ConnectionError("boom")
+        return _csv_response(b"station_abbr;value\nAAA;1.0\n", etag="etag-aaa")
+
+    mock_retry.return_value.get.side_effect = fake_get
+
+    result = download_collection("smn", tmp_path / "bronze")
+
+    # The good asset still downloaded; the bad one is counted, not raised.
+    assert result.downloaded == 1
+    assert result.failed == 1
+    assert result.filenames == ["ogd-smn_aaa_d_recent.csv"]
+    assert (tmp_path / "bronze" / "smn" / "ogd-smn_aaa_d_recent.csv").exists()
+    # ETags for the successful asset are persisted despite the sibling failure.
+    etags = load_etags(tmp_path)
+    assert etags.get(good) == "etag-aaa"
+    assert bad not in etags
+
+
 # --- download_metadata ---
 
 
@@ -268,7 +331,7 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
 
 @patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
-    mock_get = mock_retry.return_value.get
+    mock_get = _as_session_cm(mock_retry)
     zip_bytes = _make_zip({"sample.txt": b"data"})
     mock_get.return_value = _csv_response(content=zip_bytes)
 
@@ -292,7 +355,7 @@ def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
 
 @patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
-    mock_get = mock_retry.return_value.get
+    mock_get = _as_session_cm(mock_retry)
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "normwerte.zip").write_bytes(b"old")
@@ -311,7 +374,7 @@ def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
 
 @patch("foehn.client._retry_session")
 def test_download_grib2_saves_binary(mock_retry, tmp_path):
-    mock_get = mock_retry.return_value.get
+    mock_get = _as_session_cm(mock_retry)
     items_resp = MagicMock()
     items_resp.raise_for_status = MagicMock()
     items_resp.json.return_value = {
@@ -332,7 +395,7 @@ def test_download_grib2_saves_binary(mock_retry, tmp_path):
 
 @patch("foehn.client._retry_session")
 def test_download_grib2_skips_existing_file(mock_retry, tmp_path):
-    mock_get = mock_retry.return_value.get
+    mock_get = _as_session_cm(mock_retry)
     items_resp = MagicMock()
     items_resp.raise_for_status = MagicMock()
     items_resp.json.return_value = {
