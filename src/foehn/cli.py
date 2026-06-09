@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -139,18 +140,21 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     workers = args.workers
     failures = 0
+    download_failures = 0
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS:
-            download_grib2(ds, bronze_dir, since=since, workers=workers)
+            download_failures += download_grib2(ds, bronze_dir, since=since, workers=workers).failed
         elif ds in NETCDF_COLLECTIONS:
-            download_netcdf(ds, bronze_dir, since=since, workers=workers)
+            download_failures += download_netcdf(ds, bronze_dir, since=since, workers=workers).failed
         elif ds in CSV_ZIP_COLLECTIONS:
-            download_climate_scenarios_indoor(bronze_dir, ds, force=full_refresh)
+            download_failures += download_climate_scenarios_indoor(bronze_dir, ds, force=full_refresh).failed
             if not args.no_parquet:
                 failures += convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
         else:
-            download_metadata(ds, bronze_dir, workers=workers)
-            download_collection(ds, bronze_dir, data_types=time_slices, since=since, workers=workers)
+            download_failures += download_metadata(ds, bronze_dir, workers=workers).failed
+            download_failures += download_collection(
+                ds, bronze_dir, data_types=time_slices, since=since, workers=workers
+            ).failed
             if not args.no_parquet:
                 if ds in PREAMBLE_CSV_COLLECTIONS:
                     failures += convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
@@ -163,13 +167,19 @@ def cmd_download(args: argparse.Namespace) -> None:
         if not args.no_parquet:
             failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
-    if failures == 0:
+    if failures == 0 and download_failures == 0:
         save_last_run(data_dir)
     else:
-        # Don't advance the incremental cursor if any conversion failed —
-        # otherwise the next run will skip the broken inputs as "already seen".
+        # Don't advance the incremental cursor if anything failed — otherwise the
+        # next run filters out the still-broken items as "already seen". A failed
+        # asset within an unchanged item would never be retried.
+        reasons = []
+        if download_failures:
+            reasons.append(f"{download_failures} download failure(s)")
+        if failures:
+            reasons.append(f"{failures} conversion failure(s)")
         print(
-            f"\n{failures} conversion failure(s) — not advancing _last_run.json. Re-run after fixing.",
+            f"\n{', '.join(reasons)} — not advancing _last_run.json. Re-run after fixing.",
             file=sys.stderr,
             flush=True,
         )
@@ -178,7 +188,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     if not args.no_parquet:
         print(f"Parquet files saved to: {parquet_dir}")
 
-    if failures:
+    if failures or download_failures:
         sys.exit(1)
 
 
@@ -304,6 +314,10 @@ def cmd_load(args: argparse.Namespace) -> None:
         kwargs["drop_null"] = args.drop_null
     if args.sort:
         kwargs["sort"] = args.sort
+    if args.limit is not None:
+        kwargs["limit"] = args.limit
+    if args.workers is not None:
+        kwargs["workers"] = args.workers
 
     df = load(args.dataset, **kwargs)
 
@@ -312,7 +326,39 @@ def cmd_load(args: argparse.Namespace) -> None:
     print(f"\n[{df.shape[0]} rows x {df.shape[1]} columns]")
 
 
+def _configure_logging() -> None:
+    """Route the foehn library's logger to stdout for CLI use.
+
+    The library logs through ``logging.getLogger("foehn.*")`` and ships no
+    handler, so it is silent when imported. The CLI attaches a single stdout
+    handler with a bare message format, preserving the previous ``print()`` look.
+
+    Idempotent across repeated/embedded invocations: rather than bailing out
+    when *any* handler exists, we look up our own tagged handler and refresh its
+    stream/formatter (the previous one may point at a stale ``sys.stdout``).
+    Level and propagation are always re-asserted.
+    """
+    foehn_logger = logging.getLogger("foehn")
+    handler = next(
+        (h for h in foehn_logger.handlers if getattr(h, "_foehn_cli_handler", False)),
+        None,
+    )
+    if handler is None:
+        handler = logging.StreamHandler(sys.stdout)
+        handler._foehn_cli_handler = True  # type: ignore[attr-defined]
+        foehn_logger.addHandler(handler)
+    else:
+        # Repoint at the current stdout without setStream(), which would first
+        # flush the old stream — fatal if a prior invocation's stream is closed.
+        handler.stream = sys.stdout
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    foehn_logger.setLevel(logging.INFO)
+    foehn_logger.propagate = False
+
+
 def main():
+    _configure_logging()
+
     parser = argparse.ArgumentParser(
         prog="foehn",
         description="Download MeteoSwiss Open Data and convert to Parquet.",
@@ -369,7 +415,9 @@ def main():
     sub_load.add_argument("--columns", nargs="+", help="Only return these columns")
     sub_load.add_argument("--drop-null", help="Drop rows where this column is null")
     sub_load.add_argument("--sort", choices=["asc", "desc"], help="Sort by timestamp")
-    sub_load.add_argument("-n", type=int, default=None, help="Number of rows to show (default: 20)")
+    sub_load.add_argument("--limit", type=int, default=None, help="Cap the loaded DataFrame to N rows (after sort)")
+    sub_load.add_argument("--workers", type=int, default=None, help="Concurrent CSV downloads (default: 8)")
+    sub_load.add_argument("-n", type=int, default=None, help="Number of rows to print in the preview (default: 20)")
     sub_load.set_defaults(func=cmd_load)
 
     # --- foehn open ---

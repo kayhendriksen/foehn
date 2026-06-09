@@ -14,9 +14,23 @@ from foehn.convert import (
     convert_climate_scenarios_indoor_to_parquet,
     convert_climate_scenarios_to_parquet,
     convert_to_parquet,
+    decode_meteoswiss_csv,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
 )
+
+
+def test_decode_meteoswiss_csv_handles_utf8_and_windows1252():
+    assert decode_meteoswiss_csv("café".encode()) == "café"
+    assert decode_meteoswiss_csv("café".encode("utf-8-sig")) == "café"  # BOM stripped
+    assert decode_meteoswiss_csv(b"caf\xe9") == "café"  # Windows-1252 fallback
+
+
+def test_parse_climate_scenarios_csv_rejects_short_filename():
+    content = b"DATE;MODEL_A\n0001-01-01;1.0\n"
+    with pytest.raises(ValueError, match="Unexpected climate-scenario filename"):
+        parse_climate_scenarios_csv(content, "weird.csv")
+
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -184,8 +198,8 @@ def test_parse_csv_bytes_conversion_error_without_column_match():
 # --- convert_to_parquet error handling ---
 
 
-def test_convert_to_parquet_handles_bad_csv(tmp_path, capsys):
-    """A corrupt CSV should print FAIL but not crash the whole conversion."""
+def test_convert_to_parquet_handles_bad_csv(tmp_path):
+    """A corrupt CSV should be reported as a failure, not crash the whole conversion."""
     bronze_dir = tmp_path / "bronze"
     csv_dir = bronze_dir / "smn"
     csv_dir.mkdir(parents=True)
@@ -193,10 +207,10 @@ def test_convert_to_parquet_handles_bad_csv(tmp_path, capsys):
     (csv_dir / "ogd-smn_zur_d_recent.csv").write_bytes(b"")
 
     parquet_dir = tmp_path / "parquet"
-    convert_to_parquet("smn", bronze_dir, parquet_dir)
+    failed = convert_to_parquet("smn", bronze_dir, parquet_dir)
 
-    out = capsys.readouterr().out
-    assert "FAIL" in out
+    # The bad group is counted as a failure; the call returns rather than raising.
+    assert failed >= 1
 
 
 # --- convert_climate_normals edge cases ---
@@ -225,18 +239,17 @@ def test_convert_climate_normals_skips_up_to_date(climate_normals_bronze_dir, tm
     assert out_file.stat().st_mtime == mtime_before
 
 
-def test_convert_climate_normals_handles_bad_file(tmp_path, capsys):
-    """A corrupt TXT should print FAIL but not crash."""
+def test_convert_climate_normals_handles_bad_file(tmp_path):
+    """A corrupt TXT should be reported as a failure, not crash."""
     bronze_dir = tmp_path
     cn_dir = bronze_dir / "climate_normals"
     cn_dir.mkdir()
     (cn_dir / "bad.txt").write_bytes(b"\x00\xff")
 
     parquet_dir = tmp_path / "parquet"
-    convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+    failed = convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
-    out = capsys.readouterr().out
-    assert "FAIL" in out
+    assert failed >= 1
 
 
 # --- indoor climate scenarios (zipped multi-CSV) ---

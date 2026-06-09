@@ -35,6 +35,16 @@ def _start_mocks():
     mocks["convert_climate_normals_to_parquet"].return_value = 0
     mocks["convert_climate_scenarios_indoor_to_parquet"].return_value = 0
     mocks["convert_climate_scenarios_to_parquet"].return_value = 0
+    # cmd_download sums result.failed from each download call to gate _last_run;
+    # give the download mocks a clean (0-failure) DownloadResult by default.
+    for name in (
+        "download_collection",
+        "download_metadata",
+        "download_grib2",
+        "download_netcdf",
+        "download_climate_scenarios_indoor",
+    ):
+        mocks[name].return_value.failed = 0
     return mocks, patchers
 
 
@@ -273,6 +283,23 @@ def test_save_last_run_skipped_on_convert_failure(tmp_path, capsys):
     assert "not advancing _last_run.json" in err
 
 
+def test_save_last_run_skipped_on_download_failure(tmp_path, capsys):
+    """If download_collection reports failures, _last_run.json must NOT be saved."""
+    mocks, patchers = _start_mocks()
+    mocks["download_collection"].return_value.failed = 1
+    try:
+        with patch("sys.argv", ["foehn", "download", "--data-dir", str(tmp_path)]), pytest.raises(SystemExit) as exc:
+            main()
+    finally:
+        for p in patchers:
+            p.stop()
+
+    assert exc.value.code == 1
+    mocks["save_last_run"].assert_not_called()
+    err = capsys.readouterr().err
+    assert "not advancing _last_run.json" in err
+
+
 def test_save_last_run_called_on_clean_run(tmp_path):
     """When all conversions return 0 failures, _last_run.json is saved as before."""
     mocks = _run("download", [], tmp_path)
@@ -366,6 +393,15 @@ def test_load_with_post_filters():
         drop_null="temp",
         sort="desc",
     )
+
+
+def test_load_forwards_limit_and_workers():
+    """--limit and --workers must reach foehn.load (not just bound the preview)."""
+    fake_df = pl.DataFrame({"a": [1]})
+    argv = ["foehn", "load", "smn", "--limit", "5", "--workers", "3"]
+    with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
+        main()
+    mock_load.assert_called_once_with("smn", limit=5, workers=3)
 
 
 # --- metadata subcommand ---

@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
 from pathlib import Path
 
 import polars as pl
 
+logger = logging.getLogger(__name__)
+
 _COL_RE = re.compile(r"at column '([^']+)'")
+
+
+def decode_meteoswiss_csv(content: bytes) -> str:
+    """Decode MeteoSwiss CSV bytes to text.
+
+    MeteoSwiss CSVs are usually UTF-8 (often with a BOM) but some legacy files
+    are Windows-1252. Try UTF-8 (BOM-aware) first, falling back to Windows-1252.
+    """
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return content.decode("windows-1252")
+
 
 _DTYPE_MAP: dict[str, pl.DataType] = {
     "float": pl.Float64,
@@ -184,7 +200,7 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
             group_key = (parts[1],) if len(parts) > 1 else ()  # (frequency,)
         groups.setdefault(group_key, []).append(csv_path)
 
-    print(f"Converting {collection_key} to Parquet:", flush=True)
+    logger.info("Converting %s to Parquet:", collection_key)
     converted = 0
     skipped = 0
     failed = 0
@@ -202,8 +218,6 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
             if all(f.stat().st_mtime <= parquet_mtime for f in files):
                 skipped += 1
                 continue
-
-        print(f"  {out_name} ({len(files)} files)...", end="", flush=True)
 
         # Stay streaming the whole way: on dtype-drift errors (Int inferred from
         # the first N rows but a later row carries a decimal), parse the column
@@ -244,17 +258,14 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
             converted += 1
             if recovered:
                 fixed = ", ".join(f"{c}→float" for c in recovered)
-                print(f" OK ({fixed})", flush=True)
+                logger.info("  %s (%d files)... OK (%s)", out_name, len(files), fixed)
             else:
-                print(" OK", flush=True)
+                logger.info("  %s (%d files)... OK", out_name, len(files))
         except Exception as e:
             failed += 1
-            print(f" FAIL: {e}", flush=True)
+            logger.warning("  %s (%d files)... FAIL: %s", out_name, len(files), e)
 
-    print(
-        f"  Done: {converted} converted, {skipped} skipped (up-to-date), {failed} failed",
-        flush=True,
-    )
+    logger.info("  Done: %d converted, %d skipped (up-to-date), %d failed", converted, skipped, failed)
     return failed
 
 
@@ -311,17 +322,17 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
     if out_path.exists():
         out_mtime = out_path.stat().st_mtime
         if all(f.stat().st_mtime <= out_mtime for f in csv_files):
-            print("Converting climate_scenarios_indoor to Parquet:\n  up-to-date — skipping", flush=True)
+            logger.info("Converting climate_scenarios_indoor to Parquet: up-to-date — skipping")
             return 0
 
-    print(f"Converting climate_scenarios_indoor to Parquet ({len(csv_files)} files)...", flush=True)
+    logger.info("Converting climate_scenarios_indoor to Parquet (%d files)...", len(csv_files))
     frames: list[pl.LazyFrame] = []
     skipped = 0
     for f in csv_files:
         parsed = parse_indoor_filename(f.stem)
         if parsed is None:
             skipped += 1
-            print(f"  Skipping non-data file: {f.name}", flush=True)
+            logger.info("  Skipping non-data file: %s", f.name)
             continue
         station, period, scenario, variant = parsed
         lf = add_indoor_columns(
@@ -339,10 +350,10 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
     try:
         pl.concat(frames, how="diagonal_relaxed").sink_parquet(out_path, compression="zstd")
     except Exception as e:
-        print(f"  FAIL: {e}", flush=True)
+        logger.warning("  FAIL: %s", e)
         return 1
 
-    print(f"  Done: wrote {out_path.name} ({len(frames)} files, {skipped} non-data skipped)", flush=True)
+    logger.info("  Done: wrote %s (%d files, %d non-data skipped)", out_path.name, len(frames), skipped)
     return 0
 
 
@@ -373,6 +384,11 @@ def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataF
     stem = filename.rsplit("/", 1)[-1]
     stem = stem[:-4] if stem.endswith(".csv") else stem
     parts = stem.split("_")
+    if len(parts) < 3:
+        raise ValueError(
+            f"Unexpected climate-scenario filename {filename!r}: expected "
+            "'..._{station}_{variable}_{gwl}', cannot extract station/variable/gwl."
+        )
     station, variable, gwl = parts[-3], parts[-2], parts[-1]
 
     df = df.with_columns(
@@ -398,17 +414,17 @@ def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) ->
     if out_path.exists():
         out_mtime = out_path.stat().st_mtime
         if all(f.stat().st_mtime <= out_mtime for f in csv_files):
-            print("Converting climate_scenarios to Parquet:\n  up-to-date — skipping", flush=True)
+            logger.info("Converting climate_scenarios to Parquet: up-to-date — skipping")
             return 0
 
     def _safe_parse(path: Path) -> pl.DataFrame | None:
         try:
             return parse_climate_scenarios_csv(path.read_bytes(), path.name)
         except Exception as e:
-            print(f"  FAIL {path.name}: {e}", flush=True)
+            logger.warning("  FAIL %s: %s", path.name, e)
             return None
 
-    print(f"Converting climate_scenarios to Parquet ({len(csv_files)} files)...", flush=True)
+    logger.info("Converting climate_scenarios to Parquet (%d files)...", len(csv_files))
     parsed = [_safe_parse(f) for f in csv_files]
     frames = [df for df in parsed if df is not None]
     failed = sum(1 for df in parsed if df is None)
@@ -419,10 +435,10 @@ def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) ->
     try:
         pl.concat(frames, how="diagonal_relaxed").write_parquet(out_path, compression="zstd")
     except Exception as e:
-        print(f"  FAIL: {e}", flush=True)
+        logger.warning("  FAIL: %s", e)
         return failed + 1
 
-    print(f"  Done: wrote {out_path.name} ({len(frames)} files)", flush=True)
+    logger.info("  Done: wrote %s (%d files)", out_path.name, len(frames))
     return failed
 
 
@@ -440,7 +456,7 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> i
     if not txt_files:
         return 0
 
-    print("Converting climate_normals to Parquet:", flush=True)
+    logger.info("Converting climate_normals to Parquet:")
     converted = 0
     skipped = 0
     failed = 0
@@ -452,7 +468,6 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> i
             skipped += 1
             continue
 
-        print(f"  [{i}/{total}] {txt_path.name}...", end="", flush=True)
         try:
             df = pl.read_csv(
                 txt_path,
@@ -465,13 +480,10 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> i
             )
             df.write_parquet(parquet_path, compression="snappy")
             converted += 1
-            print(" Converted", flush=True)
+            logger.info("  [%d/%d] %s... Converted", i, total, txt_path.name)
         except Exception as e:
             failed += 1
-            print(f" FAIL: {e}", flush=True)
+            logger.warning("  [%d/%d] %s... FAIL: %s", i, total, txt_path.name, e)
 
-    print(
-        f"  Done: {converted} converted, {skipped} skipped (up-to-date), {failed} failed",
-        flush=True,
-    )
+    logger.info("  Done: %d converted, %d skipped (up-to-date), %d failed", converted, skipped, failed)
     return failed
