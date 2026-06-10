@@ -26,6 +26,12 @@ def test_decode_meteoswiss_csv_handles_utf8_and_windows1252():
     assert decode_meteoswiss_csv(b"caf\xe9") == "café"  # Windows-1252 fallback
 
 
+def test_decode_meteoswiss_csv_is_total():
+    # 0x81 is invalid UTF-8 *and* unmapped in cp1252 — must replace, not raise.
+    decoded = decode_meteoswiss_csv(b"col\n\x81\n")
+    assert "col" in decoded
+
+
 def test_parse_climate_scenarios_csv_rejects_short_filename():
     content = b"DATE;MODEL_A\n0001-01-01;1.0\n"
     with pytest.raises(ValueError, match="Unexpected climate-scenario filename"):
@@ -192,6 +198,21 @@ def test_parse_csv_bytes_conversion_error_without_column_match():
     # Create CSV that will cause an error Polars can't recover from
     content = b""  # empty content
     with pytest.raises(pl.exceptions.NoDataError):
+        parse_csv_bytes(content)
+
+
+def test_parse_csv_bytes_unwidenable_column_raises_instead_of_looping():
+    """Regression: a column that fails even as Float64 must raise, not retry forever.
+
+    The value sits past the 100-row inference window, so the column is inferred
+    Int64, the parse fails, the Float64 override is applied — and fails again.
+    Without the already-Float64 guard this re-parsed the same bytes infinitely.
+    """
+    rows = ["station_abbr;val"] + [f"BER;{i}" for i in range(150)]
+    rows[120] = "BER;abc"
+    content = "\n".join(rows).encode()
+
+    with pytest.raises(pl.exceptions.ComputeError):
         parse_csv_bytes(content)
 
 

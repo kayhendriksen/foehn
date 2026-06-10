@@ -217,6 +217,24 @@ def test_apply_column_comments_no_metadata(tmp_path):
     spark.sql.assert_not_called()
 
 
+def test_apply_column_comments_escapes_backslashes_and_quotes(tmp_path):
+    """A description ending in ``\\'`` must not close the SQL string literal."""
+    (tmp_path / "x_meta_parameters.csv").write_text(
+        "parameter_shortname;parameter_description_en;parameter_unit\ntre200d0;it's 5\\;°C\n",
+        encoding="utf-8",
+    )
+    spark = MagicMock()
+    field = MagicMock()
+    field.name = "tre200d0"
+    spark.table.return_value.schema.fields = [field]
+
+    _apply_column_comments(spark, "`cat`.`sch`.`tbl`", tmp_path)
+
+    sql_calls = [c.args[0] for c in spark.sql.call_args_list]
+    # Backslash doubled first, then the quote escaped: it's 5\ [°C] → it\'s 5\\ [°C]
+    assert any("COMMENT 'it\\'s 5\\\\ [°C]'" in s for s in sql_calls)
+
+
 # ── _ingest_collection ───────────────────────────────────────────────────────
 
 

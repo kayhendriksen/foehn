@@ -107,8 +107,12 @@ def test_collection_meta_matches_live_stac_granularities():
         "pollen": (["h", "d", "y"], ["historical", "recent"]),
         "nbcn": (["d", "m", "y"], ["historical", "recent"]),
         "nbcn_precip": (["m", "y"], []),
-        "climate_scenarios": (["d"], []),
-        "forecast_local": (["h", "d"], []),
+        # NO_GRANULARITY/CSV_ZIP collections advertise no frequencies: the field
+        # doubles as the valid values for load()'s frequency filter, which these
+        # datasets don't support (granularity lives in the description instead).
+        "climate_scenarios": ([], []),
+        "forecast_local": ([], []),
+        "climate_scenarios_indoor": ([], []),
     }
     for key, (frequencies, time_slices) in expected.items():
         assert COLLECTION_META[key]["frequencies"] == frequencies

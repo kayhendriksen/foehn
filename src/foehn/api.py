@@ -12,6 +12,7 @@ from foehn._urls import validate_download_href
 from foehn.client import (
     DEFAULT_WORKERS,
     DownloadResult,
+    _check_zip_size,
     _retry_session,
     download_climate_scenarios_indoor,
     download_collection,
@@ -74,6 +75,7 @@ def download(
     time_slice: list[str] | None = None,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
+    force: bool = False,
 ) -> DownloadResult:
     """Download a single dataset.
 
@@ -87,6 +89,10 @@ def download(
             to read the last timestamp and ``save_last_run(data_dir)`` after
             a successful run.
         workers: Concurrent HTTP downloads (default 8).
+        force: Re-download even when local files look up to date. Currently
+            only affects ZIP-shipped datasets (e.g. climate_scenarios_indoor),
+            which otherwise skip when already extracted; other formats refresh
+            via ``since``/ETags.
 
     Returns:
         DownloadResult summarising the download. Use ``result.downloaded > 0``
@@ -108,7 +114,7 @@ def download(
         return download_netcdf(dataset, bronze_dir, since=since, workers=workers)
 
     if dataset in CSV_ZIP_COLLECTIONS:
-        return download_climate_scenarios_indoor(bronze_dir, dataset)
+        return download_climate_scenarios_indoor(bronze_dir, dataset, force=force)
 
     meta = download_metadata(dataset, bronze_dir, workers=workers)
     coll = download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers)
@@ -337,6 +343,8 @@ def _load_indoor(
 
     frames: list[pl.DataFrame] = []
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        # Everything below is parsed in memory — refuse a decompression bomb.
+        _check_zip_size(zf, zip_href.split("/")[-1])
         for name in zf.namelist():
             if not name.endswith(".csv"):
                 continue
