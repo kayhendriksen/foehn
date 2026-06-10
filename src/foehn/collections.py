@@ -312,12 +312,15 @@ COLLECTION_META: dict[str, dict] = {
         "frequencies": [],
         "time_slices": [],
     },
+    # NOTE: collections whose filenames carry no granularity segment
+    # (NO_GRANULARITY/CSV_ZIP) advertise no frequencies — the ``frequency``
+    # filter is unsupported there, and this field doubles as its valid values.
     "climate_scenarios": {
         "category": "C",
         "subcategory": "C8",
-        "description": "Climate scenarios CH2025 local",
+        "description": "Climate scenarios CH2025 local (daily)",
         "format": "CSV",
-        "frequencies": ["d"],
+        "frequencies": [],
         "time_slices": [],
     },
     "climate_scenarios_grid": {
@@ -364,9 +367,9 @@ COLLECTION_META: dict[str, dict] = {
     "climate_scenarios_indoor": {
         "category": "C",
         "subcategory": "C",
-        "description": "Indoor climate scenarios",
+        "description": "Indoor climate scenarios (hourly)",
         "format": "CSV+ZIP",
-        "frequencies": ["h"],
+        "frequencies": [],
         "time_slices": [],
     },
     # ── D: Radar data ────────────────────────────────────────────────────────
@@ -406,9 +409,9 @@ COLLECTION_META: dict[str, dict] = {
     "forecast_local": {
         "category": "E",
         "subcategory": "E4",
-        "description": "Local point forecasts",
+        "description": "Local point forecasts (hourly + daily)",
         "format": "CSV",
-        "frequencies": ["h", "d"],
+        "frequencies": [],
         "time_slices": [],
     },
     "analysis_kenda_ch1": {

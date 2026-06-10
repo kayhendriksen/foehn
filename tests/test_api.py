@@ -96,8 +96,17 @@ def test_download_indoor_routes_to_handler(mock_dl, tmp_path):
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
     res = download("climate_scenarios_indoor", data_dir=tmp_path)
-    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor")
+    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor", force=False)
     assert res.downloaded == 1
+
+
+@patch("foehn.api.download_climate_scenarios_indoor")
+def test_download_indoor_passes_force(mock_dl, tmp_path):
+    from foehn.client import DownloadResult
+
+    mock_dl.return_value = DownloadResult()
+    download("climate_scenarios_indoor", data_dir=tmp_path, force=True)
+    assert mock_dl.call_args.kwargs["force"] is True
 
 
 @patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")

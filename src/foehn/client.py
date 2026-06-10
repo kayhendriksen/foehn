@@ -53,7 +53,7 @@ class DownloadResult:
 def _retry_session(
     retries: int = 3,
     backoff_factor: float = 1.0,
-    status_forcelist: tuple[int, ...] = (500, 502, 503, 504),
+    status_forcelist: tuple[int, ...] = (429, 500, 502, 503, 504),
     pool_maxsize: int = DEFAULT_WORKERS,
 ) -> requests.Session:
     """Return a requests session with automatic retry on transient errors."""
@@ -99,24 +99,42 @@ def _thread_local_session() -> Callable[[], requests.Session]:
 # --- State files (ETags + last-run timestamp) ---
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via a sibling temp file + os.replace so readers never see a torn write."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def load_etags(data_dir: Path) -> dict:
     path = data_dir / "_etags.json"
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read %s (%s) — treating as empty", path, exc)
     return {}
 
 
 def save_etags(data_dir: Path, etags: dict):
     path = data_dir / "_etags.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(etags, indent=2))
+    _atomic_write_text(path, json.dumps(etags, indent=2))
 
 
 def load_last_run(data_dir: Path) -> str | None:
     """Return ISO timestamp of last successful run, or None."""
     path = data_dir / "_last_run.json"
     if path.exists():
-        data = json.loads(path.read_text())
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read %s (%s) — treating as no previous run", path, exc)
+            return None
         return data.get("timestamp")
     return None
 
@@ -124,7 +142,7 @@ def load_last_run(data_dir: Path) -> str | None:
 def save_last_run(data_dir: Path):
     path = data_dir / "_last_run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
+    _atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
 
 
 # --- CSV downloads ---
@@ -149,7 +167,7 @@ def _download_csv(
     resp.raise_for_status()
     # MeteoSwiss CSVs are usually UTF-8 but some are Windows-1252; normalise to UTF-8.
     content = decode_meteoswiss_csv(resp.content)
-    filepath.write_text(content, encoding="utf-8")
+    _atomic_write_text(filepath, content)
     return ("downloaded", href, filename, resp.headers.get("ETag"))
 
 
@@ -207,9 +225,12 @@ def download_collection(
         items = items[:1]
         logger.info("  Using latest forecast: %s", items[0].get("id", "?"))
 
-    # Collect matching CSV assets
+    # Collect matching CSV assets. ``all_csv_hrefs`` is the full pre-filter set
+    # (every CSV in the listing, regardless of time slice) — the prune universe
+    # below, so ETags for slices outside this run's data_types are kept.
     skip_data_type_filter = collection_key in FORECAST_CSV_COLLECTIONS
     csv_assets = []
+    all_csv_hrefs: set[str] = set()
     for item in items:
         assets = item.get("assets", {})
         for asset_info in assets.values():
@@ -217,6 +238,7 @@ def download_collection(
             clean = href.split("?", 1)[0]
             if not clean.endswith(".csv"):
                 continue
+            all_csv_hrefs.add(href)
             if not skip_data_type_filter:
                 slice_ = time_slice_from_filename(clean)
                 if slice_ is not None and slice_ not in data_types:
@@ -262,6 +284,18 @@ def download_collection(
             downloaded += 1
             filenames.append(filename)
             logger.info("  [%d/%d] Downloaded: %s", i, total, filename)
+
+    # Prune ETags for assets that no longer exist upstream, so _etags.json
+    # doesn't grow forever (e.g. forecast runs get fresh filenames each cycle).
+    # Only on a clean full listing: with ``since`` the item list is partial, and
+    # after failures the universe may be incomplete.
+    if since is None and failed == 0:
+        prefix = f"/{collection_id}/"
+        stale = [k for k in etags if prefix in k and k not in all_csv_hrefs]
+        for k in stale:
+            del etags[k]
+        if stale:
+            logger.info("  Pruned %d stale ETag entries", len(stale))
 
     save_etags(output_dir.parent, etags)
     if skipped:
@@ -556,8 +590,10 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
     out_dir.mkdir(parents=True, exist_ok=True)
     filepath = out_dir / "normwerte.zip"
 
-    if filepath.exists() and not force:
-        logger.info("  Climate normals ZIP already downloaded — skipping")
+    # Skip on the *extraction output*, not the ZIP: a run that died between
+    # download and extract must not be mistaken for a completed one.
+    if not force and any(out_dir.glob("*.txt")):
+        logger.info("  Climate normals already downloaded and extracted — skipping")
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     logger.info("%s", "=" * 60)
@@ -565,10 +601,8 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
     logger.info("%s", "=" * 60)
 
     with _retry_session() as session:
-        resp = session.get(CLIMATE_NORMALS_ZIP_URL, timeout=120)
-        resp.raise_for_status()
-    filepath.write_bytes(resp.content)
-    logger.info("  Downloaded: normwerte.zip (%.0f KB)", len(resp.content) / 1024)
+        _download_binary(session, CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
+    logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)
 
     with zipfile.ZipFile(filepath, "r") as zf:
         resolved_out_dir = out_dir.resolve()
@@ -623,13 +657,10 @@ def download_climate_scenarios_indoor(
     logger.info("Indoor scenarios (%s): downloading ZIP", collection_id)
     logger.info("%s", "=" * 60)
 
-    validate_download_href(zip_href)
     zip_path = out_dir / zip_href.split("?")[0].split("/")[-1]
     with _retry_session() as session:
-        resp = session.get(zip_href, timeout=300)
-        resp.raise_for_status()
-    zip_path.write_bytes(resp.content)
-    logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, len(resp.content) / 1e6)
+        _download_binary(session, zip_href, zip_path, timeout=300)
+    logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         resolved_out_dir = out_dir.resolve()

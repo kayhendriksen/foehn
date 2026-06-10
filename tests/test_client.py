@@ -118,6 +118,17 @@ def test_save_etags_overwrites_existing(tmp_path):
     assert load_etags(tmp_path) == {"k": "new"}
 
 
+def test_load_etags_corrupt_file_returns_empty(tmp_path):
+    """A torn write must not brick subsequent runs — treat as empty state."""
+    (tmp_path / "_etags.json").write_text('{"truncated": ')
+    assert load_etags(tmp_path) == {}
+
+
+def test_load_last_run_corrupt_file_returns_none(tmp_path):
+    (tmp_path / "_last_run.json").write_text("not json")
+    assert load_last_run(tmp_path) is None
+
+
 def test_load_last_run_missing_file_returns_none(tmp_path):
     assert load_last_run(tmp_path) is None
 
@@ -245,6 +256,51 @@ def test_download_collection_skips_304(mock_retry, mock_items, tmp_path):
 
 @patch("foehn.client.get_collection_items")
 @patch("foehn.client._retry_session")
+def test_download_collection_prunes_stale_etags(mock_retry, mock_items, tmp_path):
+    """A clean full run drops ETags for assets gone upstream — scoped to this collection."""
+    mock_get = mock_retry.return_value.get
+    base = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/tst"
+    current = f"{base}/ogd-smn_tst_d_recent.csv"
+    historical = f"{base}/ogd-smn_tst_d_historical.csv"  # listed, filtered out by data_types
+    stale = f"{base}/ogd-smn_tst_d_now.csv"  # no longer listed upstream
+    other = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-nime/tst/ogd-nime_tst_d_recent.csv"
+    save_etags(tmp_path, {stale: '"gone"', historical: '"hist"', other: '"keep"'})
+
+    item = {
+        "id": "tst",
+        "assets": {"a": {"href": current}, "b": {"href": historical}},
+        "properties": {"updated": "2026-01-01T00:00:00Z"},
+    }
+    mock_items.return_value = [item]
+    mock_get.return_value = _csv_response(etag='"v1"')
+
+    download_collection("smn", tmp_path / "bronze", data_types=["recent"])
+
+    etags = load_etags(tmp_path)
+    assert stale not in etags  # gone upstream → pruned
+    assert etags[historical] == '"hist"'  # still listed (other slice) → kept
+    assert etags[other] == '"keep"'  # different collection → untouched
+    assert etags[current] == '"v1"'
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
+def test_download_collection_incremental_run_does_not_prune(mock_retry, mock_items, tmp_path):
+    """With ``since`` the item list is partial — never prune from it."""
+    mock_get = mock_retry.return_value.get
+    stale = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/tst/ogd-smn_tst_d_now.csv"
+    save_etags(tmp_path, {stale: '"keep"'})
+    url = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/tst/ogd-smn_tst_d_recent.csv"
+    mock_items.return_value = [_stac_item(url, updated="2026-02-01T00:00:00Z")]
+    mock_get.return_value = _csv_response(etag='"v1"')
+
+    download_collection("smn", tmp_path / "bronze", since="2026-01-01T00:00:00Z")
+
+    assert load_etags(tmp_path)[stale] == '"keep"'
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_since_filter(mock_retry, mock_items, tmp_path):
     """Items older than `since` should be skipped without any HTTP call."""
     mock_get = mock_retry.return_value.get
@@ -333,7 +389,7 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
 def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
     mock_get = _as_session_cm(mock_retry)
     zip_bytes = _make_zip({"sample.txt": b"data"})
-    mock_get.return_value = _csv_response(content=zip_bytes)
+    mock_get.return_value = _stream_response(chunks=(zip_bytes,))
 
     download_climate_normals_zip(tmp_path / "bronze")
 
@@ -342,11 +398,11 @@ def test_download_climate_normals_zip_extracts_files(mock_retry, tmp_path):
 
 
 @patch("foehn.client._retry_session")
-def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
+def test_download_climate_normals_zip_skips_if_extracted(mock_retry, tmp_path):
     mock_get = mock_retry.return_value.get
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
-    (out_dir / "normwerte.zip").write_bytes(b"existing")
+    (out_dir / "sample.txt").write_bytes(b"extracted")
 
     download_climate_normals_zip(tmp_path / "bronze")
 
@@ -354,14 +410,31 @@ def test_download_climate_normals_zip_skips_if_exists(mock_retry, tmp_path):
 
 
 @patch("foehn.client._retry_session")
+def test_download_climate_normals_zip_redownloads_if_not_extracted(mock_retry, tmp_path):
+    """A ZIP left by a run that died before extraction must not be mistaken for done."""
+    mock_get = _as_session_cm(mock_retry)
+    out_dir = tmp_path / "bronze" / "climate_normals"
+    out_dir.mkdir(parents=True)
+    (out_dir / "normwerte.zip").write_bytes(b"partial-or-unextracted")
+
+    zip_bytes = _make_zip({"sample.txt": b"data"})
+    mock_get.return_value = _stream_response(chunks=(zip_bytes,))
+
+    download_climate_normals_zip(tmp_path / "bronze")
+
+    mock_get.assert_called_once()
+    assert (out_dir / "sample.txt").exists()
+
+
+@patch("foehn.client._retry_session")
 def test_download_climate_normals_zip_force_redownloads(mock_retry, tmp_path):
     mock_get = _as_session_cm(mock_retry)
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
-    (out_dir / "normwerte.zip").write_bytes(b"old")
+    (out_dir / "old.txt").write_bytes(b"stale")
 
     zip_bytes = _make_zip({"new.txt": b"fresh"})
-    mock_get.return_value = _csv_response(content=zip_bytes)
+    mock_get.return_value = _stream_response(chunks=(zip_bytes,))
 
     download_climate_normals_zip(tmp_path / "bronze", force=True)
 

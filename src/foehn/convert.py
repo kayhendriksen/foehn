@@ -19,11 +19,13 @@ def decode_meteoswiss_csv(content: bytes) -> str:
 
     MeteoSwiss CSVs are usually UTF-8 (often with a BOM) but some legacy files
     are Windows-1252. Try UTF-8 (BOM-aware) first, falling back to Windows-1252.
+    The fallback replaces the five bytes cp1252 leaves unmapped (0x81, 0x8D,
+    0x8F, 0x90, 0x9D) rather than raising, so the decode is total.
     """
     try:
         return content.decode("utf-8-sig")
     except UnicodeDecodeError:
-        return content.decode("windows-1252")
+        return content.decode("windows-1252", errors="replace")
 
 
 _DTYPE_MAP: dict[str, pl.DataType] = {
@@ -117,7 +119,9 @@ def parse_csv_bytes(
         last_err = e
         while True:
             m = _COL_RE.search(str(last_err))
-            if not m:
+            # A column already forced to Float64 can't be widened further —
+            # bail out instead of retrying the same parse forever.
+            if not m or overrides.get(m.group(1)) == pl.Float64:
                 break
             overrides[m.group(1)] = pl.Float64
             if _fallback_overrides is not None:
@@ -445,7 +449,7 @@ def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) ->
 def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert C6 climate normals TXT files to Parquet.
 
-    These files use tab separators, latin1 encoding, and have 7 header rows
+    These files use tab separators, latin1 encoding, and have 8 header rows
     to skip before the actual data begins.
     """
     txt_dir = bronze_dir / "climate_normals"

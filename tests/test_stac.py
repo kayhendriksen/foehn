@@ -18,37 +18,45 @@ def _item(csv_url):
     return {"id": "item-1", "assets": {"data": {"href": csv_url}}, "properties": {}}
 
 
-def _mock_get(*pages):
-    """Return a mock for requests.get that cycles through the given page dicts."""
+def _session_get(mock_retry, *pages):
+    """Wire a patched ``_retry_session`` for ``with _retry_session() as s: s.get(...)``.
+
+    Returns the session's ``get`` mock, configured to cycle through the given
+    page dicts as JSON responses.
+    """
+    session = mock_retry.return_value
+    session.__enter__.return_value = session
     responses = []
     for page in pages:
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.json.return_value = page
         responses.append(resp)
-    mock = MagicMock(side_effect=responses)
-    return mock
+    if responses:
+        session.get.side_effect = responses
+    return session.get
 
 
 # --- get_collection_items ---
 
 
-@patch("foehn.stac.requests.get")
-def test_get_collection_items_single_page(mock_get):
+@patch("foehn.client._retry_session")
+def test_get_collection_items_single_page(mock_retry):
     items = [_item("https://data.geo.admin.ch/data.csv")]
-    mock_get.side_effect = _mock_get(_page(items)).side_effect
+    mock_get = _session_get(mock_retry, _page(items))
 
     result = get_collection_items("ch.test.collection", verbose=False)
 
     assert len(result) == 1
     assert result[0]["id"] == "item-1"
+    assert mock_get.call_count == 1
 
 
-@patch("foehn.stac.requests.get")
-def test_get_collection_items_pagination(mock_get):
+@patch("foehn.client._retry_session")
+def test_get_collection_items_pagination(mock_retry):
     page1 = _page([_item("https://data.geo.admin.ch/a.csv")], next_url="https://data.geo.admin.ch/page2")
     page2 = _page([_item("https://data.geo.admin.ch/b.csv")])
-    mock_get.side_effect = _mock_get(page1, page2).side_effect
+    mock_get = _session_get(mock_retry, page1, page2)
 
     result = get_collection_items("ch.test.collection", verbose=False)
 
@@ -56,12 +64,12 @@ def test_get_collection_items_pagination(mock_get):
     assert mock_get.call_count == 2
 
 
-@patch("foehn.stac.requests.get")
-def test_get_collection_items_stops_early_when_no_csv(mock_get):
+@patch("foehn.client._retry_session")
+def test_get_collection_items_stops_early_when_no_csv(mock_retry):
     """require_csv=True should stop after first page when no .csv assets found."""
     item_no_csv = {"id": "item-nc", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     page1 = _page([item_no_csv], next_url="https://data.geo.admin.ch/page2")
-    mock_get.side_effect = _mock_get(page1).side_effect
+    mock_get = _session_get(mock_retry, page1)
 
     result = get_collection_items("ch.test.collection", require_csv=True, verbose=False)
 
@@ -69,12 +77,12 @@ def test_get_collection_items_stops_early_when_no_csv(mock_get):
     assert len(result) == 1
 
 
-@patch("foehn.stac.requests.get")
-def test_get_collection_items_require_csv_false_follows_next(mock_get):
+@patch("foehn.client._retry_session")
+def test_get_collection_items_require_csv_false_follows_next(mock_retry):
     item_nc = {"id": "item-nc", "assets": {"data": {"href": "https://data.geo.admin.ch/grid.nc"}}, "properties": {}}
     page1 = _page([item_nc], next_url="https://data.geo.admin.ch/page2")
     page2 = _page([item_nc])
-    mock_get.side_effect = _mock_get(page1, page2).side_effect
+    mock_get = _session_get(mock_retry, page1, page2)
 
     result = get_collection_items("ch.test.collection", require_csv=False, verbose=False)
 
@@ -82,9 +90,9 @@ def test_get_collection_items_require_csv_false_follows_next(mock_get):
     assert len(result) == 2
 
 
-@patch("foehn.stac.requests.get")
-def test_get_collection_items_empty_collection(mock_get):
-    mock_get.side_effect = _mock_get(_page([])).side_effect
+@patch("foehn.client._retry_session")
+def test_get_collection_items_empty_collection(mock_retry):
+    _session_get(mock_retry, _page([]))
 
     result = get_collection_items("ch.test.collection", verbose=False)
 
@@ -103,13 +111,10 @@ def test_validate_stac_url_rejects_untrusted_urls():
 # --- get_collection_metadata ---
 
 
-@patch("foehn.stac.requests.get")
-def test_get_collection_metadata_returns_dict(mock_get):
+@patch("foehn.client._retry_session")
+def test_get_collection_metadata_returns_dict(mock_retry):
     payload = {"id": "ch.test.collection", "title": "Test", "assets": {}}
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.json.return_value = payload
-    mock_get.return_value = resp
+    _session_get(mock_retry, payload)
 
     result = get_collection_metadata("ch.test.collection")
 

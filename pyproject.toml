@@ -99,7 +99,6 @@ ignore = [
 "src/foehn/cli.py" = ["T201"]
 "src/foehn/client.py" = ["T201"]
 "src/foehn/convert.py" = ["T201"]
-"src/foehn/stac.py" = ["T201"]
 "src/foehn/mcp_server.py" = ["T201"]
 "scripts/*" = ["T201", "PERF203"]
 

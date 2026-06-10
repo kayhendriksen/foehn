@@ -157,7 +157,9 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
         if not shortname or not desc_en or shortname not in table_cols:
             continue
         comment = f"{desc_en} [{unit}]" if unit else desc_en
-        comment_escaped = comment.replace("'", "\\'")
+        # Escape backslashes before quotes — a trailing ``\'`` in the metadata
+        # would otherwise escape the escape and close the SQL string literal.
+        comment_escaped = comment.replace("\\", "\\\\").replace("'", "\\'")
         with contextlib.suppress(Exception):
             spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{shortname}` COMMENT '{comment_escaped}'")
 
