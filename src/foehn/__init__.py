@@ -1,6 +1,6 @@
 """foehn — Download MeteoSwiss Open Government Data and convert to Parquet."""
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 try:
     import polars as pl
