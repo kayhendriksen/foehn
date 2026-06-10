@@ -12,6 +12,7 @@ from foehn._urls import validate_download_href
 from foehn.client import (
     DEFAULT_WORKERS,
     DownloadResult,
+    _check_zip_size,
     _retry_session,
     download_climate_scenarios_indoor,
     download_collection,
@@ -342,6 +343,8 @@ def _load_indoor(
 
     frames: list[pl.DataFrame] = []
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        # Everything below is parsed in memory — refuse a decompression bomb.
+        _check_zip_size(zf, zip_href.split("/")[-1])
         for name in zf.namelist():
             if not name.endswith(".csv"):
                 continue

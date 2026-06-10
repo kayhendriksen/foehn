@@ -6,10 +6,12 @@ import zipfile
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from foehn.client import (
     DownloadResult,
+    _safe_extract_zip,
     _thread_local_session,
     download_climate_normals_zip,
     download_collection,
@@ -424,6 +426,32 @@ def test_download_climate_normals_zip_redownloads_if_not_extracted(mock_retry, t
 
     mock_get.assert_called_once()
     assert (out_dir / "sample.txt").exists()
+
+
+@patch("foehn.client._retry_session")
+def test_download_climate_normals_zip_rejects_decompression_bomb(mock_retry, tmp_path, monkeypatch):
+    """An archive declaring more decompressed bytes than the cap must not extract."""
+    monkeypatch.setattr("foehn.client._MAX_ZIP_EXTRACT_BYTES", 10)
+    mock_get = _as_session_cm(mock_retry)
+    zip_bytes = _make_zip({"sample.txt": b"x" * 1024})
+    mock_get.return_value = _stream_response(chunks=(zip_bytes,))
+
+    with pytest.raises(ValueError, match="decompressed"):
+        download_climate_normals_zip(tmp_path / "bronze")
+
+    assert not (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
+
+
+def test_safe_extract_zip_rejects_path_traversal(tmp_path):
+    zip_path = tmp_path / "evil.zip"
+    zip_path.write_bytes(_make_zip({"../evil.txt": b"x"}))
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with pytest.raises(ValueError, match="Unsafe path"):
+        _safe_extract_zip(zip_path, out_dir)
+
+    assert not (tmp_path / "evil.txt").exists()
 
 
 @patch("foehn.client._retry_session")

@@ -581,6 +581,39 @@ def download_netcdf(
     )
 
 
+# --- ZIP safety (zip-slip + decompression-bomb guards) ---
+
+# Cap on declared total decompressed size. Generous — the largest legitimate
+# archive (indoor scenarios) is well under this — but stops a decompression
+# bomb from a compromised upstream filling the disk (or RAM, for in-memory
+# reads). Python's zipfile enforces each member's declared size on read, so
+# checking the headers is sufficient.
+_MAX_ZIP_EXTRACT_BYTES = 10 * 1024**3  # 10 GiB
+
+
+def _check_zip_size(zf: zipfile.ZipFile, source: str) -> None:
+    """Raise ValueError if the archive declares more decompressed bytes than the cap."""
+    total = sum(m.file_size for m in zf.infolist())
+    if total > _MAX_ZIP_EXTRACT_BYTES:
+        raise ValueError(
+            f"ZIP {source!r} declares {total / 1e9:.1f} GB decompressed "
+            f"(cap {_MAX_ZIP_EXTRACT_BYTES / 1e9:.0f} GB) — refusing to extract."
+        )
+
+
+def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
+    """Extract a ZIP after validating total size and member paths. Returns member count."""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        _check_zip_size(zf, zip_path.name)
+        resolved_out_dir = out_dir.resolve()
+        for member in zf.infolist():
+            target = (resolved_out_dir / member.filename).resolve()
+            if not str(target).startswith(str(resolved_out_dir) + "/"):
+                raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
+        zf.extractall(out_dir)
+        return len(zf.namelist())
+
+
 # --- C6 climate normals ZIP ---
 
 
@@ -604,14 +637,8 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
         _download_binary(session, CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
     logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)
 
-    with zipfile.ZipFile(filepath, "r") as zf:
-        resolved_out_dir = out_dir.resolve()
-        for member in zf.infolist():
-            target = (resolved_out_dir / member.filename).resolve()
-            if not str(target).startswith(str(resolved_out_dir) + "/"):
-                raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
-        zf.extractall(out_dir)
-        logger.info("  Extracted %d files", len(zf.namelist()))
+    extracted = _safe_extract_zip(filepath, out_dir)
+    logger.info("  Extracted %d files", extracted)
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["normwerte.zip"])
 
@@ -662,13 +689,7 @@ def download_climate_scenarios_indoor(
         _download_binary(session, zip_href, zip_path, timeout=300)
     logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        resolved_out_dir = out_dir.resolve()
-        for member in zf.infolist():
-            target = (resolved_out_dir / member.filename).resolve()
-            if not str(target).startswith(str(resolved_out_dir) + "/"):
-                raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
-        zf.extractall(out_dir)
-        logger.info("  Extracted %d files", len(zf.namelist()))
+    extracted = _safe_extract_zip(zip_path, out_dir)
+    logger.info("  Extracted %d files", extracted)
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=[zip_path.name])
