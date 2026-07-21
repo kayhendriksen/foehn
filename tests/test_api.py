@@ -223,6 +223,73 @@ def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, m
     assert df["reference_timestamp"][0].year == 2026
 
 
+def _forecast_item(item_id: str, runs: dict[str, list[str]]) -> dict:
+    """Build a forecast STAC item: one item = one day, holding several hourly runs."""
+    return {
+        "id": item_id,
+        # All items share a near-identical refresh timestamp upstream — it is not
+        # the forecast date, so item selection must not rank on it.
+        "properties": {"datetime": "2026-07-21T04:00:16.387170Z"},
+        "assets": {
+            f"{run}.{param}": {"href": f"https://data.geo.admin.ch/x/vnut12.lssw.{run}.{param}.csv"}
+            for run, params in runs.items()
+            for param in params
+        },
+    }
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_forecast_local_skips_empty_newest_item(mock_session, mock_meta, mock_items):
+    """The newest day is created empty at ~04:00 UTC and filled as runs publish.
+
+    Selecting it as "latest" returned zero CSVs — the cause of issue #27.
+    """
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = [
+        _forecast_item("20260720-ch", {"202607200600": ["dkl010h0"]}),
+        _forecast_item("20260721-ch", {"202607210600": ["dkl010h0"]}),
+        _forecast_item("20260722-ch", {}),  # newest day, not yet populated
+    ]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    session.__enter__.return_value = session
+    mock_session.return_value = session
+
+    df = load("forecast_local")
+    assert len(df) > 0
+    # Newest *run* across the populated days, not the newest item.
+    assert "202607210600" in session.get.call_args[0][0]
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_forecast_local_fetches_only_latest_run(mock_session, mock_meta, mock_items):
+    """One run is ~32 files at ~30 MB; the retained window is ~40 runs (~40 GB)."""
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = [
+        _forecast_item(
+            "20260721-ch",
+            {
+                "202607210400": ["dkl010h0", "fu3010h0"],
+                "202607210500": ["dkl010h0", "fu3010h0"],
+                "202607210600": ["dkl010h0", "fu3010h0"],
+            },
+        )
+    ]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    session.__enter__.return_value = session
+    mock_session.return_value = session
+
+    load("forecast_local")
+    fetched = [c[0][0] for c in session.get.call_args_list]
+    assert len(fetched) == 2
+    assert all("202607210600" in url for url in fetched)
+
+
 @patch("foehn.api.download_collection")
 @patch("foehn.api.download_metadata")
 def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):

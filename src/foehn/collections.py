@@ -82,6 +82,8 @@ format — this is what each foehn reader relies on:
             ODIM reader extracts these to build the scaled, LV95-georeferenced grid.
 """
 
+import re
+
 STAC_API_BASE = "https://data.geo.admin.ch/api/stac/v1"
 
 # Maps our short key → STAC collection ID.
@@ -413,3 +415,21 @@ def time_slice_from_filename(filename: str) -> str | None:
     stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
     last = stem.rsplit("_", 1)[-1]
     return last if last in TIME_SLICES else None
+
+
+# Forecast CSV assets are named ``vnut12.lssw.<YYYYMMDDHHMM>.<param>.csv``, where
+# the middle field is the model run time — i.e. when the forecast was issued. Note
+# this is NOT the "reference timestamp" of MeteoSwiss's docs, which is the ``Date``
+# column inside the file (the end of each forecast step's aggregation interval).
+_FORECAST_RUN_RE = re.compile(r"^vnut\d+\.lssw\.(\d{12})\..+\.csv$")
+
+
+def forecast_run_from_filename(filename: str) -> str | None:
+    """Return the run timestamp of a forecast CSV asset, or None if unrecognised.
+
+    e.g. ``vnut12.lssw.202607210600.dkl010h0.csv`` → ``"202607210600"``. The
+    zero-padded ``YYYYMMDDHHMM`` form sorts lexicographically, so callers can
+    pick the newest run by ``max()`` without parsing it into a datetime.
+    """
+    match = _FORECAST_RUN_RE.match(filename.rsplit("/", 1)[-1])
+    return match.group(1) if match else None

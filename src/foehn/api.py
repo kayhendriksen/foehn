@@ -29,6 +29,7 @@ from foehn.collections import (
     NETCDF_COLLECTIONS,
     NO_GRANULARITY_COLLECTIONS,
     PREAMBLE_CSV_COLLECTIONS,
+    forecast_run_from_filename,
     time_slice_from_filename,
 )
 from foehn.convert import (
@@ -604,12 +605,12 @@ def load(
     if station_filter is not None:
         items = [item for item in items if item.get("id", "").lower() in station_filter]
 
+    # A forecast item is one *day*, not one forecast, and the newest one is empty
+    # until that day's runs publish — so keep all items and narrow to the newest
+    # run by filename below. Ranking on ``datetime`` would not help either: it is a
+    # refresh timestamp, identical across items to the microsecond.
     if dataset in FORECAST_CSV_COLLECTIONS and items:
-        items.sort(
-            key=lambda x: x.get("properties", {}).get("datetime", x.get("id", "")),
-            reverse=True,
-        )
-        items = items[:1]
+        items.sort(key=lambda x: x.get("id", ""))
 
     skip_data_type_filter = dataset in FORECAST_CSV_COLLECTIONS
     csv_hrefs: list[str] = []
@@ -632,6 +633,14 @@ def load(
                 if slice_ is not None and slice_ not in time_slice:
                     continue
             csv_hrefs.append(href)
+
+    # Narrow forecasts to the newest model run — the retained window holds ~40 runs
+    # of ~32 files each, and load() wants the current forecast, not all of them.
+    if dataset in FORECAST_CSV_COLLECTIONS and csv_hrefs:
+        runs = {run for href in csv_hrefs if (run := forecast_run_from_filename(href.split("?", 1)[0])) is not None}
+        if runs:
+            latest_run = max(runs)
+            csv_hrefs = [href for href in csv_hrefs if forecast_run_from_filename(href.split("?", 1)[0]) == latest_run]
 
     if not csv_hrefs:
         filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"

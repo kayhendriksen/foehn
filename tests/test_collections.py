@@ -9,6 +9,7 @@ from foehn.collections import (
     GRIB2_COLLECTIONS,
     NETCDF_COLLECTIONS,
     PREAMBLE_CSV_COLLECTIONS,
+    forecast_run_from_filename,
     time_slice_from_filename,
 )
 
@@ -130,3 +131,25 @@ def test_spatial_climate_analysis_grids_are_netcdf():
     for key in ("radar_derived_grid", "climate_normals_grid"):
         assert COLLECTION_META[key]["format"] == "NetCDF"
         assert key in NETCDF_COLLECTIONS
+
+
+# --- forecast run timestamps ---
+
+
+def test_forecast_run_from_filename():
+    assert forecast_run_from_filename("vnut12.lssw.202607210600.dkl010h0.csv") == "202607210600"
+
+
+def test_forecast_run_from_filename_parses_full_url():
+    href = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-local-forecasting/20260719-ch/vnut12.lssw.202607191200.fu3q10h1.csv"
+    assert forecast_run_from_filename(href) == "202607191200"
+
+
+def test_forecast_run_from_filename_rejects_non_forecast_names():
+    assert forecast_run_from_filename("ogd-smn_ber_d_recent.csv") is None
+    assert forecast_run_from_filename("ogd-local-forecasting_meta_point.csv") is None
+
+
+def test_forecast_runs_sort_lexicographically():
+    runs = ["202607210600", "202606300000", "202607192300"]
+    assert max(runs) == "202607210600"

@@ -23,6 +23,7 @@ from foehn.collections import (
     COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
     STAC_API_BASE,
+    forecast_run_from_filename,
     time_slice_from_filename,
 )
 from foehn.convert import decode_meteoswiss_csv
@@ -216,14 +217,14 @@ def download_collection(
             logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
-    # For forecast collections, only keep the latest item (newest forecast run)
+    # NB: a forecast item is one *day* (e.g. "20260722-ch") holding that day's ~24
+    # hourly runs × 32 parameters, not a single forecast. Selecting the latest item
+    # therefore did not select the latest run — and since the newest item is created
+    # at ~04:00 UTC and filled as the day's runs publish, it is routinely empty,
+    # which is what produced zero CSVs. Keep every item here and narrow to the
+    # newest run below, from the filenames.
     if collection_key in FORECAST_CSV_COLLECTIONS and items:
-        items.sort(
-            key=lambda x: x.get("properties", {}).get("datetime", x.get("id", "")),
-            reverse=True,
-        )
-        items = items[:1]
-        logger.info("  Using latest forecast: %s", items[0].get("id", "?"))
+        items.sort(key=lambda x: x.get("id", ""))
 
     # Collect matching CSV assets. ``all_csv_hrefs`` is the full pre-filter set
     # (every CSV in the listing, regardless of time slice) — the prune universe
@@ -244,6 +245,19 @@ def download_collection(
                 if slice_ is not None and slice_ not in data_types:
                     continue
             csv_assets.append((href, asset_info))
+
+    # One forecast run is ~32 files at ~30 MB each (~1 GB); the full retained
+    # window is ~40 runs (~40 GB). Keep only the newest complete-ish run.
+    if collection_key in FORECAST_CSV_COLLECTIONS and csv_assets:
+        runs = {run for href, _ in csv_assets if (run := forecast_run_from_filename(href.split("?", 1)[0])) is not None}
+        if runs:
+            latest_run = max(runs)
+            csv_assets = [
+                (href, info)
+                for href, info in csv_assets
+                if forecast_run_from_filename(href.split("?", 1)[0]) == latest_run
+            ]
+            logger.info("  Latest forecast run: %s (of %d available)", latest_run, len(runs))
 
     logger.info("  %d CSV files to process", len(csv_assets))
 
