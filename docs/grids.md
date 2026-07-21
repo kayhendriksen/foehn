@@ -34,9 +34,9 @@ whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
 All three install via `pip install "foehn[grids]"`.
 
 **NetCDF**: the spatial climate analyses (`surface_derived_grid`,
-`satellite_derived_grid`, `radar_derived_grid`), the `climate_normals_grid`
-and `climate_normals_*` reference grids, `climate_scenarios_grid`, and the
-`hail_hazard_*` maps.
+`satellite_derived_grid`, `radar_derived_grid` -- which also carries the hail
+return-period and hail-day grids), the `climate_normals_grid` reference grids,
+and `climate_scenarios_grid`.
 
 **GRIB2**: the forecasts `forecast_icon_ch1`, `forecast_icon_ch2`, and the
 analysis `analysis_kenda_ch1`. See [Forecasts (GRIB2)](#forecasts-grib2).
@@ -221,8 +221,8 @@ foehn.to_zarr("surface_derived_grid", match="tabsd")
 # -> data/meteoswiss/zarr/surface_derived_grid__tabsd.zarr  (distinct store)
 
 # Unfiltered keeps the bare name
-foehn.to_zarr("hail_hazard_50y")
-# -> data/meteoswiss/zarr/hail_hazard_50y.zarr
+foehn.to_zarr("climate_normals_grid")
+# -> data/meteoswiss/zarr/climate_normals_grid.zarr
 
 # Override the location explicitly
 foehn.to_zarr("surface_derived_grid", match="rhiresd", store="out/rain.zarr")

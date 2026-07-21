@@ -59,7 +59,7 @@ def test_ensure_netcdf_files_raises_when_no_nc_assets(mock_items, tmp_path):
         {"assets": {"b": {"href": "https://data.geo.admin.ch/x/bundle.zip"}}},
     ]
     with pytest.raises(ValueError, match=r"No \.nc assets"):
-        _ensure_grid_files("hail_hazard_10y", tmp_path / "bronze")
+        _ensure_grid_files("climate_normals_grid", tmp_path / "bronze")
 
 
 def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
@@ -810,11 +810,11 @@ def test_to_zarr_with_noncf_time_reopens_cleanly(_mock_items, tmp_path):
             "x": [0, 1, 2],
         },
     )
-    out_dir = tmp_path / "bronze" / "climate_normals_temp_9120"
+    out_dir = tmp_path / "bronze" / "climate_normals_grid"
     out_dir.mkdir(parents=True)
     # netcdf4 engine preserves the non-CF units attribute on the time axis
     ds.to_netcdf(out_dir / "normals_yearly.nc", engine="netcdf4")
 
-    store = to_zarr("climate_normals_temp_9120", data_dir=tmp_path)
+    store = to_zarr("climate_normals_grid", data_dir=tmp_path)
     roundtrip = xr.open_zarr(store)  # default CF decode must not throw
     assert "TnormY" in roundtrip.data_vars
