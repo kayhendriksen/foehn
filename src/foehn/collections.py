@@ -115,24 +115,17 @@ COLLECTIONS = {
     "radar_derived_grid": "ch.meteoschweiz.ogd-radar-derived-grid",  # C5 — Hail (days + return periods), radar-derived
     # C6 — Climate normals → downloaded separately as ZIP, see CLIMATE_NORMALS_ZIP_URL
     # C7 — Spatial climate normals (NetCDF/GeoTIFF, static reference grids)
-    # The OGD NetCDF normals grid is the unified successor to the per-parameter
-    # klimanormwerte-* GeoTIFF map layers below (temp/precip/sun + radiation/cloud).
+    # Supersedes the retired per-parameter klimanormwerte-* map layers: the same
+    # temp/precip/sun normals (1991-2020 and 1961-1990) are assets on this
+    # collection's single "ch" item, e.g. match="tnormy9120".
     "climate_normals_grid": "ch.meteoschweiz.ogd-climate-normals-grid",  # C7 — Spatial normals (NetCDF)
-    "climate_normals_precip_9120": "ch.meteoschweiz.klimanormwerte-niederschlag_aktuelle_periode",
-    "climate_normals_sun_9120": "ch.meteoschweiz.klimanormwerte-sonnenscheindauer_aktuelle_periode",
-    "climate_normals_temp_9120": "ch.meteoschweiz.klimanormwerte-temperatur_aktuelle_periode",
-    "climate_normals_precip_6190": "ch.meteoschweiz.klimanormwerte-niederschlag_1961_1990",
-    "climate_normals_sun_6190": "ch.meteoschweiz.klimanormwerte-sonnenscheindauer_1961_1990",
-    "climate_normals_temp_6190": "ch.meteoschweiz.klimanormwerte-temperatur_1961_1990",
     # C8 — Climate scenarios CH2025 local (CSV, no time-slice)
     "climate_scenarios": "ch.meteoschweiz.ogd-climate-scenarios-ch2025",
     # C9 — Climate scenarios CH2025 gridded (NetCDF, static)
     "climate_scenarios_grid": "ch.meteoschweiz.ogd-climate-scenarios-ch2025-grid",
-    # ── Hail hazard maps (NetCDF+ZIP, static reference grids) ────────────────────
-    "hail_hazard_10y": "ch.meteoschweiz.hagelgefaehrdung-korngroesse_10_jahre",
-    "hail_hazard_20y": "ch.meteoschweiz.hagelgefaehrdung-korngroesse_20_jahre",
-    "hail_hazard_50y": "ch.meteoschweiz.hagelgefaehrdung-korngroesse_50_jahre",
-    "hail_hazard_100y": "ch.meteoschweiz.hagelgefaehrdung-korngroesse_100_jahre",
+    # NOTE: the hagelgefaehrdung-korngroesse_* hazard maps were retired from the
+    # STAC API; their return-period grids are now assets on radar_derived_grid's
+    # "archive-ch" item, e.g. match="returnperiod050yleha1".
     # ── Indoor climate scenarios (ZIP, static) ───────────────────────────────────
     "climate_scenarios_indoor": "ch.meteoschweiz.klimaszenarien-raumklima",
     # ── D: Radar data (HDF5, no time-slice, opt-in via --grids) ─────────────────
@@ -264,54 +257,6 @@ COLLECTION_META: dict[str, dict] = {
         "frequencies": [],
         "time_slices": [],
     },
-    "climate_normals_precip_9120": {
-        "category": "C",
-        "subcategory": "C7",
-        "description": "Precipitation normals (1991-2020)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "climate_normals_sun_9120": {
-        "category": "C",
-        "subcategory": "C7",
-        "description": "Sunshine normals (1991-2020)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "climate_normals_temp_9120": {
-        "category": "C",
-        "subcategory": "C7",
-        "description": "Temperature normals (1991-2020)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "climate_normals_precip_6190": {
-        "category": "C",
-        "subcategory": "C7",
-        "description": "Precipitation normals (1961-1990)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "climate_normals_sun_6190": {
-        "category": "C",
-        "subcategory": "C7",
-        "description": "Sunshine normals (1961-1990)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "climate_normals_temp_6190": {
-        "category": "C",
-        "subcategory": "C7",
-        "description": "Temperature normals (1961-1990)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
     # NOTE: collections whose filenames carry no granularity segment
     # (NO_GRANULARITY/CSV_ZIP) advertise no frequencies — the ``frequency``
     # filter is unsupported there, and this field doubles as its valid values.
@@ -327,39 +272,6 @@ COLLECTION_META: dict[str, dict] = {
         "category": "C",
         "subcategory": "C9",
         "description": "Climate scenarios CH2025 gridded",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    # ── Hail hazard maps ─────────────────────────────────────────────────────
-    "hail_hazard_10y": {
-        "category": "C",
-        "subcategory": "C",
-        "description": "Hail hazard map (10-year return period)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "hail_hazard_20y": {
-        "category": "C",
-        "subcategory": "C",
-        "description": "Hail hazard map (20-year return period)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "hail_hazard_50y": {
-        "category": "C",
-        "subcategory": "C",
-        "description": "Hail hazard map (50-year return period)",
-        "format": "NetCDF",
-        "frequencies": [],
-        "time_slices": [],
-    },
-    "hail_hazard_100y": {
-        "category": "C",
-        "subcategory": "C",
-        "description": "Hail hazard map (100-year return period)",
         "format": "NetCDF",
         "frequencies": [],
         "time_slices": [],
@@ -455,16 +367,6 @@ NETCDF_COLLECTIONS = {
     "radar_derived_grid",
     "climate_scenarios_grid",
     "climate_normals_grid",
-    "climate_normals_precip_9120",
-    "climate_normals_sun_9120",
-    "climate_normals_temp_9120",
-    "climate_normals_precip_6190",
-    "climate_normals_sun_6190",
-    "climate_normals_temp_6190",
-    "hail_hazard_10y",
-    "hail_hazard_20y",
-    "hail_hazard_50y",
-    "hail_hazard_100y",
 }
 
 # Tabular collections delivered as a single ZIP of CSVs (not per-station STAC

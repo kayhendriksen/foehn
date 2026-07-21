@@ -65,14 +65,15 @@ GRIB2 forecast and analysis collections are large and require `--grids` to downl
 
 ## Hail hazard maps
 
-Static spatial reference grids showing expected hail grain size (cm) at different return periods. These are not categorised under A--E because they are static hazard assessments, not measured or forecasted time series -- they represent probabilistic climatological analyses published as fixed reference maps.
+MeteoSwiss retired the standalone `hail_hazard_*` collections; the hail grain size return-period grids are now assets on `radar_derived_grid` (C5), under its `archive-ch` item. Select one with `match`:
 
-| Key | Description | Format |
-|---|---|---|
-| `hail_hazard_10y` | Hail grain size -- 10-year return period | NetCDF / GeoTIFF (opt-in) |
-| `hail_hazard_20y` | Hail grain size -- 20-year return period | NetCDF / GeoTIFF (opt-in) |
-| `hail_hazard_50y` | Hail grain size -- 50-year return period | NetCDF / GeoTIFF (opt-in) |
-| `hail_hazard_100y` | Hail grain size -- 100-year return period | NetCDF / GeoTIFF (opt-in) |
+```python
+foehn.describe_grid("radar_derived_grid", match="returnperiod050yleha1")
+```
+
+Return periods are `002`, `005`, `010`, `020`, `030`, `050`, `070`, and `100` years, each in a `leha1` (grain size) and a `meshs` variant. The same item also carries hail-day grids (`haildays*`, 2 cm and 4 cm thresholds).
+
+Likewise, the per-parameter `climate_normals_*` map layers were retired -- those normals are assets on `climate_normals_grid` (C7), e.g. `match="tnormy9120"` for yearly temperature normals 1991--2020.
 
 ---
 
