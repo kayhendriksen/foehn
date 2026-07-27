@@ -361,6 +361,39 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
     return 0
 
 
+_CS_HEADER_PREFIX = "DATE;"
+
+
+def parse_climate_scenarios_filename(filename: str) -> tuple[str, str, str]:
+    """Parse a climate-scenario filename into (station, variable, gwl).
+
+    Files are named ``ogd-climate-scenarios-ch2025_{station}_{variable}_{gwl}``.
+    """
+    stem = filename.rsplit("/", 1)[-1]
+    stem = stem[:-4] if stem.endswith(".csv") else stem
+    parts = stem.split("_")
+    if len(parts) < 3:
+        raise ValueError(
+            f"Unexpected climate-scenario filename {filename!r}: expected "
+            "'..._{station}_{variable}_{gwl}', cannot extract station/variable/gwl."
+        )
+    return parts[-3], parts[-2], parts[-1]
+
+
+def add_climate_scenarios_columns(frame, station: str, variable: str, gwl: str):
+    """Add filename-derived columns and move the key columns to the front.
+
+    Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv)."""
+    frame = frame.rename({"DATE": "date"}).with_columns(
+        pl.lit(station).alias("station_abbr"),
+        pl.lit(variable).alias("variable"),
+        pl.lit(gwl).alias("gwl"),
+    )
+    cols = frame.collect_schema().names() if isinstance(frame, pl.LazyFrame) else frame.columns
+    front = ["station_abbr", "variable", "gwl", "date"]
+    return frame.select(front + [c for c in cols if c not in front])
+
+
 def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataFrame:
     """Parse a CH2025 climate-scenario CSV into a wide model table.
 
@@ -370,12 +403,17 @@ def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataF
     (``ogd-climate-scenarios-ch2025_{station}_{variable}_{gwl}``). The DATE
     column is kept as a string because it encodes a nominal 30-year period
     (0001-01-01 … 0030-12-31 on a 365-day calendar), not real calendar dates.
+
+    This is the in-memory path (used when streaming a download); the file-based
+    converter uses :func:`scan_climate_scenarios_csv` instead.
     """
     text = content.decode("utf-8-sig", errors="replace") if isinstance(content, bytes) else content
     lines = text.splitlines()
-    header_idx = next((i for i, line in enumerate(lines) if line.startswith("DATE;")), None)
+    header_idx = next((i for i, line in enumerate(lines) if line.startswith(_CS_HEADER_PREFIX)), None)
     if header_idx is None:
         raise ValueError(f"No 'DATE;' data header found in {filename!r}")
+
+    station, variable, gwl = parse_climate_scenarios_filename(filename)
 
     table = "\n".join(lines[header_idx:])
     df = pl.read_csv(
@@ -383,25 +421,39 @@ def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataF
         separator=";",
         infer_schema_length=20_000,
         truncate_ragged_lines=True,
-    ).rename({"DATE": "date"})
-
-    stem = filename.rsplit("/", 1)[-1]
-    stem = stem[:-4] if stem.endswith(".csv") else stem
-    parts = stem.split("_")
-    if len(parts) < 3:
-        raise ValueError(
-            f"Unexpected climate-scenario filename {filename!r}: expected "
-            "'..._{station}_{variable}_{gwl}', cannot extract station/variable/gwl."
-        )
-    station, variable, gwl = parts[-3], parts[-2], parts[-1]
-
-    df = df.with_columns(
-        pl.lit(station).alias("station_abbr"),
-        pl.lit(variable).alias("variable"),
-        pl.lit(gwl).alias("gwl"),
     )
-    front = ["station_abbr", "variable", "gwl", "date"]
-    return df.select(front + [c for c in df.columns if c not in front])
+    return add_climate_scenarios_columns(df, station, variable, gwl)
+
+
+def _climate_scenarios_preamble_lines(path: Path) -> int:
+    """Count the metadata preamble lines before the ``DATE;`` header.
+
+    Reads the file line by line and stops at the header, so a file of any size
+    costs only its preamble — the whole point of not slurping it into memory.
+    """
+    with path.open("rb") as fh:
+        for i, raw in enumerate(fh):
+            if raw.decode("utf-8-sig", errors="replace").startswith(_CS_HEADER_PREFIX):
+                return i
+    raise ValueError(f"No 'DATE;' data header found in {path.name!r}")
+
+
+def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
+    """Lazily scan a CH2025 climate-scenario CSV, skipping its metadata preamble.
+
+    ``skip_lines`` (not ``skip_rows``) matches how the preamble is counted: raw
+    newlines, ignoring CSV quoting, so a stray quote in a metadata value can't
+    shift the header offset.
+    """
+    station, variable, gwl = parse_climate_scenarios_filename(path.name)
+    lf = pl.scan_csv(
+        path,
+        separator=";",
+        skip_lines=_climate_scenarios_preamble_lines(path),
+        infer_schema_length=20_000,
+        truncate_ragged_lines=True,
+    )
+    return add_climate_scenarios_columns(lf, station, variable, gwl)
 
 
 def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
@@ -421,23 +473,21 @@ def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) ->
             logger.info("Converting climate_scenarios to Parquet: up-to-date — skipping")
             return 0
 
-    def _safe_parse(path: Path) -> pl.DataFrame | None:
-        try:
-            return parse_climate_scenarios_csv(path.read_bytes(), path.name)
-        except Exception as e:
-            logger.warning("  FAIL %s: %s", path.name, e)
-            return None
-
     logger.info("Converting climate_scenarios to Parquet (%d files)...", len(csv_files))
-    parsed = [_safe_parse(f) for f in csv_files]
-    frames = [df for df in parsed if df is not None]
-    failed = sum(1 for df in parsed if df is None)
+    frames: list[pl.LazyFrame] = []
+    failed = 0
+    for f in csv_files:
+        try:
+            frames.append(scan_climate_scenarios_csv(f))
+        except Exception as e:
+            failed += 1
+            logger.warning("  FAIL %s: %s", f.name, e)
 
     if not frames:
         return failed
 
     try:
-        pl.concat(frames, how="diagonal_relaxed").write_parquet(out_path, compression="zstd")
+        pl.concat(frames, how="diagonal_relaxed").sink_parquet(out_path, compression="zstd")
     except Exception as e:
         logger.warning("  FAIL: %s", e)
         return failed + 1

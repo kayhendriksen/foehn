@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "foehn"
-version = "0.3.3"
+version = "0.3.4"
 description = "Python toolkit for Swiss weather data — download, query, and analyse MeteoSwiss Open Government Data"
 readme = "README.md"
 license = "MIT"
@@ -15,7 +15,7 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
-    "polars>=1.0",
+    "polars>=1.18",
 ]
 keywords = ["meteoswiss", "weather", "parquet", "delta", "open-data", "switzerland"]
 classifiers = [
@@ -40,7 +40,7 @@ Issues = "https://github.com/kayhendriksen/foehn/issues"
 
 [project.optional-dependencies]
 databricks = [
-    "polars-lts-cpu>=1.0",
+    "polars-lts-cpu>=1.18",
     "pyspark>=3.5,<5.0",
     "delta-spark>=2.4,<5.0",
 ]
