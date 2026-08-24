@@ -28,13 +28,13 @@ def decode_meteoswiss_csv(content: bytes) -> str:
         return content.decode("windows-1252", errors="replace")
 
 
-_DTYPE_MAP: dict[str, pl.DataType] = {
+_DTYPE_MAP: dict[str, type[pl.DataType]] = {
     "float": pl.Float64,
     "integer": pl.Int64,
 }
 
 
-def _parse_metadata_types(content: bytes | str) -> dict[str, pl.DataType]:
+def _parse_metadata_types(content: bytes | str) -> dict[str, type[pl.DataType]]:
     """Build a parameter→Polars dtype mapping from metadata CSV content.
 
     Works with both raw bytes (in-memory) and string content.
@@ -50,7 +50,7 @@ def _parse_metadata_types(content: bytes | str) -> dict[str, pl.DataType]:
     if "parameter_shortname" not in meta.columns or "parameter_datatype" not in meta.columns:
         return {}
 
-    type_map: dict[str, pl.DataType] = {}
+    type_map: dict[str, type[pl.DataType]] = {}
     for row in meta.select("parameter_shortname", "parameter_datatype").iter_rows():
         shortname, datatype = row
         if shortname and datatype:
@@ -60,7 +60,7 @@ def _parse_metadata_types(content: bytes | str) -> dict[str, pl.DataType]:
     return type_map
 
 
-def _load_metadata_types(csv_dir: Path) -> dict[str, pl.DataType]:
+def _load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
     """Build a parameter→Polars dtype mapping from a *_meta_parameters.csv file.
 
     Returns an empty dict if no metadata file is found or if the expected
@@ -79,8 +79,8 @@ def _load_metadata_types(csv_dir: Path) -> dict[str, pl.DataType]:
 
 def parse_csv_bytes(
     content: bytes,
-    metadata_types: dict[str, pl.DataType] | None = None,
-    _fallback_overrides: dict[str, pl.DataType] | None = None,
+    metadata_types: dict[str, type[pl.DataType]] | None = None,
+    _fallback_overrides: dict[str, type[pl.DataType]] | None = None,
 ) -> pl.DataFrame:
     """Parse CSV bytes into a Polars DataFrame, applying metadata type overrides.
 
@@ -96,15 +96,15 @@ def parse_csv_bytes(
     buf = io.BytesIO(content)
 
     # Build per-file overrides by matching CSV columns to metadata types.
-    overrides: dict[str, pl.DataType] = {}
+    overrides: dict[str, type[pl.DataType]] = {}
     if metadata_types:
         try:
             header = pl.read_csv(io.BytesIO(content), separator=";", n_rows=0, infer_schema_length=0).columns
             for col in header:
                 if col in metadata_types:
                     overrides[col] = metadata_types[col]
-        except Exception:  # nosec B110
-            pass
+        except Exception as exc:
+            logger.debug("Could not read CSV header for schema overrides (%s) — inferring types", exc)
 
     try:
         return pl.read_csv(
@@ -228,7 +228,7 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
         # name out of the polars error, force it to Float64, and retry.  RSS
         # stays bounded — the alternative of materialising every CSV blew up
         # the driver on historical groups.
-        overrides: dict[str, pl.DataType] = dict(metadata_types or {})
+        overrides: dict[str, type[pl.DataType]] = dict(metadata_types or {})
         recovered: list[str] = []
         try:
             while True:

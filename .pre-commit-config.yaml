@@ -1,7 +1,31 @@
+# Keep the ruff rev in step with RUFF_VERSION in .github/workflows/ci.yml —
+# a mismatch means hooks and CI disagree about what "clean" means.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.7
+    rev: v0.16.4
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Catches a malformed workflow before it is ever pushed.
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      # The grids tests carry NetCDF/GRIB2 fixtures; keep an accidental
+      # multi-megabyte capture out of git history.
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+
+  # Workflow static analysis, same version CI runs.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.29.0
+    hooks:
+      - id: zizmor

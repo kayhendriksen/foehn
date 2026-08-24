@@ -316,12 +316,18 @@ def _ingest_radar(
         view = f"_{key}_new"
         new_df.createOrReplaceTempView(view)
         # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too).
-        spark.sql(
-            f"MERGE INTO {table} t USING {view} s ON t.path = s.path "
+        # The interpolated names are not user-controlled SQL: `table` is built from
+        # `cat`/`sch`, which both passed _validate_identifier (alphanumerics, underscore,
+        # hyphen; backtick-quoted), and from `key`, which the caller constrains to
+        # RADAR_COLLECTIONS literals. `view` derives from that same literal. Hence the
+        # suppression on the MERGE below.
+        merge_sql = (
+            f"MERGE INTO {table} t USING {view} s ON t.path = s.path "  # nosec B608
             "WHEN MATCHED AND s.modification_time > t.modification_time THEN UPDATE SET "
             "  modification_time = s.modification_time, size_bytes = s.size_bytes "
             "WHEN NOT MATCHED THEN INSERT *"
         )
+        spark.sql(merge_sql)
 
         count = new_df.count()
         print(f"  OK  {key:25s} → {table} ({count} files indexed)", flush=True)

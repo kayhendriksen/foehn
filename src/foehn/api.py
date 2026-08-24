@@ -586,7 +586,7 @@ def load(
     collection_id = COLLECTIONS[dataset]
 
     # 1. Fetch metadata types for schema inference.
-    metadata_types: dict[str, pl.DataType] = {}
+    metadata_types: dict[str, type[pl.DataType]] = {}
     coll = get_collection_metadata(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")

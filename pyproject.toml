@@ -87,7 +87,12 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "RUF", "A", "PIE", "PERF", "T20"]
+select = [
+    "E", "F", "I", "W", "UP", "B", "C4", "SIM", "RUF", "A", "PIE", "PERF", "T20",
+    "S",    # flake8-bandit — inline security lint (bandit still runs in CI for the deeper pass)
+    "DTZ",  # naive datetimes — a weather library should never build one by accident
+    "PTH",  # pathlib over os.path
+]
 ignore = [
     "E731",   # lambda assignment — sometimes fine
     "SIM108", # ternary operator — can hurt readability
@@ -101,6 +106,19 @@ ignore = [
 "src/foehn/convert.py" = ["T201"]
 "src/foehn/mcp_server.py" = ["T201"]
 "scripts/*" = ["T201", "PERF203"]
+# Tests assert freely, build naive datetimes as fixture values, and open() by
+# path is clearer than Path.open() when the path is a plain string literal.
+"tests/*" = ["S101", "DTZ001", "PTH123"]
+
+[tool.coverage.run]
+source = ["foehn"]
+branch = true
+
+[tool.coverage.report]
+# Branch coverage currently sits at ~89%. Kept a couple of points below so
+# ordinary churn doesn't go red, but a real regression does.
+fail_under = 87
+show_missing = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

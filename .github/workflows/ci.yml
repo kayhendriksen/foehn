@@ -8,56 +8,142 @@ on:
 permissions:
   contents: read
 
+# Supersede in-flight runs for the same PR. Pushes to main are never cancelled —
+# each main commit should get a complete, attributable result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Single source of truth for the pinned dev toolchain. RUFF_VERSION must stay
+  # in step with .pre-commit-config.yaml so local hooks and CI agree — a drifting
+  # ruff turns green PRs red with no code change.
+  RUFF_VERSION: "0.16.4"
+  TY_VERSION: "0.0.74"
+  ZIZMOR_VERSION: "1.29.0"
+  PIP_AUDIT_VERSION: "2.9.0"
+  BANDIT_VERSION: "1.9.4"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          python-version: "3.12"
-      - run: pip install ruff
-      - run: ruff check src/ tests/
-      - run: ruff format --check src/ tests/
+          enable-cache: true
+      # scripts/ is linted too — ingest_delta.py builds Spark SQL by hand and is
+      # the highest-risk file in the repo.
+      - run: uvx ruff@${RUFF_VERSION} check src/ tests/ scripts/
+      - run: uvx ruff@${RUFF_VERSION} format --check src/ tests/ scripts/
+
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      # foehn ships py.typed, so downstream type checkers trust these annotations.
+      # Nothing verified them before this job existed.
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev]" "ty==${TY_VERSION}"
+      - run: .venv/bin/ty check src/
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=foehn --cov-report=term-missing
+          enable-cache: true
+      - run: uv venv --python ${{ matrix.python-version }}
+      - run: uv pip install -e ".[dev]"
+      # Coverage floor lives in [tool.coverage.report] fail_under in pyproject.toml.
+      - run: .venv/bin/pytest --cov=foehn --cov-report=term-missing
 
-  security:
+  build:
+    name: build (packaging smoke test)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          python-version: "3.x"
-      - run: pip install pip-audit bandit
-      - name: Build audit requirements
-        run: |
-          python - <<'PY' > _audit_requirements.txt
-          import tomllib
-          from pathlib import Path
+          enable-cache: true
+      # publish.yml only builds at release time, from a tag-triggered job. Without
+      # this, a broken pyproject.toml or missing package data surfaces mid-release
+      # instead of in the PR that caused it.
+      - run: uv build
+      - run: uvx twine check dist/*
+      # Confirm the built wheel actually imports and exposes its entry point,
+      # rather than only that it is well-formed metadata.
+      - run: uv venv --python 3.12 /tmp/wheeltest
+      - run: VIRTUAL_ENV=/tmp/wheeltest uv pip install dist/*.whl
+      - run: /tmp/wheeltest/bin/foehn --help
+      - run: /tmp/wheeltest/bin/python -c "import foehn; print(foehn.__version__)"
 
-          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
-          requirements = list(project["dependencies"])
-          for extra in ("mcp",):
-              requirements.extend(project["optional-dependencies"].get(extra, []))
-          print("\n".join(requirements))
-          PY
-      - run: pip-audit -r _audit_requirements.txt --progress-spinner off
-      - run: bandit -r src/
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      # Audit the *fully resolved* tree across every extra — including grids
+      # (netCDF4/h5py/eccodes/cfgrib/pyproj), which the previous hand-built
+      # requirements list left unaudited despite being C-library-backed.
+      - name: Resolve full dependency tree (all extras)
+        run: uv pip compile --quiet --all-extras pyproject.toml -o requirements-audit.txt
+      - name: Audit dependencies
+        run: uvx pip-audit@${PIP_AUDIT_VERSION} -r requirements-audit.txt --progress-spinner off
+      # scripts/ included — see the lint job.
+      - name: Static security scan
+        run: uvx bandit@${BANDIT_VERSION} -r src/ scripts/ -q
+
+  zizmor:
+    name: zizmor (workflow audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Upload findings to the Security tab, alongside CodeQL and Scorecard.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      # Static analysis for the workflows themselves: template injection, unpinned
+      # actions, credential persistence, over-broad permissions. Clean as of this
+      # commit — the point is to keep it that way as workflows change.
+      - name: Run zizmor
+        run: uvx zizmor@${ZIZMOR_VERSION} --format sarif .github/workflows/ > zizmor.sarif
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload SARIF
+        if: always() && hashFiles('zizmor.sarif') != ''
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor

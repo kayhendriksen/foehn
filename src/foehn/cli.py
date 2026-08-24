@@ -326,6 +326,14 @@ def cmd_load(args: argparse.Namespace) -> None:
     print(f"\n[{df.shape[0]} rows x {df.shape[1]} columns]")
 
 
+class _FoehnCliHandler(logging.StreamHandler):
+    """Marker subclass so repeat invocations can find and reuse *our* handler.
+
+    A plain ``StreamHandler`` would be indistinguishable from one an embedding
+    application attached to the ``foehn`` logger itself.
+    """
+
+
 def _configure_logging() -> None:
     """Route the foehn library's logger to stdout for CLI use.
 
@@ -340,12 +348,11 @@ def _configure_logging() -> None:
     """
     foehn_logger = logging.getLogger("foehn")
     handler = next(
-        (h for h in foehn_logger.handlers if getattr(h, "_foehn_cli_handler", False)),
+        (h for h in foehn_logger.handlers if isinstance(h, _FoehnCliHandler)),
         None,
     )
     if handler is None:
-        handler = logging.StreamHandler(sys.stdout)
-        handler._foehn_cli_handler = True  # type: ignore[attr-defined]
+        handler = _FoehnCliHandler(sys.stdout)
         foehn_logger.addHandler(handler)
     else:
         # Repoint at the current stdout without setStream(), which would first
