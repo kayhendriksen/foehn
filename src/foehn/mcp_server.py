@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 import polars as pl
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -56,7 +56,7 @@ _GRID_INSPECT = ToolAnnotations(
 # additionally require a single-file match=, enforced by open_dataset.
 _INSPECTABLE_GRIDS = sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS)
 
-mcp = FastMCP(
+mcp = MCPServer(
     "foehn",
     instructions=(
         "Powered by foehn (https://github.com/kayhendriksen/foehn) — "
