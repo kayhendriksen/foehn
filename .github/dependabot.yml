@@ -37,11 +37,10 @@ updates:
       time: "09:30"
       timezone: Europe/Zurich
     open-pull-requests-limit: 5
+    # Only default-days here: Dependabot does not treat Action tags as semver,
+    # so the semver-*-days keys are rejected for this ecosystem.
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 7
-      semver-patch-days: 7
     groups:
       github-actions-patch-minor:
         patterns:
