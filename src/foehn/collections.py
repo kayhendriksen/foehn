@@ -404,6 +404,13 @@ CLIMATE_NORMALS_ZIP_URL = "https://data.geo.admin.ch/ch.meteoschweiz.klima/normw
 TIME_SLICES = frozenset({"historical", "recent", "now"})
 
 
+# MeteoSwiss chunks the high-frequency historical series by decade, so the slice
+# is not always the trailing segment: ``ogd-smn_ber_t_historical_2000-2009.csv``.
+# Only a bare decade range is accepted as that trailing segment, which keeps the
+# "match the end, not anywhere" guard below intact.
+_DECADE_RANGE_RE = re.compile(r"^\d{4}-\d{4}$")
+
+
 def time_slice_from_filename(filename: str) -> str | None:
     """Return the time slice of a standard CSV asset, or None if it has none.
 
@@ -411,10 +418,21 @@ def time_slice_from_filename(filename: str) -> str | None:
     (e.g. ``ogd-smn_ber_d_recent.csv`` → ``"recent"``) rather than matching the
     token anywhere in the path, so a coincidental substring (notably the bare
     ``"now"``) elsewhere in the URL can't be misread as a time slice.
+
+    The ``t`` and ``h`` historical series are split per decade, in which case the
+    slice sits one segment further back (``..._historical_2000-2009.csv``). Those
+    are recognised too — without it the file parses as "no slice at all" and gets
+    treated as unsliced data that every query must include, so ``time_slice`` is
+    silently ignored and the full history ships on every call.
     """
     stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    last = stem.rsplit("_", 1)[-1]
-    return last if last in TIME_SLICES else None
+    parts = stem.rsplit("_", 2)
+    last = parts[-1]
+    if last in TIME_SLICES:
+        return last
+    if len(parts) >= 2 and _DECADE_RANGE_RE.match(last) and parts[-2] in TIME_SLICES:
+        return parts[-2]
+    return None
 
 
 # Forecast CSV assets are named ``vnut12.lssw.<YYYYMMDDHHMM>.<param>.csv``, where

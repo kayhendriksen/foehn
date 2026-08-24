@@ -22,6 +22,26 @@ def test_time_slice_from_filename_detects_trailing_segment():
     assert time_slice_from_filename("https://data.geo.admin.ch/x/ogd-smn_ber_d_recent.csv") == "recent"
 
 
+def test_time_slice_from_filename_detects_decade_split_historical():
+    # MeteoSwiss splits the t/h historical series per decade. Parsing these as
+    # "no slice" makes every query pull the full history (see #39).
+    assert time_slice_from_filename("ogd-smn_ber_t_historical_2000-2009.csv") == "historical"
+    assert time_slice_from_filename("ogd-smn_ber_h_historical_1980-1989.csv") == "historical"
+    assert time_slice_from_filename("ogd-smn-tower_ban_h_historical_2020-2029.csv") == "historical"
+    assert time_slice_from_filename("https://data.geo.admin.ch/x/ogd-smn_ber_t_historical_2010-2019.csv") == (
+        "historical"
+    )
+
+
+def test_time_slice_from_filename_only_accepts_a_bare_decade_range():
+    # The one-segment-back lookup must not become a general "search anywhere".
+    assert time_slice_from_filename("ogd-smn_ber_t_historical_2000.csv") is None
+    assert time_slice_from_filename("ogd-smn_ber_t_historical_2000-2009-extra.csv") is None
+    assert time_slice_from_filename("ogd-smn_ber_t_notaslice_2000-2009.csv") is None
+    # A decade range with no slice in front of it is still unsliced data.
+    assert time_slice_from_filename("ogd-smn_ber_t_2000-2009.csv") is None
+
+
 def test_time_slice_from_filename_returns_none_when_absent():
     assert time_slice_from_filename("ogd-smn_ber_d.csv") is None
     # 'now' as a coincidental substring elsewhere must not be misread as a slice.
