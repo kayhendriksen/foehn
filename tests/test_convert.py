@@ -17,6 +17,7 @@ from foehn.convert import (
     decode_meteoswiss_csv,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
+    scan_climate_scenarios_csv,
 )
 
 
@@ -371,6 +372,40 @@ def test_convert_climate_scenarios_to_parquet(tmp_path):
     assert set(df["variable"].unique()) == {"pr", "tas"}
     assert set(df["gwl"].unique()) == {"gwl1.5", "gwl2.0"}
     assert len(df) == 4
+
+
+def test_scan_climate_scenarios_csv_is_lazy_and_matches_eager(tmp_path):
+    path = tmp_path / "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
+    path.write_text(_CS_CSV)
+
+    lf = scan_climate_scenarios_csv(path)
+    assert isinstance(lf, pl.LazyFrame)
+    assert lf.collect().equals(parse_climate_scenarios_csv(_CS_CSV.encode("utf-8"), path.name))
+
+
+def test_scan_climate_scenarios_csv_survives_quote_in_preamble(tmp_path):
+    """A stray quote in a metadata value must not shift the header offset."""
+    path = tmp_path / "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
+    path.write_text(_CS_CSV.replace("Daily precipitation sum", 'Daily precipitation ("mm")'))
+
+    df = scan_climate_scenarios_csv(path).collect()
+    assert df.columns[:4] == ["station_abbr", "variable", "gwl", "date"]
+    assert len(df) == 2
+
+
+def test_convert_climate_scenarios_to_parquet_counts_bad_file(tmp_path):
+    bronze_dir = tmp_path / "bronze"
+    cs_dir = bronze_dir / "climate_scenarios"
+    cs_dir.mkdir(parents=True)
+    (cs_dir / "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv").write_text(_CS_CSV)
+    # No 'DATE;' header — must be skipped and counted, not abort the whole run.
+    (cs_dir / "ogd-climate-scenarios-ch2025_ber_tas_gwl2.0.csv").write_text("TITLE;nope\n")
+
+    parquet_dir = tmp_path / "parquet"
+    assert convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir) == 1
+
+    df = pl.read_parquet(parquet_dir / "climate_scenarios" / "climate_scenarios.parquet")
+    assert set(df["station_abbr"].unique()) == {"abe"}
 
 
 # --- forecast_local Date -> reference_timestamp ---
