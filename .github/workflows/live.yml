@@ -1,0 +1,78 @@
+name: Live API check
+
+# foehn is a thin client over the MeteoSwiss STAC/S3 API, so the failure mode
+# that matters most is upstream changing shape — not our own regressions. The
+# `live` marker is deselected by default (see addopts in pyproject.toml), which
+# meant these tests never ran anywhere. This runs them on a schedule and opens
+# an issue when MeteoSwiss drifts.
+on:
+  schedule:
+    - cron: "15 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev]"
+
+      - name: Run live tests
+        id: live
+        # -m live overrides the default `-m 'not live'` from addopts.
+        run: .venv/bin/pytest -m live -v --no-header
+
+      - name: Open or update tracking issue on failure
+        if: failure() && steps.live.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create live-check-failure \
+            --color B60205 \
+            --description "Scheduled live MeteoSwiss API check is failing" \
+            --force
+
+          # One rolling issue rather than a new one every week.
+          existing=$(gh issue list --state open --label live-check-failure \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body \
+              "Live API check failed again on $(date -u +%Y-%m-%d). Run: ${RUN_URL}"
+          else
+            gh issue create \
+              --title "Live MeteoSwiss API check is failing" \
+              --label live-check-failure \
+              --body "$(printf '%s\n' \
+                "The scheduled \`live\` test run failed, which usually means MeteoSwiss changed" \
+                "the STAC/S3 response shape rather than that foehn regressed." \
+                "" \
+                "Run: ${RUN_URL}" \
+                "" \
+                "Reproduce locally with:" \
+                "" \
+                '```bash' \
+                "pytest -m live -v" \
+                '```' \
+                "" \
+                "This issue is reused by later failures — close it once the check is green.")"
+          fi

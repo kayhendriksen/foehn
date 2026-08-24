@@ -7,10 +7,27 @@ updates:
       day: monday
       time: "09:00"
       timezone: Europe/Zurich
+    open-pull-requests-limit: 5
+    # Don't pull a release the moment it lands. A compromised release is usually
+    # yanked within days, so a short soak is cheap supply-chain insurance.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 7
     groups:
-      python-dependencies:
+      # Split so a breaking major can't hold the safe patches hostage in one PR.
+      python-patch-minor:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
+      python-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -19,7 +36,21 @@ updates:
       day: monday
       time: "09:30"
       timezone: Europe/Zurich
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 7
     groups:
-      github-actions:
+      github-actions-patch-minor:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
+      github-actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major

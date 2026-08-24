@@ -260,6 +260,6 @@ foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 The MCP server exposes the inspect path as the `describe_grid` tool (any gridded
 format): it returns a grid's dimensions, coordinates, and variables without
 streaming array values into the LLM context (it does cache the source file — the
-same download-then-lazy caveat, hence it's annotated `readOnlyHint=False`).
+same download-then-lazy caveat, hence it's annotated `read_only_hint=False`).
 Writing Zarr stores (`to_zarr`) is intentionally not exposed over MCP — conversion/
 write tools aren't part of the MCP surface. See the [MCP server docs](mcp-server.md).

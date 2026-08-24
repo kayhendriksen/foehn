@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import zipfile
 from collections.abc import Callable
@@ -101,11 +100,11 @@ def _thread_local_session() -> Callable[[], requests.Session]:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text via a sibling temp file + os.replace so readers never see a torn write."""
+    """Write text via a sibling temp file + Path.replace so readers never see a torn write."""
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -401,7 +400,7 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
 def _download_binary(session: requests.Session, href: str, filepath: Path, timeout: int = 120) -> str:
     """Stream a binary asset to disk atomically. Returns the filename.
 
-    Streams into a sibling ``.part`` file and only ``os.replace``s it onto the
+    Streams into a sibling ``.part`` file and only ``Path.replace``s it onto the
     final path once the body is fully written. A timeout or connection drop
     mid-stream therefore leaves no file at ``filepath`` — so the next run's
     existence/mtime check won't mistake a truncated download for a complete one.
@@ -414,7 +413,7 @@ def _download_binary(session: requests.Session, href: str, filepath: Path, timeo
             with tmp.open("wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
                     f.write(chunk)
-        os.replace(tmp, filepath)
+        tmp.replace(filepath)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

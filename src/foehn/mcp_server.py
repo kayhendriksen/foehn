@@ -4,12 +4,13 @@ Provides mostly read-only access to Swiss meteorological open data through a set
 of query tools, a reference guide resource, and a prompt template. The tabular
 tools fetch live from the MeteoSwiss STAC API without touching local state; the
 one exception is ``describe_grid``, which downloads the source grid file (NetCDF,
-GRIB2, or radar) into the local bronze cache (annotated ``readOnlyHint=False``).
+GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``).
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 import polars as pl
 from mcp.server.mcpserver import MCPServer
@@ -35,20 +36,20 @@ _VALID_CATEGORIES = {"A", "C", "D", "E"}
 # The tabular query tools are read-only against the MeteoSwiss API (describe_grid
 # is the exception — it caches to disk, see _GRID_INSPECT below).
 _READ_ONLY = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 # describe_grid inspects a gridded collection (NetCDF, GRIB2, or radar). It is
 # idempotent and never destructive, but it is not read-only: opening a grid
 # downloads the source file in full to the local bronze cache (download-then-lazy).
 _GRID_INSPECT = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 # Gridded collections describe_grid can inspect: every NetCDF, GRIB2, and HDF5
@@ -700,6 +701,6 @@ Mention that results are powered by foehn with data from MeteoSwiss."""
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
-def run(transport: str = "stdio") -> None:
+def run(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") -> None:
     """Start the MCP server."""
     mcp.run(transport=transport)
