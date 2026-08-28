@@ -79,6 +79,28 @@ jobs:
       # Coverage floor lives in [tool.coverage.report] fail_under in pyproject.toml.
       - run: .venv/bin/pytest --cov=foehn --cov-report=term-missing
 
+  test-prerelease:
+    # Python's 3.15 call-to-action asks maintainers to test against the preview.
+    # Non-blocking on purpose: this tracks upstream readiness, and a red preview
+    # leg must never gate a PR.
+    name: test (3.15 preview, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv venv --python 3.15
+      # Core + mcp only. The grids stack has no 3.15 wheels yet (pandas, pyproj,
+      # netCDF4, h5py, pyarrow), so installing [dev] here would fail on packaging
+      # rather than on anything foehn controls.
+      - run: uv pip install -e ".[mcp]" "pytest>=8"
+      - run: .venv/bin/pytest --ignore=tests/test_grids.py -p no:cov
+
   build:
     name: build (packaging smoke test)
     runs-on: ubuntu-latest

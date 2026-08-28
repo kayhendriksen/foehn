@@ -114,7 +114,7 @@ def load_etags(data_dir: Path) -> dict:
     path = data_dir / "_etags.json"
     if path.exists():
         try:
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read %s (%s) — treating as empty", path, exc)
     return {}
@@ -131,7 +131,7 @@ def load_last_run(data_dir: Path) -> str | None:
     path = data_dir / "_last_run.json"
     if path.exists():
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read %s (%s) — treating as no previous run", path, exc)
             return None
