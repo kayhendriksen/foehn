@@ -16,6 +16,10 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
     "polars>=1.18",
+    # Imported directly in client.py (Retry). It arrives via requests today, but
+    # relying on a transitive dep breaks silently if requests ever swaps backends.
+    # Floor is where Retry gained allowed_methods.
+    "urllib3>=1.26",
 ]
 keywords = ["meteoswiss", "weather", "parquet", "delta", "open-data", "switzerland"]
 classifiers = [
@@ -46,6 +50,8 @@ databricks = [
 ]
 mcp = [
     "mcp[cli]>=2.0",
+    # mcp_server.py imports BaseModel/Field directly rather than only through mcp.
+    "pydantic>=2.0",
 ]
 # Everything for the gridded (xarray) read path, across all formats:
 #   NetCDF (climate grids)  -> netCDF4, h5netcdf, h5py
@@ -55,6 +61,8 @@ mcp = [
 # the fragile piece on some platforms.
 grids = [
     "xarray>=2024.1",
+    # Imported directly in grids.py; arrives via xarray/netCDF4 but is ours to declare.
+    "numpy>=1.24",
     "netCDF4>=1.6",
     "h5netcdf>=1.0",
     "h5py>=3.0",
@@ -65,6 +73,8 @@ grids = [
 ]
 dev = [
     "ruff>=0.9",
+    "numpy>=1.24",
+    "pydantic>=2.0",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pyarrow>=14.0",
