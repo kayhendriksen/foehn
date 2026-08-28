@@ -32,7 +32,10 @@ jobs:
           enable-cache: false
       # Pinned: this job builds the published artifact. Bump manually —
       # Dependabot doesn't track inline pip installs in workflows.
-      - run: pip install build==1.5.0 twine==6.2.0
+      # Keep in step with BUILD_VERSION/TWINE_VERSION in ci.yml, whose build job
+      # is the smoke test for this one. twine < 7 rejects Metadata-Version 2.5,
+      # which hatchling now emits.
+      - run: pip install build==1.6.0 twine==7.0.0
       - name: Verify tag matches pyproject.toml version
         run: |
           TAG="${GITHUB_REF_NAME#v}"

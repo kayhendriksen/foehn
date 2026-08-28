@@ -22,6 +22,10 @@ env:
   TY_VERSION: "0.0.74"
   ZIZMOR_VERSION: "1.29.0"
   PIP_AUDIT_VERSION: "2.9.0"
+  # Must match the pins in publish.yml — the build job below is that job's smoke
+  # test, and only catches its failures if it runs the same toolchain.
+  BUILD_VERSION: "1.6.0"
+  TWINE_VERSION: "7.0.0"
   BANDIT_VERSION: "1.9.4"
 
 jobs:
@@ -89,8 +93,8 @@ jobs:
       # publish.yml only builds at release time, from a tag-triggered job. Without
       # this, a broken pyproject.toml or missing package data surfaces mid-release
       # instead of in the PR that caused it.
-      - run: uv build
-      - run: uvx twine check dist/*
+      - run: uvx --from build==${BUILD_VERSION} pyproject-build
+      - run: uvx twine@${TWINE_VERSION} check dist/*
       # Confirm the built wheel actually imports and exposes its entry point,
       # rather than only that it is well-formed metadata.
       - run: uv venv --python 3.12 /tmp/wheeltest
