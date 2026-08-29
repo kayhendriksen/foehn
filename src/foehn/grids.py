@@ -38,6 +38,7 @@ import re
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -126,31 +127,74 @@ _GRID_READERS: dict[str, dict] = {
 
 # Grid collections are listed on *every* open, including repeat opens of an
 # already-cached file: _ensure_grid_files deliberately verifies the match against
-# the collection rather than the local cache. That listing is paginated 100 items
-# at a time, and a radar collection is thousands of files — so an interactive
-# session pulling several fields paid the full walk each time. Memoise it briefly:
-# short enough that a new forecast run or radar timestep is picked up within one
-# publication cycle, long enough that a burst of opens costs one walk. Kept under
-# the fastest cycle upstream (radar, ~5 min) so a new timestep is never hidden
-# for a whole publication interval.
-_LISTING_TTL_SECONDS = 120.0
-_LISTING_CACHE: dict[str, tuple[float, list[dict]]] = {}
+# the collection rather than the local cache. Cost varies enormously — smn is 2
+# pages and radar_precip 1, but forecast_icon_ch1 is 571 pages (~170s), because
+# the forecast collections carry one item per file.
+#
+# The TTL is therefore derived from what the walk cost, so an entry is never cheaper to
+# re-fetch than to keep: a listing is held for ~10x the time it took to build,
+# floored and capped. A fixed TTL got this exactly backwards — at 120s the
+# 171s forecast walk expired before any follow-up call could reuse it, so the
+# one collection that truly needed caching never got it.
+_LISTING_TTL_FACTOR = 10.0
+_LISTING_TTL_MIN_SECONDS = 120.0
+_LISTING_TTL_MAX_SECONDS = 1800.0
+_LISTING_CACHE: dict[tuple[str, str | None], tuple[float, float, list[dict]]] = {}
 
 
-def _cached_collection_items(collection_id: str) -> list[dict]:
+def _cached_collection_items(collection_id: str, datetime_filter: str | None = None) -> list[dict]:
     """Return a collection's STAC items, reusing a recent listing when there is one.
 
     Only the gridded read path uses this. The download path keeps calling
     ``get_collection_items`` directly — its whole job is to notice what changed
     upstream, so a cache there would suppress exactly the updates it looks for.
+
+    Keyed on the datetime filter too: a run-narrowed listing is not a substitute
+    for the full one.
     """
-    hit = _LISTING_CACHE.get(collection_id)
+    key = (collection_id, datetime_filter)
+    hit = _LISTING_CACHE.get(key)
     now = time.monotonic()
-    if hit is not None and now - hit[0] < _LISTING_TTL_SECONDS:
-        return hit[1]
-    items = get_collection_items(collection_id, require_csv=False, verbose=False)
-    _LISTING_CACHE[collection_id] = (now, items)
+    if hit is not None and now - hit[0] < hit[1]:
+        return hit[2]
+
+    started = time.monotonic()
+    items = get_collection_items(collection_id, require_csv=False, verbose=False, datetime_filter=datetime_filter)
+    elapsed = time.monotonic() - started
+    ttl = min(max(elapsed * _LISTING_TTL_FACTOR, _LISTING_TTL_MIN_SECONDS), _LISTING_TTL_MAX_SECONDS)
+    _LISTING_CACHE[key] = (time.monotonic(), ttl, items)
     return items
+
+
+# A GRIB2 forecast filename carries its model run as a bare YYYYMMDDHHMM stamp
+# (icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2), which is also what a caller's
+# ``match`` must contain to select a single field.
+_RUN_STAMP_RE = re.compile(r"(?<!\d)(\d{12})(?!\d)")
+
+
+def _run_datetime_filter(collection_key: str, match: str | None) -> str | None:
+    """Map a GRIB2 ``match`` onto a STAC ``datetime`` query, when it names one run.
+
+    The forecast collections are one STAC item *per file* — forecast_icon_ch1 is
+    ~57,000 items over ~571 pages, about 170s to walk in full, and that walk runs
+    on every open. Their item ``datetime`` is the model run time, so a match that
+    names a run narrows the listing server-side to that run's ~200 items (~0.5s).
+
+    GRIB2 only, deliberately: the CSV and radar collections set ``datetime`` to a
+    catalog-refresh timestamp unrelated to the data, where filtering on a real
+    data date matches nothing. Those listings are small anyway (radar_precip is
+    16 items), so they lose nothing by walking in full.
+    """
+    if match is None or COLLECTION_META.get(collection_key, {}).get("format") != "GRIB2":
+        return None
+    found = _RUN_STAMP_RE.search(match)
+    if not found:
+        return None
+    try:
+        run = datetime.strptime(found.group(1), "%Y%m%d%H%M").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return run.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _raise_if_too_many(collection_key: str, match: str | None, names: list[str], max_files: int | None) -> None:
@@ -170,6 +214,27 @@ def _raise_if_too_many(collection_key: str, match: str | None, names: list[str],
         f"match={match!r} matched {len(names)} files for {collection_key!r}, {detail}. "
         f"Matches include:\n{examples}{more}"
     )
+
+
+def _grid_asset_hrefs(items: list[dict], suffixes: tuple[str, ...], match: str | None) -> tuple[list[str], set[str]]:
+    """Pick the grid asset hrefs out of a STAC listing.
+
+    Returns the matching hrefs plus the other extensions seen, which feed the
+    "available asset types" hint when nothing matches.
+    """
+    hrefs: list[str] = []
+    other_exts: set[str] = set()
+    for item in items:
+        for asset_info in item.get("assets", {}).values():
+            href = asset_info.get("href", "")
+            clean = clean_href(href)
+            filename = clean.split("/")[-1]
+            if clean.endswith(suffixes):
+                if match is None or match in filename:
+                    hrefs.append(href)
+            elif "." in filename:
+                other_exts.add("." + filename.rsplit(".", 1)[-1])
+    return hrefs, other_exts
 
 
 def _ensure_grid_files(
@@ -206,8 +271,9 @@ def _ensure_grid_files(
 
     sfx = "/".join(suffixes)
     collection_id = COLLECTIONS[collection_key]
+    datetime_filter = _run_datetime_filter(collection_key, match)
     try:
-        items = _cached_collection_items(collection_id)
+        items = _cached_collection_items(collection_id, datetime_filter)
     except requests.exceptions.RequestException as exc:
         cached = [f for f in local if match is None or match in f.name]
         if cached:
@@ -223,18 +289,15 @@ def _ensure_grid_files(
             return cached
         raise
 
-    hrefs: list[str] = []
-    other_exts: set[str] = set()
-    for item in items:
-        for asset_info in item.get("assets", {}).values():
-            href = asset_info.get("href", "")
-            clean = clean_href(href)
-            filename = clean.split("/")[-1]
-            if clean.endswith(suffixes):
-                if match is None or match in filename:
-                    hrefs.append(href)
-            elif "." in filename:
-                other_exts.add("." + filename.rsplit(".", 1)[-1])
+    hrefs, other_exts = _grid_asset_hrefs(items, suffixes, match)
+
+    if not hrefs and datetime_filter is not None:
+        # The run-narrowed listing came back with nothing usable. Rather than
+        # report a file as missing on the strength of an optimisation, fall back
+        # to the full walk — slow, but it is exactly what happened before.
+        logger.debug("No %s assets for %r under datetime=%s; retrying unfiltered", sfx, match, datetime_filter)
+        items = _cached_collection_items(collection_id)
+        hrefs, other_exts = _grid_asset_hrefs(items, suffixes, match)
 
     if not hrefs:
         if match is not None:

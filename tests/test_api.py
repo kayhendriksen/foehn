@@ -1091,6 +1091,87 @@ def test_load_all_filters_combined(mock_session, mock_meta, mock_items):
     assert df["temp"][0] == 25.0  # July first (desc)
 
 
+# --- column projection (parsed columns pushed into read_csv) ---
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_columns_projection_matches_unprojected(mock_session, mock_meta, mock_items):
+    """Selecting columns up front must give exactly what selecting afterwards did."""
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    projected = load("smn", station="BER", frequency="d", columns=["temp"])
+
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    everything = load("smn", station="BER", frequency="d")
+
+    assert projected.columns == ["station_abbr", "reference_timestamp", "temp"]
+    assert projected.to_dicts() == everything.select(projected.columns).to_dicts()
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_columns_projection_keeps_drop_null_column(mock_session, mock_meta, mock_items):
+    """drop_null must still work on a column the caller didn't ask to return.
+
+    The projection has to keep it, or the filter silently loses its subject.
+    """
+    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    df = load("smn", station="BER", frequency="d", columns=["temp"], drop_null="precip")
+
+    assert df.columns == ["station_abbr", "reference_timestamp", "temp"]
+    assert len(df) == 4  # the one null-precip row is gone
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_columns_projection_handles_station_missing_the_column(mock_session, mock_meta, mock_items):
+    """A station whose file lacks the column still contributes rows, padded with null.
+
+    Projecting per file must not turn a heterogeneous schema into a hard error —
+    the diagonal concat filled these with nulls before and must keep doing so.
+    """
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = [
+        {"id": s, "assets": {"d": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{s.lower()}_d_recent.csv"}}}
+        for s in ("BER", "ZUR")
+    ]
+    with_temp = b"station_abbr;reference_timestamp;temp\nBER;2025-06-15T00:00:00;20.0\n"
+    without = b"station_abbr;reference_timestamp;precip\nZUR;2025-06-16T00:00:00;3.0\n"
+    session = MagicMock()
+    session.get = MagicMock(side_effect=[_mock_response(with_temp), _mock_response(without)])
+    session.__enter__.return_value = session
+    mock_session.return_value = session
+
+    df = load("smn", frequency="d", columns=["temp"], sort="asc")
+
+    assert df.columns == ["station_abbr", "reference_timestamp", "temp"]
+    assert df.to_dicts()[1]["station_abbr"] == "ZUR"
+    assert df.to_dicts()[1]["temp"] is None
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_columns_projection_keeps_forecast_local_date(mock_session, mock_meta, mock_items):
+    """forecast_local derives its timestamp from Date, so the projection must keep it."""
+    mock_meta.return_value = {"assets": {}}
+    href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
+    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    session.__enter__.return_value = session
+    mock_session.return_value = session
+
+    df = load("forecast_local", columns=["dkl010h0"])
+
+    assert "reference_timestamp" in df.columns
+    assert df["reference_timestamp"].null_count() == 0
+    assert df["dkl010h0"].to_list() == [282, 315]
+
+
 # --- limit + concurrent fetching ---
 
 

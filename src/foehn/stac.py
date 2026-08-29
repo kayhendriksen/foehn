@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 from foehn._urls import clean_href, validate_stac_url
 from foehn.collections import STAC_API_BASE
@@ -15,6 +16,7 @@ def get_collection_items(
     require_csv: bool = True,
     *,
     verbose: bool = True,
+    datetime_filter: str | None = None,
 ) -> list[dict]:
     """Paginate through all items in a STAC collection.
 
@@ -22,12 +24,20 @@ def get_collection_items(
         collection_id: The STAC collection ID.
         require_csv: If True and the first page has no CSV assets, stop early.
         verbose: Log progress at INFO level.
+        datetime_filter: Optional RFC 3339 instant or ``start/end`` interval passed
+            to the API as ``?datetime=``, narrowing the listing server-side. The
+            filter is carried across cursor pages by the API's own ``next`` links.
+            Only meaningful where a collection's item ``datetime`` tracks the data
+            (the GRIB2 forecasts) rather than a catalog-refresh time — see
+            ``foehn.grids._run_datetime_filter``.
     """
     # Lazy import to avoid a circular module-level import (client imports stac).
     from foehn.client import _retry_session
 
     items: list[dict] = []
     url: str | None = f"{STAC_API_BASE}/collections/{collection_id}/items?limit=100"
+    if datetime_filter:
+        url += f"&datetime={quote(datetime_filter, safe='')}"
     page = 0
 
     with _retry_session() as session:

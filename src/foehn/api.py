@@ -707,6 +707,19 @@ def load(
     # (requests.Session is not fully thread-safe). Sessions are scoped to this
     # call — garbage-collected when the function returns. The factory closes over
     # this module's _retry_session so it stays patchable at foehn.api.
+    # With an explicit ``columns=``, tell the parser up front instead of parsing all
+    # ~42 columns of every station file and selecting afterwards. The frame retained
+    # per station drops by an order of magnitude, which is what bounds peak memory
+    # while the whole matched set is assembled. Everything the later filters and the
+    # concat rely on has to survive the projection.
+    wanted_columns: set[str] | None = None
+    if columns:
+        wanted_columns = {"station_abbr", "reference_timestamp", *columns}
+        if drop_null:
+            wanted_columns.add(drop_null)
+        if dataset == "forecast_local":
+            wanted_columns.add("Date")  # reference_timestamp is derived from it
+
     get_session = _thread_local_session(lambda: _retry_session(pool_maxsize=1))
 
     def _fetch(href: str) -> pl.DataFrame:
@@ -715,7 +728,7 @@ def load(
         resp.raise_for_status()
         # Zero-copy when the payload is already UTF-8 (the usual case): these are
         # the big files, and ``workers`` of them are in flight at once.
-        frame = parse_csv_bytes(utf8_meteoswiss_csv(resp.content), metadata_types)
+        frame = parse_csv_bytes(utf8_meteoswiss_csv(resp.content), metadata_types, wanted_columns=wanted_columns)
         # Drop the rows this call can never return *before* they reach the
         # concat. Every frame is otherwise held in full until the whole matched
         # set is materialised, so a narrow year= over many stations peaked at the

@@ -191,11 +191,101 @@ def test_grid_listing_cache_expires(tmp_path):
 
     with (
         patch("foehn.grids.get_collection_items", return_value=items) as mock_items,
-        patch.object(grids, "_LISTING_TTL_SECONDS", 0.0),
+        patch.object(grids, "_LISTING_TTL_MIN_SECONDS", 0.0),
+        patch.object(grids, "_LISTING_TTL_FACTOR", 0.0),
     ):
         _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
         _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
     assert mock_items.call_count == 2
+
+
+def test_expensive_listings_are_cached_longer_than_cheap_ones():
+    """TTL follows what the walk cost, so an expensive listing is actually reused.
+
+    A fixed TTL shorter than the walk expired the entry before any follow-up call
+    could use it — precisely inverting the intent for the one collection (the
+    57k-item forecast listing, ~170s) that needed caching most.
+    """
+    from foehn import grids
+
+    # _cached_collection_items reads the clock 4x: now, started, elapsed-end, stored-at.
+    with (
+        patch("foehn.grids.get_collection_items", return_value=[]),
+        patch("foehn.grids.time.monotonic", side_effect=[0.0, 0.0, 200.0, 200.0]),
+    ):
+        grids._cached_collection_items("slow.collection")
+    _, slow_ttl, _ = grids._LISTING_CACHE[("slow.collection", None)]
+
+    with (
+        patch("foehn.grids.get_collection_items", return_value=[]),
+        patch("foehn.grids.time.monotonic", side_effect=[0.0, 0.0, 0.5, 0.5]),
+    ):
+        grids._cached_collection_items("fast.collection")
+    _, fast_ttl, _ = grids._LISTING_CACHE[("fast.collection", None)]
+
+    assert slow_ttl > 200.0  # outlives the walk that produced it
+    assert slow_ttl <= grids._LISTING_TTL_MAX_SECONDS
+    assert fast_ttl == grids._LISTING_TTL_MIN_SECONDS  # cheap walk sits on the floor
+
+
+def test_run_datetime_filter_only_applies_to_grib2():
+    """A run stamp narrows GRIB2 listings; other formats must keep the full walk.
+
+    CSV and radar collections set item datetime to a catalog-refresh time, so
+    filtering on a real data date there would match nothing.
+    """
+    from foehn.grids import _run_datetime_filter
+
+    assert _run_datetime_filter("forecast_icon_ch1", "202605231500-0-t_2m-ctrl") == "2026-05-23T15:00:00Z"
+    assert _run_datetime_filter("analysis_kenda_ch1", "202605231500-0-t_2m-ctrl") == "2026-05-23T15:00:00Z"
+    # radar (HDF5) and NetCDF opt out entirely, even with a 12-digit run in match
+    assert _run_datetime_filter("radar_precip", "cpc202605231500") is None
+    assert _run_datetime_filter("surface_derived_grid", "202605231500") is None
+    # no parseable run stamp, or an impossible one
+    assert _run_datetime_filter("forecast_icon_ch1", "t_2m-ctrl") is None
+    assert _run_datetime_filter("forecast_icon_ch1", "209913451500") is None
+    assert _run_datetime_filter("forecast_icon_ch1", None) is None
+
+
+def test_ensure_grid_files_narrows_forecast_listing_by_run(tmp_path):
+    """A GRIB2 open passes the run through as a server-side datetime filter."""
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    name = "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"
+    (out_dir / name).write_bytes(b"x")
+
+    with patch("foehn.grids.get_collection_items", return_value=_items_for(name)) as mock_items:
+        _ensure_grid_files(
+            "forecast_icon_ch1",
+            tmp_path / "bronze",
+            suffixes=(".grib2",),
+            match="202605231500-0-t_2m-ctrl",
+            max_files=1,
+        )
+    assert mock_items.call_args.kwargs["datetime_filter"] == "2026-05-23T15:00:00Z"
+
+
+def test_ensure_grid_files_falls_back_when_filtered_listing_misses(tmp_path):
+    """A filtered miss retries unfiltered rather than reporting the file missing."""
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    name = "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"
+    (out_dir / name).write_bytes(b"x")
+
+    def listing(_collection_id, **kwargs):
+        # Server-side filter finds nothing; the full walk does.
+        return [] if kwargs.get("datetime_filter") else _items_for(name)
+
+    with patch("foehn.grids.get_collection_items", side_effect=listing) as mock_items:
+        result = _ensure_grid_files(
+            "forecast_icon_ch1",
+            tmp_path / "bronze",
+            suffixes=(".grib2",),
+            match="202605231500-0-t_2m-ctrl",
+            max_files=1,
+        )
+    assert [p.name for p in result] == [name]
+    assert mock_items.call_count == 2  # filtered, then the unfiltered retry
 
 
 def test_ensure_single_file_match_validated_against_remote_not_cache(tmp_path):
