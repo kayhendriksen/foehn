@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import re
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
 
-from foehn._urls import validate_download_href
+from foehn._urls import asset_filename, clean_href, validate_download_href
 from foehn.client import (
     DEFAULT_WORKERS,
     DownloadResult,
     _check_zip_size,
     _retry_session,
+    _thread_local_session,
     download_climate_scenarios_indoor,
     download_collection,
     download_grib2,
@@ -87,10 +87,11 @@ def download(
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         time_slice: Time slices to download. Defaults to ["recent"]. Ignored for
             binary/grid datasets (GRIB2/NetCDF), which fetch the latest assets.
-        since: ISO timestamp for incremental updates. For automatic state
-            tracking across runs, use ``foehn.client.load_last_run(data_dir)``
-            to read the last timestamp and ``save_last_run(data_dir)`` after
-            a successful run.
+        since: ISO timestamp for incremental updates — only assets updated after
+            it are fetched. This function does not track state itself: pass the
+            previous run's timestamp, or use the ``foehn download`` CLI, which
+            persists one in ``_last_run.json`` and only advances it when the run
+            fully succeeds.
         workers: Concurrent HTTP downloads (default 8).
         force: Re-download even when local files look up to date. Currently
             only affects ZIP-shipped datasets (e.g. climate_scenarios_indoor),
@@ -183,7 +184,7 @@ def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
     coll = get_collection_metadata(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
-        if href.split("?", 1)[0].endswith(".csv") and suffix in href:
+        if clean_href(href).endswith(".csv") and suffix in href:
             validate_download_href(href)
             with _retry_session() as session:
                 resp = session.get(href, timeout=60)
@@ -382,7 +383,7 @@ def _load_indoor(
             asset_info.get("href", "")
             for item in items
             for asset_info in item.get("assets", {}).values()
-            if asset_info.get("href", "").split("?")[0].endswith(".zip")
+            if clean_href(asset_info.get("href", "")).endswith(".zip")
         ),
         None,
     )
@@ -463,25 +464,23 @@ def _load_climate_scenarios(
     for item in items:
         for asset_info in item.get("assets", {}).values():
             href = asset_info.get("href", "")
-            filename = href.split("?")[0].split("/")[-1]
+            filename = asset_filename(href)
             if filename.endswith(".csv") and "_meta_" not in filename:
                 hrefs.append(href)
 
     if not hrefs:
         raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
 
-    # requests.Session is not fully thread-safe, so give each worker thread its
-    # own session via threading.local. Resolving _retry_session here (rather than
-    # the shared client helper) keeps it patchable at the foehn.api boundary.
-    local = threading.local()
+    # One session per worker thread — requests.Session is not fully thread-safe.
+    # The factory closes over this module's _retry_session, so the seam stays
+    # patchable at foehn.api while the implementation is shared with the client.
+    get_session = _thread_local_session(lambda: _retry_session(pool_maxsize=1))
 
     def _fetch(href: str) -> pl.DataFrame:
-        if not hasattr(local, "session"):
-            local.session = _retry_session(pool_maxsize=1)
         validate_download_href(href)
-        resp = local.session.get(href, timeout=120)
+        resp = get_session().get(href, timeout=120)
         resp.raise_for_status()
-        return parse_climate_scenarios_csv(resp.content, href.split("?")[0].split("/")[-1])
+        return parse_climate_scenarios_csv(resp.content, asset_filename(href))
 
     if len(hrefs) == 1 or workers <= 1:
         frames = [_fetch(h) for h in hrefs]
@@ -648,7 +647,7 @@ def load(
     coll = get_collection_metadata(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
-        if href.split("?", 1)[0].endswith(".csv") and "_meta_parameters" in href:
+        if clean_href(href).endswith(".csv") and "_meta_parameters" in href:
             validate_download_href(href)
             with _retry_session() as session:
                 resp = session.get(href, timeout=60)
@@ -676,7 +675,7 @@ def load(
         assets = item.get("assets", {})
         for asset_info in assets.values():
             href = asset_info.get("href", "")
-            filename = href.split("?", 1)[0].split("/")[-1]
+            filename = asset_filename(href)
             if not filename.endswith(".csv"):
                 continue
             # Filter by frequency — encoded as _{f}_ or _{f}. in the filename.
@@ -695,27 +694,24 @@ def load(
     # Narrow forecasts to the newest model run — the retained window holds ~40 runs
     # of ~32 files each, and load() wants the current forecast, not all of them.
     if dataset in FORECAST_CSV_COLLECTIONS and csv_hrefs:
-        runs = {run for href in csv_hrefs if (run := forecast_run_from_filename(href.split("?", 1)[0])) is not None}
+        runs = {run for href in csv_hrefs if (run := forecast_run_from_filename(clean_href(href))) is not None}
         if runs:
             latest_run = max(runs)
-            csv_hrefs = [href for href in csv_hrefs if forecast_run_from_filename(href.split("?", 1)[0]) == latest_run]
+            csv_hrefs = [href for href in csv_hrefs if forecast_run_from_filename(clean_href(href)) == latest_run]
 
     if not csv_hrefs:
         filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"
         raise ValueError(f"No CSV files found for {dataset!r} with {filters}.")
 
-    # 3. Download and parse each CSV concurrently. requests.Session is not
-    # fully thread-safe (cookie jar, headers), so each worker thread gets its
-    # own session via threading.local. Sessions are scoped to this call —
-    # garbage-collected when the function returns. _retry_session is resolved
-    # here (not via the shared client helper) so it stays patchable at foehn.api.
-    local = threading.local()
+    # 3. Download and parse each CSV concurrently, one session per worker thread
+    # (requests.Session is not fully thread-safe). Sessions are scoped to this
+    # call — garbage-collected when the function returns. The factory closes over
+    # this module's _retry_session so it stays patchable at foehn.api.
+    get_session = _thread_local_session(lambda: _retry_session(pool_maxsize=1))
 
     def _fetch(href: str) -> pl.DataFrame:
-        if not hasattr(local, "session"):
-            local.session = _retry_session(pool_maxsize=1)
         validate_download_href(href)
-        resp = local.session.get(href, timeout=60)
+        resp = get_session().get(href, timeout=60)
         resp.raise_for_status()
         # Zero-copy when the payload is already UTF-8 (the usual case): these are
         # the big files, and ``workers`` of them are in flight at once.

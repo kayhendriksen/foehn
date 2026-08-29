@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from foehn._urls import validate_download_href
+from foehn._urls import asset_filename, clean_href, validate_download_href
 from foehn.collections import COLLECTION_META, COLLECTIONS
 from foehn.stac import get_collection_items, get_collection_metadata
 
@@ -228,7 +228,7 @@ def _ensure_grid_files(
     for item in items:
         for asset_info in item.get("assets", {}).values():
             href = asset_info.get("href", "")
-            clean = href.split("?")[0]
+            clean = clean_href(href)
             filename = clean.split("/")[-1]
             if clean.endswith(suffixes):
                 if match is None or match in filename:
@@ -244,7 +244,7 @@ def _ensure_grid_files(
 
     # Enforce the per-format file cap before downloading so an over-broad match
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
-    _raise_if_too_many(collection_key, match, [h.split("?")[0].split("/")[-1] for h in hrefs], max_files)
+    _raise_if_too_many(collection_key, match, [asset_filename(h) for h in hrefs], max_files)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -253,7 +253,7 @@ def _ensure_grid_files(
     targets: dict[Path, str] = {}
     for href in hrefs:
         validate_download_href(href)
-        filepath = out_dir / href.split("?")[0].split("/")[-1]
+        filepath = out_dir / asset_filename(href)
         paths.append(filepath)
         if not filepath.exists() and filepath not in targets:
             targets[filepath] = href
@@ -453,7 +453,7 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None
 
     validate_download_href(href)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / href.split("?")[0].split("/")[-1]
+    path = out_dir / asset_filename(href)
     if not path.exists():
         with _retry_session() as session:
             _download_binary(session, href, path)

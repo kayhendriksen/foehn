@@ -277,6 +277,44 @@ def test_download_collection_drops_etag_when_server_stops_sending_one(mock_retry
 
 @patch("foehn.client.get_collection_items")
 @patch("foehn.client._retry_session")
+def test_download_collection_deduplicates_same_destination(mock_retry, mock_items, tmp_path):
+    """Two hrefs resolving to one filename are fetched once, not concurrently.
+
+    Both workers would otherwise stream into the same ``.part`` file.
+    """
+    mock_get = mock_retry.return_value.get
+    base = "https://data.geo.admin.ch"
+    mock_items.return_value = [
+        _stac_item(f"{base}/a/ogd-smn_tst_d_recent.csv"),
+        _stac_item(f"{base}/b/ogd-smn_tst_d_recent.csv"),
+    ]
+    mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n")
+
+    result = download_collection("smn", tmp_path / "bronze")
+
+    assert result.downloaded == 1
+    assert mock_get.call_count == 1
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
+def test_download_collection_state_dir_overrides_default(mock_retry, mock_items, tmp_path):
+    """ETag state goes where the caller says, not always output_dir.parent."""
+    mock_get = mock_retry.return_value.get
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    mock_items.return_value = [_stac_item(url)]
+    mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n", etag='"abc"')
+
+    state = tmp_path / "state"
+    state.mkdir()
+    download_collection("smn", tmp_path / "bronze", state_dir=state)
+
+    assert load_etags(state) == {url: '"abc"'}
+    assert not (tmp_path / "_etags.json").exists()
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_prunes_stale_etags(mock_retry, mock_items, tmp_path):
     """A clean full run drops ETags for assets gone upstream — scoped to this collection."""
     mock_get = mock_retry.return_value.get

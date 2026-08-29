@@ -15,6 +15,7 @@ from foehn.convert import (
     convert_climate_scenarios_to_parquet,
     convert_to_parquet,
     decode_meteoswiss_csv,
+    group_csv_files,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
     scan_climate_scenarios_csv,
@@ -64,6 +65,56 @@ def climate_normals_bronze_dir(tmp_path):
     cn_dir.mkdir()
     shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", cn_dir / "sample.txt")
     return tmp_path
+
+
+# --- group_csv_files ---
+
+
+def test_group_csv_files(smn_bronze_dir):
+    groups = group_csv_files(smn_bronze_dir / "smn", "smn")
+    assert ("d", "recent") in groups
+    assert len(groups[("d", "recent")]) == 2
+
+
+def test_group_csv_files_excludes_meta(smn_bronze_dir):
+    groups = group_csv_files(smn_bronze_dir / "smn", "smn")
+    all_files = [f for files in groups.values() for f in files]
+    assert all("_meta_" not in f.name for f in all_files)
+
+
+def test_group_csv_files_empty(tmp_path):
+    empty_dir = tmp_path / "smn"
+    empty_dir.mkdir()
+    assert group_csv_files(empty_dir, "smn") == {}
+
+
+def test_group_csv_files_decade_split_historical_share_one_group(tmp_path):
+    """Per-decade historical chunks belong to the same (frequency, slice) group."""
+    d = tmp_path / "smn"
+    d.mkdir()
+    for name in ("ogd-smn_ber_t_historical_2000-2009.csv", "ogd-smn_ber_t_historical_2010-2019.csv"):
+        (d / name).write_text("a;b\n1;2\n")
+
+    groups = group_csv_files(d, "smn")
+    assert list(groups) == [("t", "historical")]
+    assert len(groups[("t", "historical")]) == 2
+
+
+def test_group_csv_files_no_granularity_collection_is_one_group(tmp_path):
+    """forecast_local filenames don't carry the collection prefix at all.
+
+    They are vnut12.lssw.<run>.<param>.csv, so the prefix-stripping path would
+    slice arbitrary characters off the stem — the collection collapses to a
+    single unkeyed group instead.
+    """
+    d = tmp_path / "forecast_local"
+    d.mkdir()
+    for name in ("vnut12.lssw.202607210600.dkl010h0.csv", "vnut12.lssw.202607210600.tre200h0.csv"):
+        (d / name).write_text("a;b\n1;2\n")
+
+    groups = group_csv_files(d, "forecast_local")
+    assert list(groups) == [()]
+    assert len(groups[()]) == 2
 
 
 # --- convert_to_parquet ---

@@ -104,7 +104,9 @@ def _load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
     Returns an empty dict if no metadata file is found or if the expected
     columns (``parameter_shortname``, ``parameter_datatype``) are missing.
     """
-    meta_files = list(csv_dir.glob("*_meta_parameters.csv"))
+    # sorted(): glob order is filesystem-dependent, so an unsorted [0] picks
+    # arbitrarily when a collection ships more than one metadata file.
+    meta_files = sorted(csv_dir.glob("*_meta_parameters.csv"))
     if not meta_files:
         return {}
 
@@ -226,6 +228,46 @@ def add_forecast_local_timestamp(frame):
     )
 
 
+def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...], list[Path]]:
+    """Group a collection's data CSVs by (frequency, time_slice).
+
+    MeteoSwiss names standard CSV assets
+    ``ogd-{key}_{station}_{granularity}[_{timeslice}].csv``, so the group key is
+    read out of the filename: ``ogd-smn_ber_d_recent.csv`` → ``("d", "recent")``.
+    Metadata CSVs are excluded, and collections whose filenames carry no
+    granularity segment collapse into a single unkeyed group.
+
+    Shared with the Delta ingestion script, which builds one table per group and
+    must agree with the Parquet converter on where the boundaries are — these
+    are upstream naming rules, and two copies of them drift.
+    """
+    from foehn.collections import COLLECTIONS, NO_GRANULARITY_COLLECTIONS
+
+    csv_files = [f for f in sorted(csv_dir.glob("*.csv")) if "_meta_" not in f.name]
+    groups: dict[tuple[str, ...], list[Path]] = {}
+
+    # No granularity in the filename at all (forecast_local's vnut12.lssw.* names,
+    # climate_scenarios). Returning early also avoids slicing off a prefix these
+    # names do not carry, which would chop arbitrary characters off the stem.
+    if collection_key in NO_GRANULARITY_COLLECTIONS:
+        if csv_files:
+            groups[()] = csv_files
+        return groups
+
+    # Derive the filename prefix from the collection ID (e.g. "ogd-smn").
+    prefix = COLLECTIONS[collection_key].rsplit(".", 1)[-1]
+    for csv_path in csv_files:
+        suffix_part = csv_path.stem[len(prefix) + 1 :]  # e.g. "ber_d_recent"
+        parts = suffix_part.split("_")
+        if len(parts) > 2:
+            group_key = (parts[1], parts[2])  # (frequency, time_slice)
+        else:
+            group_key = (parts[1],) if len(parts) > 1 else ()  # (frequency,)
+        groups.setdefault(group_key, []).append(csv_path)
+
+    return groups
+
+
 def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert all CSVs in a collection's bronze folder to combined Parquet files.
 
@@ -242,36 +284,16 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
         Number of groups that failed to convert. Zero means everything succeeded;
         non-zero lets callers gate downstream state writes (e.g. ``_last_run.json``).
     """
-    from foehn.collections import COLLECTIONS, NO_GRANULARITY_COLLECTIONS
-
     csv_dir = bronze_dir / collection_key
     out_dir = parquet_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_files = sorted(csv_dir.glob("*.csv"))
-    csv_files = [f for f in csv_files if "_meta_" not in f.name]
-    if not csv_files:
+    groups = group_csv_files(csv_dir, collection_key)
+    if not groups:
         return 0
 
     # Load parameter type info from metadata once for the whole collection.
     metadata_types = _load_metadata_types(csv_dir)
-
-    # Derive the filename prefix from the collection ID (e.g. "ogd-smn").
-    prefix = COLLECTIONS[collection_key].rsplit(".", 1)[-1]
-    no_granularity = collection_key in NO_GRANULARITY_COLLECTIONS
-
-    # Group CSVs by (frequency, time_slice).
-    groups: dict[tuple[str, ...], list[Path]] = {}
-    for csv_path in csv_files:
-        suffix_part = csv_path.stem[len(prefix) + 1 :]  # e.g. "ber_d_recent"
-        parts = suffix_part.split("_")
-        if no_granularity:
-            group_key: tuple[str, ...] = ()
-        elif len(parts) > 2:
-            group_key = (parts[1], parts[2])  # (frequency, time_slice)
-        else:
-            group_key = (parts[1],) if len(parts) > 1 else ()  # (frequency,)
-        groups.setdefault(group_key, []).append(csv_path)
 
     logger.info("Converting %s to Parquet:", collection_key)
     converted = 0
