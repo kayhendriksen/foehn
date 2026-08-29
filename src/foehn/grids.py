@@ -32,6 +32,7 @@ avoid loading the whole set into memory) is future work.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import warnings
@@ -368,11 +369,9 @@ def _open_odim_composite(xr, path: Path):
     ds.coords["y"].attrs.update({"units": "m", "long_name": "Swiss LV95 northing (CHY)"})
     ds.attrs.update({"projdef": projdef, "grid": "swiss_lv95", "odim_object": obj})
     if date and time:
-        try:
+        with contextlib.suppress(ValueError, IndexError):
             ts = np.datetime64(f"{date[:4]}-{date[4:6]}-{date[6:8]}T{time[:2]}:{time[2:4]}:{time[4:6]}")
             ds = ds.assign_coords(time=ts)
-        except (ValueError, IndexError):
-            pass
     return ds
 
 

@@ -167,7 +167,7 @@ def cmd_download(args: argparse.Namespace) -> None:
         if not args.no_parquet:
             failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 
-    if failures == 0 and download_failures == 0:
+    if failures == download_failures == 0:
         save_last_run(data_dir)
     else:
         # Don't advance the incremental cursor if anything failed — otherwise the

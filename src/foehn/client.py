@@ -390,7 +390,7 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
     if not remote_updated:
         return False
     try:
-        remote_dt = datetime.fromisoformat(remote_updated.replace("Z", "+00:00"))
+        remote_dt = datetime.fromisoformat(remote_updated)
         local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
     except (ValueError, OSError):
         return False

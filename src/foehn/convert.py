@@ -401,7 +401,7 @@ def parse_climate_scenarios_filename(filename: str) -> tuple[str, str, str]:
     Files are named ``ogd-climate-scenarios-ch2025_{station}_{variable}_{gwl}``.
     """
     stem = filename.rsplit("/", 1)[-1]
-    stem = stem[:-4] if stem.endswith(".csv") else stem
+    stem = stem.removesuffix(".csv")
     parts = stem.split("_")
     if len(parts) < 3:
         raise ValueError(
