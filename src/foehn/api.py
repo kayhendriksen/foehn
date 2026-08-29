@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -256,6 +257,27 @@ def inventory(dataset: str) -> pl.DataFrame:
     )
 
 
+# A ``date_to`` of exactly "YYYY-MM-DD" names a whole day, not its midnight.
+_BARE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
+    """Raise ValueError naming any of *names* the loaded frame doesn't have.
+
+    Silently ignoring an unknown column turns a mistyped MeteoSwiss shortcode
+    (``tre200dO`` for ``tre200d0``) into a plausible-looking wrong answer: the
+    ``columns`` filter returns only the always-kept key columns, and
+    ``drop_null`` keeps every null row it was asked to remove. Both are worth an
+    error, especially on the MCP surface where the caller is an LLM guessing
+    parameter names.
+    """
+    missing = [n for n in names if n not in df.columns]
+    if not missing:
+        return
+    available = ", ".join(sorted(df.columns))
+    raise ValueError(f"Unknown column(s) {missing} in {label}=. This dataset has: {available}")
+
+
 def _apply_post_filters(
     df: pl.DataFrame,
     *,
@@ -283,14 +305,24 @@ def _apply_post_filters(
     if date_from is not None:
         df = df.filter(pl.col(ts).cast(pl.Datetime) >= pl.lit(date_from).str.to_datetime())
     if date_to is not None:
-        df = df.filter(pl.col(ts).cast(pl.Datetime) <= pl.lit(date_to).str.to_datetime())
-    if drop_null and drop_null in df.columns:
+        bound = pl.lit(date_to).str.to_datetime()
+        if _BARE_DATE_RE.match(date_to):
+            # A bare "YYYY-MM-DD" means the whole of that day. Comparing <= the
+            # parsed midnight is right for d/m/y (timestamps sit at 00:00) but
+            # silently drops every 10-minute and hourly reading after 00:00, so
+            # bound the day exclusively at the next midnight instead.
+            df = df.filter(pl.col(ts).cast(pl.Datetime) < bound.dt.offset_by("1d"))
+        else:
+            df = df.filter(pl.col(ts).cast(pl.Datetime) <= bound)
+    if drop_null:
+        _require_columns(df, [drop_null], "drop_null")
         df = df.filter(pl.col(drop_null).is_not_null())
     if sort in ("asc", "desc"):
         df = df.sort(ts, descending=(sort == "desc"))
     if columns:
+        _require_columns(df, columns, "columns")
         keep = [c for c in keep_cols if c in df.columns]
-        keep += [c for c in columns if c not in keep and c in df.columns]
+        keep += [c for c in columns if c not in keep]
         df = df.select(keep)
     if limit is not None:
         df = df.head(limit)
@@ -435,13 +467,15 @@ def _load_climate_scenarios(
 
     df = pl.concat(frames, how="diagonal_relaxed")
 
-    if drop_null and drop_null in df.columns:
+    if drop_null:
+        _require_columns(df, [drop_null], "drop_null")
         df = df.filter(pl.col(drop_null).is_not_null())
     if sort in ("asc", "desc"):
         df = df.sort("date", descending=(sort == "desc"))
     if columns:
+        _require_columns(df, columns, "columns")
         keep = [c for c in ("station_abbr", "variable", "gwl", "date") if c in df.columns]
-        keep += [c for c in columns if c not in keep and c in df.columns]
+        keep += [c for c in columns if c not in keep]
         df = df.select(keep)
     if limit is not None:
         df = df.head(limit)

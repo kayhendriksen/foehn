@@ -442,6 +442,23 @@ def test_download_climate_normals_zip_rejects_decompression_bomb(mock_retry, tmp
     assert not (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
 
 
+def test_safe_extract_zip_accepts_nested_members(tmp_path):
+    """Legitimate nested members must extract.
+
+    The guard used to compare strings against ``str(out_dir) + "/"``, which no
+    resolved path matches on Windows (separator is "\\") — so every member of
+    every archive was rejected there, including the C6 climate normals that
+    bare ``foehn download`` always fetches.
+    """
+    zip_path = tmp_path / "ok.zip"
+    zip_path.write_bytes(_make_zip({"nested/dir/sample.txt": b"data"}))
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    assert _safe_extract_zip(zip_path, out_dir) == 1
+    assert (out_dir / "nested" / "dir" / "sample.txt").read_bytes() == b"data"
+
+
 def test_safe_extract_zip_rejects_path_traversal(tmp_path):
     zip_path = tmp_path / "evil.zip"
     zip_path.write_bytes(_make_zip({"../evil.txt": b"x"}))

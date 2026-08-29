@@ -383,7 +383,7 @@ def test_icon_unstructured_lonlat_reads_and_caches(tmp_path):
 
     from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
 
-    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
     const = xr.Dataset({"tlat": ("values", np.array([46.0, 47.0])), "tlon": ("values", np.array([7.0, 8.0]))})
     fake_path = tmp_path / "hc.grib2"
     fake_path.write_bytes(b"x")
@@ -398,18 +398,83 @@ def test_icon_unstructured_lonlat_reads_and_caches(tmp_path):
     assert list(lat) == [46.0, 47.0]
     assert list(lon) == [7.0, 8.0]
     mock_open.assert_called_once()
-    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
 
 
 def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
     """No constants file → (None, None); the caller leaves the grid un-georeferenced."""
     from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
 
-    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
     with patch("foehn.grids._ensure_constants_file", return_value=None):
         lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze")
     assert lat is None and lon is None
-    _ICON_COORDS_CACHE.pop("forecast_icon_ch1", None)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
+
+
+def test_icon_unstructured_lonlat_cache_is_keyed_on_data_dir(tmp_path):
+    """A second data_dir must not be served the first one's coordinates.
+
+    The constants file is resolved *under* bronze_dir, so a cache keyed on the
+    collection alone silently georeferences one data_dir's grids with another's.
+    """
+    pytest.importorskip("xarray")
+    cfgrib = pytest.importorskip("cfgrib")
+    import numpy as np
+    import xarray as xr
+
+    from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
+
+    dir_a, dir_b = tmp_path / "a" / "bronze", tmp_path / "b" / "bronze"
+    for d in (dir_a, dir_b):
+        _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(d)), None)
+
+    def const(lat_val):
+        return xr.Dataset({"tlat": ("values", np.array([lat_val])), "tlon": ("values", np.array([7.0]))})
+
+    fake_path = tmp_path / "hc.grib2"
+    fake_path.write_bytes(b"x")
+
+    with patch("foehn.grids._ensure_constants_file", return_value=fake_path):
+        with patch.object(cfgrib, "open_datasets", return_value=[const(46.0)]):
+            lat_a, _ = _icon_unstructured_lonlat("forecast_icon_ch1", dir_a)
+        with patch.object(cfgrib, "open_datasets", return_value=[const(99.0)]) as mock_b:
+            lat_b, _ = _icon_unstructured_lonlat("forecast_icon_ch1", dir_b)
+
+    assert list(lat_a) == [46.0]
+    assert list(lat_b) == [99.0]  # not dir_a's cached value
+    mock_b.assert_called_once()  # the second dir really did parse its own file
+    for d in (dir_a, dir_b):
+        _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(d)), None)
+
+
+def test_icon_unstructured_lonlat_does_not_cache_failure(tmp_path):
+    """A transient miss must not poison every later open in the process."""
+    pytest.importorskip("xarray")
+    cfgrib = pytest.importorskip("cfgrib")
+    import numpy as np
+    import xarray as xr
+
+    from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
+
+    bronze = tmp_path / "bronze"
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(bronze)), None)
+
+    # First call: constants unreachable (offline) → (None, None), not memoised.
+    with patch("foehn.grids._ensure_constants_file", return_value=None):
+        assert _icon_unstructured_lonlat("forecast_icon_ch1", bronze) == (None, None)
+
+    const = xr.Dataset({"tlat": ("values", np.array([46.0])), "tlon": ("values", np.array([7.0]))})
+    fake_path = tmp_path / "hc.grib2"
+    fake_path.write_bytes(b"x")
+    with (
+        patch("foehn.grids._ensure_constants_file", return_value=fake_path),
+        patch.object(cfgrib, "open_datasets", return_value=[const]),
+    ):
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", bronze)
+
+    assert list(lat) == [46.0] and list(lon) == [7.0]
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(bronze)), None)
 
 
 # ── GRIB2 hypercube (stack="auto") ────────────────────────────────────────────

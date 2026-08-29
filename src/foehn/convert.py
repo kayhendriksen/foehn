@@ -6,6 +6,7 @@ import io
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 import polars as pl
 
@@ -141,6 +142,36 @@ def parse_csv_bytes(
         raise last_err from None
 
 
+# The two codecs the converters below actually use. Narrower than polars'
+# ParquetCompression on purpose: a bare ``str`` is wider than the literal
+# polars accepts, which the type checker rejects at the call site.
+_ParquetCompression = Literal["zstd", "snappy"]
+
+
+def _write_parquet_atomic(
+    frame: pl.LazyFrame | pl.DataFrame, path: Path, compression: _ParquetCompression = "zstd"
+) -> None:
+    """Write a frame to *path* via a sibling temp file + Path.replace.
+
+    A write that dies part-way (disk full, a source read error, OOM mid-stream)
+    creates the output file before it fails. Writing straight to the final path
+    would leave that truncated Parquet behind *with a fresh mtime* — which the
+    up-to-date checks in the converters below read as "already converted" and
+    skip from then on, so the next run reports success over a corrupt file.
+    Staging into a temp file means a failed write leaves nothing at all.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        if isinstance(frame, pl.LazyFrame):
+            frame.sink_parquet(tmp, compression=compression)
+        else:
+            frame.write_parquet(tmp, compression=compression)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def add_forecast_local_timestamp(frame):
     """Add a parsed reference_timestamp from forecast_local's compact Date column.
 
@@ -246,7 +277,7 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
                     combined = pl.concat(lazy_frames, how="diagonal_relaxed")
                     if collection_key == "forecast_local":
                         combined = add_forecast_local_timestamp(combined)
-                    combined.sink_parquet(parquet_path, compression="zstd")
+                    _write_parquet_atomic(combined, parquet_path)
                     break
                 except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
                     m = _COL_RE.search(str(e))
@@ -352,7 +383,7 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
         return 0
 
     try:
-        pl.concat(frames, how="diagonal_relaxed").sink_parquet(out_path, compression="zstd")
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), out_path)
     except Exception as e:
         logger.warning("  FAIL: %s", e)
         return 1
@@ -487,7 +518,7 @@ def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) ->
         return failed
 
     try:
-        pl.concat(frames, how="diagonal_relaxed").sink_parquet(out_path, compression="zstd")
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), out_path)
     except Exception as e:
         logger.warning("  FAIL: %s", e)
         return failed + 1
@@ -532,7 +563,7 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> i
                 try_parse_dates=True,
                 truncate_ragged_lines=True,
             )
-            df.write_parquet(parquet_path, compression="snappy")
+            _write_parquet_atomic(df, parquet_path, compression="snappy")
             converted += 1
             logger.info("  [%d/%d] %s... Converted", i, total, txt_path.name)
         except Exception as e:

@@ -375,9 +375,11 @@ def _open_odim_composite(xr, path: Path):
     return ds
 
 
-# Parsed ICON/KENDA cell lat/lon, keyed by collection — the constants GRIB is
-# ~11 MB and the same grid for every field in a collection, so parse it once.
-_ICON_COORDS_CACHE: dict[str, tuple] = {}
+# Parsed ICON/KENDA cell lat/lon — the constants GRIB is ~11 MB and the same grid
+# for every field in a collection, so parse it once. Keyed by (collection, bronze
+# dir): the constants file is resolved *under* bronze_dir, so keying on the
+# collection alone hands a second data_dir the first one's coordinates.
+_ICON_COORDS_CACHE: dict[tuple[str, str], tuple] = {}
 
 
 def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None:
@@ -416,8 +418,9 @@ def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path):
     Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
     the same ``values`` dimension as the forecast fields). Cached per collection.
     """
-    if collection_key in _ICON_COORDS_CACHE:
-        return _ICON_COORDS_CACHE[collection_key]
+    cache_key = (collection_key, str(bronze_dir))
+    if cache_key in _ICON_COORDS_CACHE:
+        return _ICON_COORDS_CACHE[cache_key]
 
     import cfgrib
 
@@ -429,7 +432,11 @@ def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path):
                 lat = ds["tlat"].values
             if "tlon" in ds.variables:
                 lon = ds["tlon"].values
-    _ICON_COORDS_CACHE[collection_key] = (lat, lon)
+    # Only memoise a real answer. Caching the (None, None) from a transient
+    # failure — offline, a half-written constants file — would poison every
+    # later open in this process with an ungeoreferenced grid.
+    if lat is not None and lon is not None:
+        _ICON_COORDS_CACHE[cache_key] = (lat, lon)
     return lat, lon
 
 

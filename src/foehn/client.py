@@ -621,7 +621,10 @@ def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
         resolved_out_dir = out_dir.resolve()
         for member in zf.infolist():
             target = (resolved_out_dir / member.filename).resolve()
-            if not str(target).startswith(str(resolved_out_dir) + "/"):
+            # Path comparison, not string prefixing: a hardcoded "/" separator
+            # rejects every legitimate member on Windows, where the resolved
+            # target is separated by "\" and nothing ever matches the prefix.
+            if target == resolved_out_dir or not target.is_relative_to(resolved_out_dir):
                 raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
         zf.extractall(out_dir)
         return len(zf.namelist())
