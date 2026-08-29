@@ -23,3 +23,18 @@ def validate_stac_url(url: str) -> str:
 def validate_download_href(href: str) -> str:
     """Raise ValueError if *href* is not a trusted download URL."""
     return _validate_https_url(href, DOWNLOAD_DOMAINS, "download")
+
+
+def clean_href(href: str) -> str:
+    """Return *href* without its query string.
+
+    STAC asset hrefs may carry a query (``?token=...``), so every suffix or
+    filename check has to strip it first — an ``endswith(".csv")`` on the raw
+    href silently drops those assets.
+    """
+    return href.split("?", 1)[0]
+
+
+def asset_filename(href: str) -> str:
+    """Return just the filename of an asset href, ignoring any query string."""
+    return clean_href(href).rsplit("/", 1)[-1]

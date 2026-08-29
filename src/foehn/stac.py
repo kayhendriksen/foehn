@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from foehn._urls import validate_stac_url
+from foehn._urls import clean_href, validate_stac_url
 from foehn.collections import STAC_API_BASE
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ def get_collection_items(
             # After first page, check if any item has CSV assets — if not, stop
             if require_csv and page == 1 and features:
                 has_csv = any(
-                    href.split("?", 1)[0].endswith(".csv")
+                    clean_href(href).endswith(".csv")
                     for feat in features
                     for href in (a.get("href", "") for a in feat.get("assets", {}).values())
                 )

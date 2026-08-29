@@ -16,7 +16,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from foehn._urls import validate_download_href
+from foehn._urls import asset_filename, clean_href, validate_download_href
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
     COLLECTIONS,
@@ -41,6 +41,12 @@ class DownloadResult:
 
     Callers use this to decide whether to run expensive downstream work
     (e.g. Spark MERGE INTO) without scanning the output directory.
+
+    ``total_assets`` is per-producer: ``download_collection`` counts the assets
+    left after its time-slice filter, while ``download_grib2``/``download_netcdf``
+    count every matching asset in the listing. ``foehn.download`` sums results
+    across the metadata and data passes, so treat the total as a scale hint
+    rather than a figure comparable between dataset types.
     """
 
     total_assets: int = 0
@@ -77,7 +83,7 @@ def _retry_session(
     return session
 
 
-def _thread_local_session() -> Callable[[], requests.Session]:
+def _thread_local_session(factory: Callable[[], requests.Session] | None = None) -> Callable[[], requests.Session]:
     """Return a getter that lazily creates one ``requests.Session`` per worker thread.
 
     ``requests.Session`` is not fully thread-safe (cookie jar, headers), so any
@@ -85,15 +91,38 @@ def _thread_local_session() -> Callable[[], requests.Session]:
     across a ``ThreadPoolExecutor``. Sessions live for the lifetime of the
     returned closure — when the caller drops the getter, the per-thread sessions
     are garbage-collected with it.
+
+    ``factory`` overrides how a session is built. ``foehn.api`` passes one that
+    resolves ``_retry_session`` from its own module namespace, which is what lets
+    it share this implementation while keeping the patch seam tests rely on at
+    ``foehn.api._retry_session``.
     """
     local = threading.local()
+    build = factory if factory is not None else (lambda: _retry_session(pool_maxsize=1))
 
     def get() -> requests.Session:
         if not hasattr(local, "session"):
-            local.session = _retry_session(pool_maxsize=1)
+            local.session = build()
         return local.session
 
     return get
+
+
+def _dedupe_by_destination(pairs: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    """Keep one (href, filepath) pair per destination path.
+
+    Two hrefs resolving to the same local filename would have workers streaming
+    into the same ``.part`` file at once and corrupting it. A collision is an
+    upstream naming quirk we can't resolve here, so keep the first and say so
+    rather than dropping one silently.
+    """
+    seen: dict[Path, str] = {}
+    for href, filepath in pairs:
+        if filepath in seen:
+            logger.warning("  Duplicate destination %s — skipping %s", filepath.name, href)
+            continue
+        seen[filepath] = href
+    return [(href, filepath) for filepath, href in seen.items()]
 
 
 # --- State files (ETags + last-run timestamp) ---
@@ -183,6 +212,7 @@ def download_collection(
     data_types: list[str] | None = None,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
+    state_dir: Path | None = None,
 ) -> DownloadResult:
     """Download CSVs for a collection.
 
@@ -192,10 +222,15 @@ def download_collection(
         data_types: List of "historical", "recent", "now". Defaults to ["recent"].
         since: ISO timestamp — only process items updated after this time.
         workers: Number of concurrent HTTP downloads.
+        state_dir: Where ``_etags.json`` lives. Defaults to ``output_dir.parent``,
+            which is the data root when output_dir is the usual bronze directory.
+            Pass it explicitly to keep the ETag state somewhere else — calling
+            this with an arbitrary output_dir otherwise scatters state a level up.
 
     Returns:
         DownloadResult with counts and list of newly downloaded filenames.
     """
+    state_dir = state_dir if state_dir is not None else output_dir.parent
     if data_types is None:
         data_types = ["recent"]
 
@@ -203,7 +238,7 @@ def download_collection(
     out_dir = output_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    etags = load_etags(output_dir.parent)
+    etags = load_etags(state_dir)
 
     logger.info("%s", "=" * 60)
     logger.info("Collection: %s", collection_id)
@@ -226,10 +261,9 @@ def download_collection(
     # hourly runs × 32 parameters, not a single forecast. Selecting the latest item
     # therefore did not select the latest run — and since the newest item is created
     # at ~04:00 UTC and filled as the day's runs publish, it is routinely empty,
-    # which is what produced zero CSVs. Keep every item here and narrow to the
-    # newest run below, from the filenames.
-    if collection_key in FORECAST_CSV_COLLECTIONS and items:
-        items.sort(key=lambda x: x.get("id", ""))
+    # which is what produced zero CSVs. Every item is kept, and the newest run is
+    # picked out of the filenames below. (Ordering the items buys nothing: the run
+    # is chosen with max(), and downloads complete out of order regardless.)
 
     # Collect matching CSV assets. ``all_csv_hrefs`` is the full pre-filter set
     # (every CSV in the listing, regardless of time slice) — the prune universe
@@ -241,7 +275,7 @@ def download_collection(
         assets = item.get("assets", {})
         for asset_info in assets.values():
             href = asset_info.get("href", "")
-            clean = href.split("?", 1)[0]
+            clean = clean_href(href)
             if not clean.endswith(".csv"):
                 continue
             all_csv_hrefs.add(href)
@@ -254,13 +288,11 @@ def download_collection(
     # One forecast run is ~32 files at ~30 MB each (~1 GB); the full retained
     # window is ~40 runs (~40 GB). Keep only the newest complete-ish run.
     if collection_key in FORECAST_CSV_COLLECTIONS and csv_assets:
-        runs = {run for href, _ in csv_assets if (run := forecast_run_from_filename(href.split("?", 1)[0])) is not None}
+        runs = {run for href, _ in csv_assets if (run := forecast_run_from_filename(clean_href(href))) is not None}
         if runs:
             latest_run = max(runs)
             csv_assets = [
-                (href, info)
-                for href, info in csv_assets
-                if forecast_run_from_filename(href.split("?", 1)[0]) == latest_run
+                (href, info) for href, info in csv_assets if forecast_run_from_filename(clean_href(href)) == latest_run
             ]
             logger.info("  Latest forecast run: %s (of %d available)", latest_run, len(runs))
 
@@ -276,15 +308,10 @@ def download_collection(
     skipped = 0
     failed = 0
     filenames: list[str] = []
+    fetch_targets = _dedupe_by_destination([(href, out_dir / asset_filename(href)) for href, _ in csv_assets])
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_href = {
-            pool.submit(
-                _do_csv,
-                href,
-                out_dir / href.split("?")[0].split("/")[-1],
-                etags.get(href),
-            ): href
-            for href, _ in csv_assets
+            pool.submit(_do_csv, href, filepath, etags.get(href)): href for href, filepath in fetch_targets
         }
         for i, fut in enumerate(as_completed(future_to_href), 1):
             # Isolate per-asset failures: one transient 404/timeout must not abort
@@ -321,7 +348,7 @@ def download_collection(
         if stale:
             logger.info("  Pruned %d stale ETag entries", len(stale))
 
-    save_etags(output_dir.parent, etags)
+    save_etags(state_dir, etags)
     if skipped:
         logger.info("  Skipped %d unchanged files", skipped)
     if failed:
@@ -347,11 +374,13 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
     if not assets:
         return DownloadResult()
 
-    targets = [
-        (asset_info["href"], out_dir / asset_info["href"].split("?")[0].split("/")[-1])
-        for asset_info in assets.values()
-        if asset_info.get("href", "").split("?", 1)[0].endswith(".csv")
-    ]
+    targets = _dedupe_by_destination(
+        [
+            (asset_info["href"], out_dir / asset_filename(asset_info["href"]))
+            for asset_info in assets.values()
+            if clean_href(asset_info.get("href", "")).endswith(".csv")
+        ]
+    )
     if not targets:
         return DownloadResult()
 
@@ -468,7 +497,7 @@ def download_grib2(
         assets = item.get("assets", {})
         for asset_info in assets.values():
             href = asset_info.get("href", "")
-            clean = href.split("?")[0]
+            clean = clean_href(href)
             # Accept grib2, h5, and other binary formats
             if any(clean.endswith(ext) for ext in (".grib2", ".h5", ".hdf5")):
                 # Per-asset "updated" is preferred when present (STAC allows it),
@@ -478,11 +507,13 @@ def download_grib2(
 
     logger.info("  %d binary files to download", len(binary_assets))
 
-    to_fetch = [
-        (href, out_dir / filename)
-        for href, filename, updated in binary_assets
-        if _needs_redownload(out_dir / filename, updated)
-    ]
+    to_fetch = _dedupe_by_destination(
+        [
+            (href, out_dir / filename)
+            for href, filename, updated in binary_assets
+            if _needs_redownload(out_dir / filename, updated)
+        ]
+    )
 
     get_session = _thread_local_session()
 
@@ -560,7 +591,7 @@ def download_netcdf(
     for item in items:
         for asset_info in item.get("assets", {}).values():
             href = asset_info.get("href", "")
-            clean = href.split("?")[0]
+            clean = clean_href(href)
             if not clean.endswith((".nc", ".tif", ".zip")):
                 continue
             total_assets += 1
@@ -568,6 +599,7 @@ def download_netcdf(
             if filepath.exists():
                 continue
             targets.append((href, filepath))
+    targets = _dedupe_by_destination(targets)
 
     get_session = _thread_local_session()
 
@@ -699,7 +731,7 @@ def download_climate_scenarios_indoor(
             asset_info.get("href", "")
             for item in items
             for asset_info in item.get("assets", {}).values()
-            if asset_info.get("href", "").split("?")[0].endswith(".zip")
+            if clean_href(asset_info.get("href", "")).endswith(".zip")
         ),
         None,
     )
@@ -711,7 +743,7 @@ def download_climate_scenarios_indoor(
     logger.info("Indoor scenarios (%s): downloading ZIP", collection_id)
     logger.info("%s", "=" * 60)
 
-    zip_path = out_dir / zip_href.split("?")[0].split("/")[-1]
+    zip_path = out_dir / asset_filename(zip_href)
     with _retry_session() as session:
         _download_binary(session, zip_href, zip_path, timeout=300)
     logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)

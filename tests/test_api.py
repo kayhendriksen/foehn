@@ -741,6 +741,42 @@ def test_stations_returns_dataframe(mock_session, mock_meta):
 
 
 @pytest.mark.live
+def test_declared_time_slices_match_what_meteoswiss_publishes():
+    """COLLECTION_META's time_slices must match the real listing.
+
+    These are surfaced by list_datasets(), the CLI and the MCP tools, so a
+    missing slice tells callers a slice does not exist when it does — pollen's
+    hourly "now" series was invisible this way.
+    """
+    from foehn._urls import asset_filename
+    from foehn.collections import (
+        COLLECTION_META,
+        COLLECTIONS,
+        CSV_ZIP_COLLECTIONS,
+        GRIB2_COLLECTIONS,
+        NETCDF_COLLECTIONS,
+        time_slice_from_filename,
+    )
+    from foehn.stac import get_collection_items
+
+    tabular = [k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS | NETCDF_COLLECTIONS | CSV_ZIP_COLLECTIONS]
+    mismatches = {}
+    for key in tabular:
+        found = set()
+        for item in get_collection_items(COLLECTIONS[key], verbose=False):
+            for asset in item.get("assets", {}).values():
+                name = asset_filename(asset.get("href", ""))
+                if name.endswith(".csv") and "_meta_" not in name:
+                    found.add(time_slice_from_filename(name))
+        actual = sorted(s for s in found if s)
+        declared = sorted(COLLECTION_META[key]["time_slices"])
+        if actual != declared:
+            mismatches[key] = {"declared": declared, "actual": actual}
+
+    assert not mismatches, f"COLLECTION_META time_slices out of step with MeteoSwiss: {mismatches}"
+
+
+@pytest.mark.live
 def test_stations_live_returns_lv95_and_source_date_format():
     df = stations("smn")
 

@@ -15,7 +15,6 @@ with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_
         TABULAR_COLLECTIONS,
         _apply_column_comments,
         _build_schema_overrides,
-        _group_csv_files,
         _ingest_climate_normals,
         _ingest_collection,
         _ingest_metadata,
@@ -75,28 +74,6 @@ def test_validate_identifier_valid():
 def test_validate_identifier_rejects_injection():
     with pytest.raises(ValueError, match="Invalid"):
         _validate_identifier("main; DROP TABLE", "catalog")
-
-
-# ── _group_csv_files ─────────────────────────────────────────────────────────
-
-
-def test_group_csv_files(smn_bronze_dir):
-    groups = _group_csv_files(smn_bronze_dir / "smn", "smn")
-    assert ("d", "recent") in groups
-    assert len(groups[("d", "recent")]) == 2
-
-
-def test_group_csv_files_excludes_meta(smn_bronze_dir):
-    groups = _group_csv_files(smn_bronze_dir / "smn", "smn")
-    all_files = [f for files in groups.values() for f in files]
-    assert all("_meta_" not in f.name for f in all_files)
-
-
-def test_group_csv_files_empty(tmp_path):
-    empty_dir = tmp_path / "smn"
-    empty_dir.mkdir()
-    groups = _group_csv_files(empty_dir, "smn")
-    assert groups == {}
 
 
 # ── _table_suffix ────────────────────────────────────────────────────────────

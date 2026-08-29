@@ -30,8 +30,8 @@ from pathlib import Path
 import polars as pl
 from pyspark.sql import SparkSession
 
-from foehn.collections import COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS, NO_GRANULARITY_COLLECTIONS
-from foehn.convert import _load_metadata_types, parse_csv_bytes
+from foehn.collections import COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
+from foehn.convert import _load_metadata_types, group_csv_files, parse_csv_bytes
 
 TABULAR_COLLECTIONS = [key for key in COLLECTIONS if key not in GRIB2_COLLECTIONS | NETCDF_COLLECTIONS] + [
     "climate_normals"
@@ -50,29 +50,6 @@ def _validate_identifier(value: str, label: str) -> str:
     if not _IDENTIFIER_RE.match(value):
         raise ValueError(f"Invalid {label} {value!r} — only alphanumerics, underscores, and hyphens are allowed")
     return f"`{value}`"
-
-
-def _group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...], list[Path]]:
-    """Group CSV files by (frequency, time_slice), same logic as convert_to_parquet."""
-    prefix = COLLECTIONS[collection_key].rsplit(".", 1)[-1]
-    no_granularity = collection_key in NO_GRANULARITY_COLLECTIONS
-
-    csv_files = sorted(csv_dir.glob("*.csv"))
-    csv_files = [f for f in csv_files if "_meta_" not in f.name]
-
-    groups: dict[tuple[str, ...], list[Path]] = {}
-    for csv_path in csv_files:
-        suffix_part = csv_path.stem[len(prefix) + 1 :]
-        parts = suffix_part.split("_")
-        if no_granularity:
-            group_key: tuple[str, ...] = ()
-        elif len(parts) > 2:
-            group_key = (parts[1], parts[2])
-        else:
-            group_key = (parts[1],) if len(parts) > 1 else ()
-        groups.setdefault(group_key, []).append(csv_path)
-
-    return groups
 
 
 def _table_suffix(group_key: tuple[str, ...]) -> str:
@@ -134,7 +111,7 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
     Reads _meta_parameters.csv and applies comments like:
         "Daily mean air temperature 2 m above ground [°C]"
     """
-    meta_files = list(csv_dir.glob("*_meta_parameters.csv"))
+    meta_files = sorted(csv_dir.glob("*_meta_parameters.csv"))
     if not meta_files:
         return
 
@@ -218,7 +195,7 @@ def _ingest_collection(
     Returns (succeeded, skipped) counts.
     """
     metadata_types = _load_metadata_types(csv_dir)
-    groups = _group_csv_files(csv_dir, key)
+    groups = group_csv_files(csv_dir, key)
 
     meta_ok, meta_skip = _ingest_metadata(spark, key, csv_dir, catalog, schema)
 
