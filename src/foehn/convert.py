@@ -53,7 +53,8 @@ def utf8_meteoswiss_csv(content: bytes) -> bytes | memoryview:
     re-encode. The returned view borrows *content*, which must outlive it.
     """
     view = memoryview(content)
-    if content.startswith(_UTF8_BOM):
+    has_bom = content.startswith(_UTF8_BOM)
+    if has_bom:
         view = view[len(_UTF8_BOM) :]
 
     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -63,7 +64,11 @@ def utf8_meteoswiss_csv(content: bytes) -> bytes | memoryview:
         decoder.decode(b"", final=True)
     except UnicodeDecodeError:
         return content.decode("windows-1252", errors="replace").encode("utf-8")
-    return view
+    # Hand back the caller's own bytes when there is nothing to strip. A
+    # memoryview is only needed to skip a BOM without copying, and it is the
+    # costlier return: io.BytesIO(bytes) shares the buffer, but wrapping a
+    # memoryview copies the whole payload.
+    return content if not has_bom else view
 
 
 _DTYPE_MAP: dict[str, type[pl.DataType]] = {
@@ -121,6 +126,7 @@ def parse_csv_bytes(
     content: bytes | memoryview,
     metadata_types: dict[str, type[pl.DataType]] | None = None,
     _fallback_overrides: dict[str, type[pl.DataType]] | None = None,
+    wanted_columns: set[str] | None = None,
 ) -> pl.DataFrame:
     """Parse CSV bytes into a Polars DataFrame, applying metadata type overrides.
 
@@ -130,30 +136,55 @@ def parse_csv_bytes(
         metadata_types: Optional parameter→dtype mapping from metadata.
         _fallback_overrides: If provided, any Float64 fallback overrides applied
             during error recovery will be written into this dict (for diagnostics).
+        wanted_columns: Only parse these columns (intersected with the file's own
+            header, so a station missing one is not an error — the diagonal concat
+            fills it with nulls exactly as before). A station file is ~42 columns
+            and a typical query wants two or three, so skipping the rest cuts both
+            parse time and, far more importantly, the frame retained per station
+            while the whole matched set is assembled.
 
     Returns:
         Parsed Polars DataFrame.
     """
-    buf = io.BytesIO(content)
+    # Polars reads a bytes object without copying it and strips any UTF-8 BOM
+    # itself; a memoryview has to be materialised once, here rather than per read.
+    data = content if isinstance(content, bytes) else bytes(content)
 
-    # Build per-file overrides by matching CSV columns to metadata types.
-    overrides: dict[str, type[pl.DataType]] = {}
-    if metadata_types:
+    header: list[str] | None = None
+    if metadata_types or wanted_columns:
         try:
-            header = pl.read_csv(io.BytesIO(content), separator=";", n_rows=0, infer_schema_length=0).columns
-            for col in header:
-                if col in metadata_types:
-                    overrides[col] = metadata_types[col]
+            # Parse the header line alone — wrapping the whole payload to read one
+            # line costs a copy of the entire file.
+            end = data.find(b"\n")
+            header = pl.read_csv(
+                data[: end + 1] if end != -1 else data, separator=";", n_rows=0, infer_schema_length=0
+            ).columns
         except Exception as exc:
-            logger.debug("Could not read CSV header for schema overrides (%s) — inferring types", exc)
+            logger.debug("Could not read CSV header (%s) — parsing every column, inferring types", exc)
+
+    # Intersect in header order. Falling back to "everything" when nothing matches
+    # keeps read_csv(columns=[]) — which is an error — off the table.
+    use_columns: list[str] | None = None
+    if wanted_columns and header is not None:
+        use_columns = [c for c in header if c in wanted_columns] or None
+
+    # Build per-file overrides by matching CSV columns to metadata types. Restricted
+    # to the columns actually being read: polars rejects an override naming a column
+    # that the projection excluded.
+    overrides: dict[str, type[pl.DataType]] = {}
+    if metadata_types and header is not None:
+        for col in use_columns if use_columns is not None else header:
+            if col in metadata_types:
+                overrides[col] = metadata_types[col]
 
     try:
         return pl.read_csv(
-            buf,
+            data,
             separator=";",
             infer_schema_length=100,
             try_parse_dates=True,
             schema_overrides=overrides or None,
+            columns=use_columns,
         )
     except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
         # Fallback: accumulate Float64 overrides for problematic columns.
@@ -164,16 +195,19 @@ def parse_csv_bytes(
             # bail out instead of retrying the same parse forever.
             if not m or overrides.get(m.group(1)) == pl.Float64:
                 break
+            if use_columns is not None and m.group(1) not in use_columns:
+                break  # not a column we're reading; widening it would be rejected
             overrides[m.group(1)] = pl.Float64
             if _fallback_overrides is not None:
                 _fallback_overrides[m.group(1)] = pl.Float64
             try:
                 return pl.read_csv(
-                    io.BytesIO(content),
+                    data,
                     separator=";",
                     infer_schema_length=100,
                     try_parse_dates=True,
                     schema_overrides=overrides,
+                    columns=use_columns,
                 )
             except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e2:
                 last_err = e2
