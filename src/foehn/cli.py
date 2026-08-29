@@ -8,6 +8,8 @@ import os
 import sys
 from pathlib import Path
 
+import polars as pl
+
 from foehn.api import inventory, list_datasets, parameters, stations
 from foehn.client import (
     download_climate_normals_zip,
@@ -240,11 +242,12 @@ def cmd_metadata(args: argparse.Namespace) -> None:
 
     # Table output similar to foehn list
     headers = df.columns
-    # Compute column widths (min width = header length, capped at 40)
-    widths = []
-    for col in headers:
-        max_val = max((len(str(v)) for v in df[col].to_list()), default=0)
-        widths.append(min(max(len(col), max_val), 40))
+    # Compute column widths (min width = header length, capped at 40). Measured in
+    # Polars rather than by materialising every column as a Python list of strings —
+    # that pass ran over the whole frame before iter_rows() walked it a second time,
+    # which is seconds of pure-Python work on a large inventory.
+    max_lens = df.select(pl.col(c).cast(pl.Utf8).str.len_chars().max().alias(c) for c in headers).row(0)
+    widths = [min(max(len(col), n or 0), 40) for col, n in zip(headers, max_lens, strict=True)]
 
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*headers))

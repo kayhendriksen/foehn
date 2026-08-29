@@ -35,7 +35,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -122,6 +124,35 @@ _GRID_READERS: dict[str, dict] = {
 }
 
 
+# Grid collections are listed on *every* open, including repeat opens of an
+# already-cached file: _ensure_grid_files deliberately verifies the match against
+# the collection rather than the local cache. That listing is paginated 100 items
+# at a time, and a radar collection is thousands of files — so an interactive
+# session pulling several fields paid the full walk each time. Memoise it briefly:
+# short enough that a new forecast run or radar timestep is picked up within one
+# publication cycle, long enough that a burst of opens costs one walk. Kept under
+# the fastest cycle upstream (radar, ~5 min) so a new timestep is never hidden
+# for a whole publication interval.
+_LISTING_TTL_SECONDS = 120.0
+_LISTING_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _cached_collection_items(collection_id: str) -> list[dict]:
+    """Return a collection's STAC items, reusing a recent listing when there is one.
+
+    Only the gridded read path uses this. The download path keeps calling
+    ``get_collection_items`` directly — its whole job is to notice what changed
+    upstream, so a cache there would suppress exactly the updates it looks for.
+    """
+    hit = _LISTING_CACHE.get(collection_id)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < _LISTING_TTL_SECONDS:
+        return hit[1]
+    items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    _LISTING_CACHE[collection_id] = (now, items)
+    return items
+
+
 def _raise_if_too_many(collection_key: str, match: str | None, names: list[str], max_files: int | None) -> None:
     """Refuse a match that resolves to more files than the caller can handle at once."""
     if max_files is None or len(names) <= max_files:
@@ -171,12 +202,12 @@ def _ensure_grid_files(
     # for callers that only touch the registry helpers.
     import requests
 
-    from foehn.client import _download_binary, _retry_session
+    from foehn.client import DEFAULT_WORKERS, _download_binary, _thread_local_session
 
     sfx = "/".join(suffixes)
     collection_id = COLLECTIONS[collection_key]
     try:
-        items = get_collection_items(collection_id, require_csv=False, verbose=False)
+        items = _cached_collection_items(collection_id)
     except requests.exceptions.RequestException as exc:
         cached = [f for f in local if match is None or match in f.name]
         if cached:
@@ -217,14 +248,31 @@ def _ensure_grid_files(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    with _retry_session() as session:
-        for href in hrefs:
-            validate_download_href(href)
-            filepath = out_dir / href.split("?")[0].split("/")[-1]
-            if not filepath.exists():
-                _download_binary(session, href, filepath)
-            paths.append(filepath)
-    return sorted(paths)
+    # Deduplicate by destination: a STAC item can list one asset under several
+    # keys, and two workers streaming into the same ``.part`` would corrupt it.
+    targets: dict[Path, str] = {}
+    for href in hrefs:
+        validate_download_href(href)
+        filepath = out_dir / href.split("?")[0].split("/")[-1]
+        paths.append(filepath)
+        if not filepath.exists() and filepath not in targets:
+            targets[filepath] = href
+
+    if targets:
+        # Fetch concurrently, like the CSV path. Serial downloads made the network
+        # the dominant cost of building a cube: stack="auto" admits up to
+        # _HYPERCUBE_MAX_FILES files, each previously fetched one after another.
+        get_session = _thread_local_session()
+
+        def _fetch(filepath: Path, href: str) -> None:
+            _download_binary(get_session(), href, filepath)
+
+        with ThreadPoolExecutor(max_workers=min(DEFAULT_WORKERS, len(targets))) as pool:
+            futures = [pool.submit(_fetch, fp, href) for fp, href in targets.items()]
+            for fut in as_completed(futures):
+                fut.result()  # surface the first failure; a grid read can't proceed without its files
+
+    return sorted(set(paths))
 
 
 # CF-compliant temporal base units that xarray/cftime can decode. Anything else

@@ -44,6 +44,7 @@ from foehn.convert import (
     parse_climate_scenarios_csv,
     parse_csv_bytes,
     parse_indoor_filename,
+    utf8_meteoswiss_csv,
 )
 from foehn.grids import open_dataset, to_zarr
 from foehn.stac import get_collection_items, get_collection_metadata
@@ -278,20 +279,24 @@ def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
     raise ValueError(f"Unknown column(s) {missing} in {label}=. This dataset has: {available}")
 
 
-def _apply_post_filters(
+def _apply_time_filters(
     df: pl.DataFrame,
     *,
     year: int | list[int] | None = None,
     month: int | list[int] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    drop_null: str | None = None,
-    sort: str | None = None,
-    columns: list[str] | None = None,
-    limit: int | None = None,
-    keep_cols: tuple[str, ...] = ("station_abbr", "reference_timestamp"),
 ) -> pl.DataFrame:
-    """Apply the shared in-memory row/column filters used by load() variants."""
+    """Apply the timestamp row predicates shared by the post-filter and the per-frame pass.
+
+    Split out of :func:`_apply_post_filters` so ``load()`` can run it on each CSV
+    as it is parsed, instead of only on the concatenated result. These are all
+    per-row predicates, so filtering early is equivalent — but it bounds peak
+    memory by the largest single station file rather than by the whole matched
+    set. ``drop_null`` deliberately stays in the post-filter: a frame missing
+    that column keeps every row here, while after a diagonal concat the column
+    exists as null across those rows and they are dropped.
+    """
     ts = "reference_timestamp"
     if year is not None:
         years = [year] if isinstance(year, int) else year
@@ -314,6 +319,25 @@ def _apply_post_filters(
             df = df.filter(pl.col(ts).cast(pl.Datetime) < bound.dt.offset_by("1d"))
         else:
             df = df.filter(pl.col(ts).cast(pl.Datetime) <= bound)
+    return df
+
+
+def _apply_post_filters(
+    df: pl.DataFrame,
+    *,
+    year: int | list[int] | None = None,
+    month: int | list[int] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    drop_null: str | None = None,
+    sort: str | None = None,
+    columns: list[str] | None = None,
+    limit: int | None = None,
+    keep_cols: tuple[str, ...] = ("station_abbr", "reference_timestamp"),
+) -> pl.DataFrame:
+    """Apply the shared in-memory row/column filters used by load() variants."""
+    ts = "reference_timestamp"
+    df = _apply_time_filters(df, year=year, month=month, date_from=date_from, date_to=date_to)
     if drop_null:
         _require_columns(df, [drop_null], "drop_null")
         df = df.filter(pl.col(drop_null).is_not_null())
@@ -693,8 +717,19 @@ def load(
         validate_download_href(href)
         resp = local.session.get(href, timeout=60)
         resp.raise_for_status()
-        content = decode_meteoswiss_csv(resp.content)
-        return parse_csv_bytes(content.encode("utf-8"), metadata_types)
+        # Zero-copy when the payload is already UTF-8 (the usual case): these are
+        # the big files, and ``workers`` of them are in flight at once.
+        frame = parse_csv_bytes(utf8_meteoswiss_csv(resp.content), metadata_types)
+        # Drop the rows this call can never return *before* they reach the
+        # concat. Every frame is otherwise held in full until the whole matched
+        # set is materialised, so a narrow year= over many stations peaked at the
+        # size of the entire time slice. forecast_local has no reference_timestamp
+        # of its own — derive it here so its frames can be narrowed too.
+        if dataset == "forecast_local":
+            frame = add_forecast_local_timestamp(frame)
+        if "reference_timestamp" in frame.columns:
+            frame = _apply_time_filters(frame, year=year, month=month, date_from=date_from, date_to=date_to)
+        return frame
 
     if len(csv_hrefs) == 1 or workers <= 1:
         frames = [_fetch(href) for href in csv_hrefs]

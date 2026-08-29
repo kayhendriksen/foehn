@@ -25,7 +25,7 @@ from foehn.collections import (
     forecast_run_from_filename,
     time_slice_from_filename,
 )
-from foehn.convert import decode_meteoswiss_csv
+from foehn.convert import utf8_meteoswiss_csv
 from foehn.stac import get_collection_items, get_collection_metadata
 
 logger = logging.getLogger(__name__)
@@ -101,9 +101,14 @@ def _thread_local_session() -> Callable[[], requests.Session]:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write text via a sibling temp file + Path.replace so readers never see a torn write."""
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, data: bytes | memoryview) -> None:
+    """Write bytes via a sibling temp file + Path.replace so readers never see a torn write."""
     tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_bytes(data)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -166,8 +171,9 @@ def _download_csv(
         return ("skipped", href, filename, None)
     resp.raise_for_status()
     # MeteoSwiss CSVs are usually UTF-8 but some are Windows-1252; normalise to UTF-8.
-    content = decode_meteoswiss_csv(resp.content)
-    _atomic_write_text(filepath, content)
+    # Bytes in, bytes out — decoding to str here only to re-encode on write would
+    # hold three copies of a multi-hundred-MB CSV at once, times ``workers``.
+    _atomic_write_bytes(filepath, utf8_meteoswiss_csv(resp.content))
     return ("downloaded", href, filename, resp.headers.get("ETag"))
 
 
@@ -294,6 +300,11 @@ def download_collection(
                 continue
             if new_etag:
                 etags[href] = new_etag
+            else:
+                # Server returned 200 without an ETag. Keeping the old one would
+                # re-send it as If-None-Match forever, so this asset would
+                # re-download every run and never once be skipped.
+                etags.pop(href, None)
             downloaded += 1
             filenames.append(filename)
             logger.info("  [%d/%d] Downloaded: %s", i, total, filename)
