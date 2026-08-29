@@ -119,13 +119,18 @@ def test_collection_meta_covers_all_keys():
     assert set(COLLECTION_META.keys()) == set(COLLECTIONS.keys())
 
 
-def test_collection_meta_matches_live_stac_granularities():
+def test_collection_meta_declares_expected_frequencies_and_slices():
+    # A change-detector over COLLECTION_META, not a check against MeteoSwiss —
+    # the old name claimed the latter, which is how pollen's missing "now" slice
+    # survived here so long: this table simply repeated the mistake. The real
+    # comparison against the live listing is
+    # test_declared_time_slices_match_what_meteoswiss_publishes (marked "live").
     expected = {
         "smn": (["t", "h", "d", "m", "y"], ["historical", "recent", "now"]),
         "smn_precip": (["t", "h", "d", "m", "y"], ["historical", "recent", "now"]),
         "smn_tower": (["t", "h", "d", "m", "y"], ["historical", "recent", "now"]),
         "obs": (["d", "m", "y"], ["historical", "recent"]),
-        "pollen": (["h", "d", "y"], ["historical", "recent"]),
+        "pollen": (["h", "d", "y"], ["historical", "recent", "now"]),
         "nbcn": (["d", "m", "y"], ["historical", "recent"]),
         "nbcn_precip": (["m", "y"], []),
         # NO_GRANULARITY/CSV_ZIP collections advertise no frequencies: the field

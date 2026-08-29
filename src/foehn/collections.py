@@ -3,22 +3,38 @@ MeteoSwiss STAC collection IDs, routing sets, and constants.
 
 TIME SLICES
 -----------
-MeteoSwiss splits CSV data into three time slices, encoded in the filename:
+MeteoSwiss slices the higher-volume CSV data by time, encoded in the filename.
+Which slices exist depends on the granularity — the split tracks data volume and
+update rate, so the finer the granularity, the more it is sliced:
 
-  "historical"  — From start of measurement → Dec 31 of last year
-                   Updated once a year (early January).
-                   Available for granularities: t, h, d, m
+  granularity    historical  recent  now
+  ---------------------------------------
+  t  (10-min)        y         y      y
+  h  (hourly)        y         y      y
+  d  (daily)         y         y      -
+  m  (monthly)       -         -      -    single unsliced file
+  y  (yearly)        -         -      -    single unsliced file
 
-  "recent"      — From Jan 1 of this year → yesterday
-                   Updated daily at 12:00 UTC.
-                   Available for granularities: t, h, d, m
+  "historical"  — From start of measurement → Dec 31 of last year.
+                   Updated once a year (early January). t, h, d.
+                   The t and h series are additionally chunked per decade
+                   (ogd-smn_ber_t_historical_2000-2009.csv), so the slice is not
+                   always the trailing filename segment — see
+                   time_slice_from_filename below.
 
-  "now"          — From yesterday 12:00 UTC → now
-                   Updated every 10 minutes.
-                   Available for granularities: t, h only
+  "recent"      — From Jan 1 of this year → yesterday.
+                   Rebuilt daily at 12:00 UTC. t, h, d.
 
-  (no type)      — Some data (e.g. yearly "y" granularity, phenology, totaliser)
-                   don't use this split. These files have no time-slice suffix.
+  "now"          — From yesterday 12:00 UTC → now.
+                   Refreshed every 10 minutes. t and h only.
+                   It exists to bridge the gap between daily rebuilds of
+                   "recent", which is why daily has none: a daily aggregate is
+                   not complete until the day is over, and by then the next
+                   "recent" rebuild already carries it. A "d_now" file would be
+                   permanently empty or a duplicate.
+
+  (no slice)     — m and y granularities, plus whole collections (phenology,
+                   totaliser): one file per station, no time-slice suffix.
 
 DATA GRANULARITY (suffix in filename: _t, _h, _d, _m, _y)
 ----------------------------------------------------------
@@ -200,7 +216,11 @@ COLLECTION_META: dict[str, dict] = {
         "description": "Pollen stations",
         "format": "CSV",
         "frequencies": ["h", "d", "y"],
-        "time_slices": ["historical", "recent"],
+        # "now" belongs here: MeteoSwiss publishes ogd-pollen_*_h_now.csv for the
+        # hourly series. Omitting it told list_datasets() callers — including the
+        # MCP tools — that live pollen counts were unavailable, so nothing ever
+        # asked for the slice that does in fact exist.
+        "time_slices": ["historical", "recent", "now"],
     },
     "phenology": {
         "category": "A",

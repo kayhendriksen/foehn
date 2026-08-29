@@ -79,14 +79,28 @@ Likewise, the per-parameter `climate_normals_*` map layers were retired -- those
 
 ## Time slices
 
-MeteoSwiss splits CSV data into three time slices, encoded in the filename:
+MeteoSwiss slices the higher-volume CSV data by time, encoded in the filename:
 
-| Slice | Range | Update frequency | Frequencies |
+| Slice | Range | Update frequency | Granularities |
 |---|---|---|---|
-| `recent` | Jan 1 this year to yesterday | Daily at 12:00 UTC | 10-min, hourly, daily, monthly |
-| `historical` | Start of measurement to Dec 31 last year | Once per year (early January) | 10-min, hourly, daily, monthly |
-| `now` | Yesterday 12:00 UTC to now | Every 10 minutes | 10-min, hourly only |
+| `recent` | Jan 1 this year to yesterday | Daily at 12:00 UTC | 10-min, hourly, daily |
+| `historical` | Start of measurement to Dec 31 last year | Once per year (early January) | 10-min, hourly, daily |
+| `now` | Yesterday 12:00 UTC to now | Every 10 minutes | 10-min, hourly |
 
-Some collections (phenology, totaliser, yearly aggregates) don't use time slices -- they publish a single file per station.
+Which slices exist depends on the granularity -- the split tracks data volume and update rate, so the finer the granularity, the more it is sliced:
+
+| Granularity | `historical` | `recent` | `now` |
+|---|---|---|---|
+| `t` (10-min) | yes | yes | yes |
+| `h` (hourly) | yes | yes | yes |
+| `d` (daily) | yes | yes | -- |
+| `m` (monthly) | -- | -- | -- |
+| `y` (yearly) | -- | -- | -- |
+
+Monthly and yearly data is a handful of rows per station, so it ships as a single unsliced file. Whole collections (phenology, totaliser) do the same.
+
+`now` has no daily equivalent because it exists only to bridge the gap between daily rebuilds of `recent`: a daily aggregate isn't complete until the day is over, and by then the next `recent` rebuild already carries it -- so a `d_now` file would be permanently empty or a duplicate.
+
+The `t` and `h` historical series are additionally chunked per decade (`ogd-smn_ber_t_historical_2000-2009.csv`), so the slice is not always the trailing filename segment.
 
 All timestamps are UTC. For 10-min and hourly data the timestamp marks the **end** of the interval (16:00 = 15:50:01--16:00:00). For daily, monthly, and yearly data the timestamp marks the **start** (2023-06-01 = the whole of June).
