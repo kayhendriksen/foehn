@@ -258,6 +258,25 @@ def test_download_collection_skips_304(mock_retry, mock_items, tmp_path):
 
 @patch("foehn.client.get_collection_items")
 @patch("foehn.client._retry_session")
+def test_download_collection_drops_etag_when_server_stops_sending_one(mock_retry, mock_items, tmp_path):
+    """A 200 with no ETag header must clear the stored one.
+
+    Keeping it would re-send the stale value as If-None-Match on every later
+    run, so the asset would download every time and never once be skipped.
+    """
+    mock_get = mock_retry.return_value.get
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    mock_items.return_value = [_stac_item(url)]
+    save_etags(tmp_path, {url: '"stale-etag"'})
+
+    mock_get.return_value = _csv_response(b"station_abbr;value\nTST;1.0\n", etag=None)
+    download_collection("smn", tmp_path / "bronze")
+
+    assert url not in load_etags(tmp_path)
+
+
+@patch("foehn.client.get_collection_items")
+@patch("foehn.client._retry_session")
 def test_download_collection_prunes_stale_etags(mock_retry, mock_items, tmp_path):
     """A clean full run drops ETags for assets gone upstream — scoped to this collection."""
     mock_get = mock_retry.return_value.get

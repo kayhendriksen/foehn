@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import io
 import logging
 import re
@@ -27,6 +28,42 @@ def decode_meteoswiss_csv(content: bytes) -> str:
         return content.decode("utf-8-sig")
     except UnicodeDecodeError:
         return content.decode("windows-1252", errors="replace")
+
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+# Validate in 1 MiB steps rather than decoding the whole buffer: the point is to
+# confirm the bytes are UTF-8 without ever materialising the file as a str.
+_UTF8_VALIDATE_STEP = 1 << 20
+
+
+def utf8_meteoswiss_csv(content: bytes) -> bytes | memoryview:
+    """Return *content* as UTF-8 bytes, re-encoding only when it isn't already.
+
+    :func:`decode_meteoswiss_csv` exists to produce text. Callers that only want
+    bytes to hand to Polars were round-tripping through it — bytes → str →
+    bytes — which keeps three copies of the payload alive at once. On an 80 MB
+    CSV that measured 161 MB of transient allocation per file, and the download
+    paths run eight of these concurrently.
+
+    MeteoSwiss CSVs are usually UTF-8 (often BOM-prefixed), so the common path
+    validates incrementally and hands back a ``memoryview`` over the caller's
+    original buffer: no copy, and the BOM is skipped by slicing rather than by
+    building a new bytes object. Only genuine Windows-1252 files pay for a
+    re-encode. The returned view borrows *content*, which must outlive it.
+    """
+    view = memoryview(content)
+    if content.startswith(_UTF8_BOM):
+        view = view[len(_UTF8_BOM) :]
+
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        for i in range(0, len(view), _UTF8_VALIDATE_STEP):
+            decoder.decode(view[i : i + _UTF8_VALIDATE_STEP])
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return content.decode("windows-1252", errors="replace").encode("utf-8")
+    return view
 
 
 _DTYPE_MAP: dict[str, type[pl.DataType]] = {
@@ -79,14 +116,15 @@ def _load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
 
 
 def parse_csv_bytes(
-    content: bytes,
+    content: bytes | memoryview,
     metadata_types: dict[str, type[pl.DataType]] | None = None,
     _fallback_overrides: dict[str, type[pl.DataType]] | None = None,
 ) -> pl.DataFrame:
     """Parse CSV bytes into a Polars DataFrame, applying metadata type overrides.
 
     Args:
-        content: Raw CSV bytes (UTF-8 encoded).
+        content: Raw CSV bytes (UTF-8 encoded); a memoryview is accepted so
+            callers can pass a zero-copy view from ``utf8_meteoswiss_csv``.
         metadata_types: Optional parameter→dtype mapping from metadata.
         _fallback_overrides: If provided, any Float64 fallback overrides applied
             during error recovery will be written into this dict (for diagnostics).

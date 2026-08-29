@@ -223,6 +223,58 @@ def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, m
     assert df["reference_timestamp"][0].year == 2026
 
 
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_forecast_local_date_filter_applies(mock_session, mock_meta, mock_items):
+    """forecast_local rows are filtered by date even though its timestamp is derived.
+
+    Its reference_timestamp is synthesised from the compact Date column, which
+    used to happen only after the concat — so the per-frame filter pass has to
+    derive it first or it would silently skip filtering this dataset.
+    """
+    mock_meta.return_value = {"assets": {}}
+    href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
+    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
+    session.__enter__.return_value = session
+    mock_session.return_value = session
+
+    both = load("forecast_local")
+    assert len(both) == 2
+
+    # The fixture's two rows are 2026-05-20 21:00 and 22:00 — an exact bound splits them.
+    narrowed = load("forecast_local", date_to="2026-05-20 21:00:00")
+    assert len(narrowed) == 1
+    assert narrowed["reference_timestamp"][0].hour == 21
+
+
+@patch("foehn.api.get_collection_items")
+@patch("foehn.api.get_collection_metadata")
+@patch("foehn.api._retry_session")
+def test_load_time_filters_match_across_multiple_stations(mock_session, mock_meta, mock_items):
+    """Filtering per-frame must give the same rows as filtering after the concat."""
+    mock_meta.return_value = {"assets": {}}
+    mock_items.return_value = [
+        {"id": s, "assets": {"data": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{s.lower()}_d_recent.csv"}}}
+        for s in ("BER", "ZUR", "GVE")
+    ]
+    session = MagicMock()
+    session.get = MagicMock(return_value=_mock_response(_FILTER_CSV))
+    session.__enter__.return_value = session
+    mock_session.return_value = session
+
+    everything = load("smn", frequency="d")
+    narrowed = load("smn", frequency="d", year=2025, month=[6, 7])
+
+    expected = everything.filter(
+        pl.col("reference_timestamp").dt.year().eq(2025) & pl.col("reference_timestamp").dt.month().is_in([6, 7])
+    )
+    assert narrowed.sort("temp").to_dicts() == expected.sort("temp").to_dicts()
+    assert len(narrowed) == 6  # 3 stations x 2 matching rows
+
+
 def _forecast_item(item_id: str, runs: dict[str, list[str]]) -> dict:
     """Build a forecast STAC item: one item = one day, holding several hourly runs."""
     return {

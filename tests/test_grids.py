@@ -103,6 +103,101 @@ def test_ensure_netcdf_files_match_downloads_missing_from_partial_cache(tmp_path
     assert {p.name for p in result} == {"rhiresd_part1.nc", "rhiresd_part2.nc"}
 
 
+def test_ensure_grid_files_fetches_missing_concurrently(tmp_path):
+    """Missing files are fetched in parallel, not one after another."""
+    import threading
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    names = [f"rhiresd_part{i}.nc" for i in range(6)]
+    items = _items_for(*names)
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+    barrier = threading.Barrier(len(names), timeout=5)
+
+    def fake_download(_session, _href, filepath):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        # Blocks until every download is in flight — times out if they are serial.
+        barrier.wait()
+        with lock:
+            active -= 1
+        Path(filepath).write_bytes(b"y")
+
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items),
+        patch("foehn.client._download_binary", side_effect=fake_download) as mock_dl,
+    ):
+        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+
+    assert mock_dl.call_count == len(names)
+    assert peak > 1  # genuinely overlapping
+    assert {p.name for p in result} == set(names)
+
+
+def test_ensure_grid_files_deduplicates_repeated_asset(tmp_path):
+    """One file listed under several asset keys is downloaded once.
+
+    Two workers streaming into the same ``.part`` would corrupt it, so the
+    dedupe matters now that these downloads run concurrently.
+    """
+    items = [
+        {
+            "assets": {
+                "data": {"href": "https://data.geo.admin.ch/x/rhiresd_ch01h.nc"},
+                "alternate": {"href": "https://data.geo.admin.ch/x/rhiresd_ch01h.nc"},
+            }
+        }
+    ]
+
+    def fake_download(_session, _href, filepath):
+        Path(filepath).write_bytes(b"y")
+
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items),
+        patch("foehn.client._download_binary", side_effect=fake_download) as mock_dl,
+    ):
+        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+
+    assert mock_dl.call_count == 1
+    assert [p.name for p in result] == ["rhiresd_ch01h.nc"]
+
+
+def test_grid_listing_is_memoised_across_opens(tmp_path):
+    """Repeat opens reuse a recent listing instead of re-walking every STAC page."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    (out_dir / "x.rhiresd_ch01h.nc").write_bytes(b"x")
+    items = _items_for("x.rhiresd_ch01h.nc")
+
+    with patch("foehn.grids.get_collection_items", return_value=items) as mock_items:
+        for _ in range(3):
+            _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+    mock_items.assert_called_once()
+
+
+def test_grid_listing_cache_expires(tmp_path):
+    """The listing is re-fetched once the TTL lapses, so new timesteps show up."""
+    from foehn import grids
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    (out_dir / "x.rhiresd_ch01h.nc").write_bytes(b"x")
+    items = _items_for("x.rhiresd_ch01h.nc")
+
+    with (
+        patch("foehn.grids.get_collection_items", return_value=items) as mock_items,
+        patch.object(grids, "_LISTING_TTL_SECONDS", 0.0),
+    ):
+        _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+        _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd")
+    assert mock_items.call_count == 2
+
+
 def test_ensure_single_file_match_validated_against_remote_not_cache(tmp_path):
     """A single-file match unique in a sparse cache but ambiguous in the collection is rejected."""
     out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
