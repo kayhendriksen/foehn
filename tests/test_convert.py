@@ -100,6 +100,44 @@ def test_convert_to_parquet_skips_up_to_date(smn_bronze_dir, tmp_path):
     assert out.stat().st_mtime == mtime_before
 
 
+def test_convert_to_parquet_failed_write_leaves_no_output(smn_bronze_dir, tmp_path, monkeypatch):
+    """A sink that dies part-way must leave nothing at the final path.
+
+    sink_parquet creates the file before it can fail (disk full, source read
+    error). Left at the final path, that truncated file carries a fresh mtime —
+    so the up-to-date check would skip it forever and the next run would report
+    success over a corrupt Parquet.
+    """
+    parquet_dir = tmp_path / "parquet"
+
+    def flaky_sink(self, path, **kwargs):
+        Path(path).write_bytes(b"PAR1\x00\x00truncated")
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(pl.LazyFrame, "sink_parquet", flaky_sink)
+    assert convert_to_parquet("smn", smn_bronze_dir, parquet_dir) == 1
+
+    out_dir = parquet_dir / "smn"
+    assert not (out_dir / "smn_d_recent.parquet").exists()
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_convert_to_parquet_retries_after_failed_write(smn_bronze_dir, tmp_path, monkeypatch):
+    """The group is retried on the next run rather than skipped as up-to-date."""
+    parquet_dir = tmp_path / "parquet"
+
+    def flaky_sink(self, path, **kwargs):
+        Path(path).write_bytes(b"PAR1\x00\x00truncated")
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(pl.LazyFrame, "sink_parquet", flaky_sink)
+    assert convert_to_parquet("smn", smn_bronze_dir, parquet_dir) == 1
+
+    monkeypatch.undo()
+    assert convert_to_parquet("smn", smn_bronze_dir, parquet_dir) == 0
+    assert len(pl.read_parquet(parquet_dir / "smn" / "smn_d_recent.parquet")) == 6
+
+
 def test_convert_to_parquet_no_csv_is_noop(tmp_path):
     """Empty bronze dir should not raise and should produce no output."""
     bronze_dir = tmp_path / "bronze"

@@ -861,6 +861,49 @@ def test_load_date_range_filter(mock_session, mock_meta, mock_items):
     assert len(df) == 2
 
 
+def test_date_to_bare_date_includes_the_whole_final_day():
+    """A bare "YYYY-MM-DD" date_to names the whole day, not its midnight.
+
+    Comparing <= the parsed midnight is right for d/m/y (timestamps sit at
+    00:00) but silently drops every 10-minute and hourly reading after 00:00,
+    while the docstring promises an inclusive bound.
+    """
+    from foehn.api import _apply_post_filters
+
+    df = pl.DataFrame(
+        {
+            "station_abbr": ["BER"] * 4,
+            "reference_timestamp": [
+                "2025-08-30 12:00",
+                "2025-08-31 00:00",
+                "2025-08-31 12:00",
+                "2025-08-31 23:50",
+            ],
+        }
+    ).with_columns(pl.col("reference_timestamp").str.to_datetime())
+
+    out = _apply_post_filters(df, date_from="2025-08-30", date_to="2025-08-31")
+    assert len(out) == 4
+
+    # The day after is still excluded — the bound is the next midnight, exclusive.
+    assert len(_apply_post_filters(df, date_to="2025-08-30")) == 1
+
+
+def test_date_to_with_explicit_time_stays_an_exact_bound():
+    """An explicit timestamp means exactly that instant, not the end of its day."""
+    from foehn.api import _apply_post_filters
+
+    df = pl.DataFrame(
+        {
+            "station_abbr": ["BER"] * 3,
+            "reference_timestamp": ["2025-08-31 11:00", "2025-08-31 12:00", "2025-08-31 13:00"],
+        }
+    ).with_columns(pl.col("reference_timestamp").str.to_datetime())
+
+    out = _apply_post_filters(df, date_to="2025-08-31 12:00:00")
+    assert len(out) == 2
+
+
 def test_date_filter_on_date_typed_column_does_not_raise():
     """date_from/date_to must work when reference_timestamp parsed as Date, not Datetime."""
     from datetime import date
@@ -893,10 +936,12 @@ def test_load_drop_null_filter(mock_session, mock_meta, mock_items):
 @patch("foehn.api.get_collection_items")
 @patch("foehn.api.get_collection_metadata")
 @patch("foehn.api._retry_session")
-def test_load_drop_null_nonexistent_column_ignored(mock_session, mock_meta, mock_items):
+def test_load_drop_null_nonexistent_column_raises(mock_session, mock_meta, mock_items):
+    # Silently ignoring the filter would return every null row it was asked to
+    # drop — a plausible-looking wrong answer for a mistyped shortcode.
     _setup_filter_mocks(mock_session, mock_meta, mock_items)
-    df = load("smn", station="BER", frequency="d", drop_null="nonexistent")
-    assert len(df) == 5
+    with pytest.raises(ValueError, match=r"Unknown column\(s\) \['nonexistent'\] in drop_null="):
+        load("smn", station="BER", frequency="d", drop_null="nonexistent")
 
 
 @patch("foehn.api.get_collection_items")
@@ -931,10 +976,12 @@ def test_load_columns_filter(mock_session, mock_meta, mock_items):
 @patch("foehn.api.get_collection_items")
 @patch("foehn.api.get_collection_metadata")
 @patch("foehn.api._retry_session")
-def test_load_columns_filter_ignores_nonexistent(mock_session, mock_meta, mock_items):
+def test_load_columns_nonexistent_raises(mock_session, mock_meta, mock_items):
+    # Dropping the unknown name silently would hand back only the always-kept
+    # key columns, with no signal that the requested parameter was a typo.
     _setup_filter_mocks(mock_session, mock_meta, mock_items)
-    df = load("smn", station="BER", frequency="d", columns=["temp", "nonexistent"])
-    assert set(df.columns) == {"station_abbr", "reference_timestamp", "temp"}
+    with pytest.raises(ValueError, match=r"Unknown column\(s\) \['nonexistent'\] in columns="):
+        load("smn", station="BER", frequency="d", columns=["temp", "nonexistent"])
 
 
 @patch("foehn.api.get_collection_items")
