@@ -125,7 +125,6 @@ def _load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
 def parse_csv_bytes(
     content: bytes | memoryview,
     metadata_types: dict[str, type[pl.DataType]] | None = None,
-    _fallback_overrides: dict[str, type[pl.DataType]] | None = None,
     wanted_columns: set[str] | None = None,
 ) -> pl.DataFrame:
     """Parse CSV bytes into a Polars DataFrame, applying metadata type overrides.
@@ -134,8 +133,6 @@ def parse_csv_bytes(
         content: Raw CSV bytes (UTF-8 encoded); a memoryview is accepted so
             callers can pass a zero-copy view from ``utf8_meteoswiss_csv``.
         metadata_types: Optional parameter→dtype mapping from metadata.
-        _fallback_overrides: If provided, any Float64 fallback overrides applied
-            during error recovery will be written into this dict (for diagnostics).
         wanted_columns: Only parse these columns (intersected with the file's own
             header, so a station missing one is not an error — the diagonal concat
             fills it with nulls exactly as before). A station file is ~42 columns
@@ -198,8 +195,6 @@ def parse_csv_bytes(
             if use_columns is not None and m.group(1) not in use_columns:
                 break  # not a column we're reading; widening it would be rejected
             overrides[m.group(1)] = pl.Float64
-            if _fallback_overrides is not None:
-                _fallback_overrides[m.group(1)] = pl.Float64
             try:
                 return pl.read_csv(
                     data,

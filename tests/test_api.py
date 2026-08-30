@@ -783,11 +783,11 @@ def test_date_to_bare_date_includes_the_whole_final_day():
         }
     ).with_columns(pl.col("reference_timestamp").str.to_datetime())
 
-    out = _apply_post_filters(df, date_from="2025-08-30", date_to="2025-08-31")
+    out = _apply_post_filters(df, "smn", date_from="2025-08-30", date_to="2025-08-31")
     assert len(out) == 4
 
     # The day after is still excluded — the bound is the next midnight, exclusive.
-    assert len(_apply_post_filters(df, date_to="2025-08-30")) == 1
+    assert len(_apply_post_filters(df, "smn", date_to="2025-08-30")) == 1
 
 
 def test_date_to_with_explicit_time_stays_an_exact_bound():
@@ -801,7 +801,7 @@ def test_date_to_with_explicit_time_stays_an_exact_bound():
         }
     ).with_columns(pl.col("reference_timestamp").str.to_datetime())
 
-    out = _apply_post_filters(df, date_to="2025-08-31 12:00:00")
+    out = _apply_post_filters(df, "smn", date_to="2025-08-31 12:00:00")
     assert len(out) == 2
 
 
@@ -819,7 +819,7 @@ def test_date_filter_on_date_typed_column_does_not_raise():
     )
     assert df["reference_timestamp"].dtype == pl.Date  # guard: column really is Date-typed
 
-    out = _apply_post_filters(df, date_from="2025-03-01", date_to="2025-08-31")
+    out = _apply_post_filters(df, "smn", date_from="2025-03-01", date_to="2025-08-31")
     assert len(out) == 1
     assert out["reference_timestamp"][0] == date(2025, 6, 1)
 

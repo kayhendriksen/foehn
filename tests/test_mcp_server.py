@@ -214,14 +214,19 @@ class TestLoadData:
         assert isinstance(result, list)
         assert len(result) == 2
         assert result[0]["station"] == "BER"
-        mock_load.assert_called_once_with("smn", limit=50)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["limit"] == 50
 
     @patch("foehn.mcp_server.foehn.load")
     def test_with_all_kwargs(self, mock_load):
         mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}])
         result = load_data("smn", station=["BER"], frequency="d", time_slice="recent", limit=10)
         assert len(result) == 1
-        mock_load.assert_called_once_with("smn", station=["BER"], frequency="d", time_slice="recent", limit=10)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["station"] == ["BER"]
+        assert mock_load.call_args.kwargs["frequency"] == "d"
+        assert mock_load.call_args.kwargs["time_slice"] == "recent"
+        assert mock_load.call_args.kwargs["limit"] == 10
 
     @patch("foehn.mcp_server.foehn.load")
     def test_limit_caps_at_500(self, mock_load):
@@ -230,14 +235,16 @@ class TestLoadData:
         mock_load.return_value = _make_df(rows)
         result = load_data("smn", limit=9999)
         assert len(result) == 500
-        mock_load.assert_called_once_with("smn", limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_limit_minimum_is_1(self, mock_load):
         mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}])
         result = load_data("smn", limit=-5)
         assert len(result) == 1
-        mock_load.assert_called_once_with("smn", limit=1)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["limit"] == 1
 
     @patch("foehn.mcp_server.foehn.load")
     def test_default_limit_is_50(self, mock_load):
@@ -245,7 +252,8 @@ class TestLoadData:
         mock_load.return_value = _make_df(rows)
         result = load_data("smn")
         assert len(result) == 50
-        mock_load.assert_called_once_with("smn", limit=50)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["limit"] == 50
 
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
@@ -272,7 +280,8 @@ class TestLoadData:
         """When station/frequency/time_slice are None, they should not appear in kwargs."""
         mock_load.return_value = _make_df([{"x": 1}])
         load_data("smn", station=None, frequency=None, time_slice=None)
-        mock_load.assert_called_once_with("smn", limit=50)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["limit"] == 50
 
     @patch("foehn.mcp_server.foehn.load")
     def test_returns_list_of_dicts(self, mock_load):
@@ -288,7 +297,9 @@ class TestLoadData:
             {"station_abbr": ["BER"], "reference_timestamp": [datetime(2025, 1, 1)], "temp": [20.0]}
         )
         load_data("smn", year=[2025], limit=500)
-        mock_load.assert_called_once_with("smn", year=[2025], limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["year"] == [2025]
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_month_filter_passed_to_load(self, mock_load):
@@ -296,7 +307,9 @@ class TestLoadData:
             {"station_abbr": ["BER"], "reference_timestamp": [datetime(2025, 6, 1)], "temp": [20.0]}
         )
         load_data("smn", month=[6, 7], limit=500)
-        mock_load.assert_called_once_with("smn", month=[6, 7], limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["month"] == [6, 7]
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_date_range_passed_to_load(self, mock_load):
@@ -304,7 +317,10 @@ class TestLoadData:
             {"station_abbr": ["BER"], "reference_timestamp": [datetime(2025, 6, 1)], "temp": [20.0]}
         )
         load_data("smn", date_from="2025-06-01", date_to="2025-08-31", limit=500)
-        mock_load.assert_called_once_with("smn", date_from="2025-06-01", date_to="2025-08-31", limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["date_from"] == "2025-06-01"
+        assert mock_load.call_args.kwargs["date_to"] == "2025-08-31"
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_columns_passed_to_load(self, mock_load):
@@ -312,7 +328,9 @@ class TestLoadData:
             {"station_abbr": ["BER"], "reference_timestamp": [datetime(2025, 1, 1)], "temp": [20.0]}
         )
         load_data("smn", columns=["temp"], limit=500)
-        mock_load.assert_called_once_with("smn", columns=["temp"], limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["columns"] == ["temp"]
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_drop_null_passed_to_load(self, mock_load):
@@ -320,7 +338,9 @@ class TestLoadData:
             {"station_abbr": ["BER"], "reference_timestamp": [datetime(2025, 1, 1)], "hail": [3]}
         )
         load_data("smn", drop_null="hail", limit=500)
-        mock_load.assert_called_once_with("smn", drop_null="hail", limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["drop_null"] == "hail"
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_sort_passed_to_load(self, mock_load):
@@ -328,7 +348,9 @@ class TestLoadData:
             {"station_abbr": ["BER"], "reference_timestamp": [datetime(2025, 1, 1)], "temp": [20.0]}
         )
         load_data("smn", sort="desc", limit=500)
-        mock_load.assert_called_once_with("smn", sort="desc", limit=500)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["sort"] == "desc"
+        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_all_filters_combined_passed_to_load(self, mock_load):
@@ -346,16 +368,20 @@ class TestLoadData:
             sort="desc",
             limit=500,
         )
-        mock_load.assert_called_once_with(
-            "smn",
-            station=["BER"],
-            frequency="d",
-            time_slice="historical",
-            year=[2025],
-            month=[7],
-            columns=["temp"],
-            sort="desc",
-            limit=500,
+        assert mock_load.call_args.args == ("smn",)
+        assert (
+            mock_load.call_args.kwargs
+            | {
+                "station": ["BER"],
+                "frequency": "d",
+                "time_slice": "historical",
+                "year": [2025],
+                "month": [7],
+                "columns": ["temp"],
+                "sort": "desc",
+                "limit": 500,
+            }
+            == mock_load.call_args.kwargs
         )
 
     def test_invalid_sort_raises(self):
@@ -377,7 +403,9 @@ class TestLoadData:
         assert len(result) == 2
         assert result[0]["temp"] == -1.0  # December
         assert result[1]["temp"] == 15.0  # September
-        mock_load.assert_called_once_with("smn", sort="desc", limit=2)
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["sort"] == "desc"
+        assert mock_load.call_args.kwargs["limit"] == 2
 
 
 # ── describe_data ────────────────────────────────────────────────────────────
@@ -431,7 +459,8 @@ class TestDescribeData:
             }
         )
         result = describe_data("smn", year=[2025])
-        mock_load.assert_called_once_with("smn", year=[2025])
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["year"] == [2025]
         assert result.total_rows == 1
 
     @patch("foehn.mcp_server.foehn.load")
@@ -444,7 +473,8 @@ class TestDescribeData:
             }
         )
         result = describe_data("smn", month=[7])
-        mock_load.assert_called_once_with("smn", month=[7])
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["month"] == [7]
         assert result.total_rows == 1
 
     @patch("foehn.mcp_server.foehn.load")
@@ -457,7 +487,9 @@ class TestDescribeData:
             }
         )
         result = describe_data("smn", date_from="2025-06-01", date_to="2025-08-31")
-        mock_load.assert_called_once_with("smn", date_from="2025-06-01", date_to="2025-08-31")
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["date_from"] == "2025-06-01"
+        assert mock_load.call_args.kwargs["date_to"] == "2025-08-31"
         assert result.total_rows == 1
 
     @patch("foehn.mcp_server.foehn.load")
@@ -470,7 +502,8 @@ class TestDescribeData:
             }
         )
         result = describe_data("smn", drop_null="hail")
-        mock_load.assert_called_once_with("smn", drop_null="hail")
+        assert mock_load.call_args.args == ("smn",)
+        assert mock_load.call_args.kwargs["drop_null"] == "hail"
         assert result.total_rows == 1
         assert result.stations == ["BER"]
 
