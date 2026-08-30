@@ -123,8 +123,8 @@ foehn to-zarr surface_derived_grid --match rhiresd
 foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 foehn to-zarr forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl
 foehn to-zarr radar_precip --match cpc2613000000              # one timestep
-foehn to-zarr radar_precip --match cpc26130 --stack time      # a day -> one (time, y, x) cube
-foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack auto  # GRIB2 -> (time, step, values) cube
+foehn to-zarr radar_precip --match cpc26130 --stack           # a day -> one (time, y, x) cube
+foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack    # GRIB2 -> (time, step, values) cube
 ```
 
 | Flag | Description |
@@ -132,7 +132,7 @@ foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack auto  # GRIB2 -> (tim
 | `--variables` | Restrict to these data variable(s) |
 | `--match` | Keep only source files whose name contains this substring |
 | `--out` | Explicit output path for the .zarr store |
-| `--stack` | Cube the matched files: `time` (radar → time,y,x) or `auto` (GRIB2 → N-D) |
+| `--stack` | Cube the matched files, by whichever method the dataset's kind uses (radar → time,y,x; GRIB2 → N-D) |
 
 ---
 
@@ -142,5 +142,5 @@ Settings can also be configured via environment variables. CLI flags always take
 
 | Variable | Equivalent | Description |
 |---|---|---|
-| `FOEHN_DATA_DIR` | `--data-dir` | Root data directory |
+| `FOEHN_DATA_DIR` | `--data-dir` | Root data directory. Also honoured by the Python API, which uses it whenever `data_dir=` is not passed. |
 | `FOEHN_FULL_REFRESH` | `--full-refresh` | Set to `1`, `true`, or `yes` to ignore incremental tracking |

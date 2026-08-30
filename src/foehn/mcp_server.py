@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 import foehn
 from foehn import registry
-from foehn.collections import COLLECTION_META, COLLECTIONS
+from foehn.collections import COLLECTION_META, COLLECTIONS, GRANULARITY_LABELS, TIME_SLICE_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,11 @@ _LOADABLE_DATASETS = sorted(registry.tabular_datasets())
 
 # Categories are this layer's own: ``list_datasets`` filters the catalogue here
 # rather than in foehn, so nothing below validates the value. The dataset,
-# frequency, time-slice and sort vocabularies are *not* here — they belong to
+# frequency, time-slice and sort vocabularies are *not* — they belong to
 # ``foehn.load``'s contract, and a second copy of them at this seam could only
-# ever agree with it or drift from it.
+# ever agree with it or drift from it. The guide below renders them from
+# ``collections`` for the same reason; it used to retype them as prose, and had
+# already drifted into telling callers that ``sort`` defaults to "asc".
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
 
 # The tabular query tools are read-only against the MeteoSwiss API (describe_grid
@@ -235,8 +237,10 @@ def load_data(
             Use get_parameters() to find column names.
         drop_null: Drop rows where this column is null (e.g. "w3pnd2y0" to keep
             only stations that actually recorded hail). Useful for sparse datasets.
-        sort: Sort by timestamp. Options: "asc" (oldest first, default), "desc"
-            (newest first). Use "desc" with a limit to get the most recent data.
+        sort: Sort by timestamp. Options: "asc" (oldest first) or "desc" (newest
+            first). Omit it and the rows are NOT sorted — they come back grouped
+            by station in the order the files were fetched. Use "desc" with a
+            limit to get the most recent data.
         limit: Maximum rows to return (default 50, max 500). Use filters to stay
             within limits on large datasets.
     """
@@ -471,6 +475,10 @@ def usage_guide() -> str:
         f"time slices: {', '.join(COLLECTION_META[ds]['time_slices']) or 'none'})"
         for ds in _LOADABLE_DATASETS
     )
+    # Rendered rather than restated: these are the tokens ``foehn.load`` enforces,
+    # so a new one cannot leave this guide describing a vocabulary that moved on.
+    frequency_list = "\n".join(f"- `{token}` — {label}" for token, label in GRANULARITY_LABELS.items())
+    time_slice_list = "\n".join(f"- `{token}` — {label}" for token, label in TIME_SLICE_LABELS.items())
     grid_list = "\n".join(
         f"  - `{ds}` — {COLLECTION_META[ds]['description']} ({COLLECTION_META[ds]['format']})"
         for ds in _INSPECTABLE_GRIDS
@@ -514,11 +522,7 @@ To read or convert the data itself, use the Python API (`foehn.open_dataset` /
 
 ## Frequencies
 
-- `t` — 10-minute (near real-time measurements)
-- `h` — hourly
-- `d` — daily
-- `m` — monthly
-- `y` — yearly
+{frequency_list}
 
 Not all datasets support all frequencies. The `frequencies` field in
 list_datasets() shows what each dataset supports.
@@ -529,9 +533,7 @@ Timestamp convention (all UTC):
 
 ## Time slices
 
-- `now` — last ~24 hours, updated every 10 minutes (t, h only)
-- `recent` — this calendar year through yesterday, updated daily (default)
-- `historical` — start of measurements through Dec 31 of last year
+{time_slice_list}
 
 ## Filtering
 
@@ -542,7 +544,8 @@ load_data() and describe_data() support these filters (all combinable):
 - **date_from / date_to** — e.g. date_from="2025-06-01", date_to="2025-08-31"
 - **columns** — e.g. columns=["tre200s0"] to return only temperature
 - **drop_null** — e.g. drop_null="w3pnd2y0" to keep only rows with hail data
-- **sort** — "asc" (oldest first, default) or "desc" (newest first)
+- **sort** — "asc" (oldest first) or "desc" (newest first). Omitted means
+  unsorted: rows come back grouped by station, not in timestamp order.
 
 ## Limits and performance
 

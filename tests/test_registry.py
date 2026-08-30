@@ -6,14 +6,13 @@ call the grib2 handler?" — one assertion per caller per kind, which is the
 duplication the registry removes.
 """
 
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from foehn import registry
-from foehn.client import DownloadResult
 from foehn.collections import COLLECTIONS, KIND_OF, DatasetKind
+from foehn.convert import convert_indoor_to_parquet, convert_preamble_to_parquet, convert_to_parquet
+from foehn.workspace import Workspace
+from tests.fakes import InMemoryFetcher, stac_collection, stac_item
 
 
 def test_every_kind_has_a_spec():
@@ -57,6 +56,49 @@ def test_grid_kinds_have_no_parquet_path():
         assert registry.KINDS[kind_].tabular is False
 
 
+def test_no_kind_has_two_read_paths():
+    """A kind is read as a frame or as a grid, never both.
+
+    ``tabular`` and ``is_grid`` are read off those two adapters rather than set
+    beside them, so this is what keeps them meaningful. DIRECT_ZIP has neither:
+    it downloads and converts to Parquet but is not reachable from load().
+    """
+    for kind_, spec in registry.KINDS.items():
+        assert not (spec.load is not None and spec.grid is not None), f"{kind_} has two read paths"
+        assert spec.tabular is (spec.load is not None)
+        assert spec.is_grid is (spec.grid is not None)
+
+
+def test_direct_zip_is_the_only_kind_with_no_read_path():
+    """Guards the exception: a second one would be a kind nobody can get data out of."""
+    unreadable = {k for k, spec in registry.KINDS.items() if not spec.tabular and not spec.is_grid}
+    assert unreadable == {DatasetKind.DIRECT_ZIP}
+    # ...and it still has both write paths, which is why it is a dataset at all.
+    assert registry.KINDS[DatasetKind.DIRECT_ZIP].convert is not None
+
+
+def test_only_the_single_file_kinds_cap_an_open():
+    """The cap is what makes match= mandatory, and it differs from the cube's."""
+    grib2 = registry.KINDS[DatasetKind.GRIB2_GRID].grid
+    radar = registry.KINDS[DatasetKind.RADAR_GRID].grid
+    netcdf = registry.KINDS[DatasetKind.NETCDF_GRID].grid
+
+    assert grib2.max_files == 1 and radar.max_files == 1
+    assert netcdf.max_files is None  # combines cleanly, so an unfiltered open is fine
+
+    # The cube caps are a different per-kind fact: GRIB2 holds the whole set in
+    # memory, radar appends one timestep at a time and wants every file.
+    assert grib2.cube_max_files == 1000
+    assert radar.cube_max_files is None
+
+
+def test_only_netcdf_lacks_a_cube_builder():
+    """NetCDF needs none — a multi-file match already combines on read."""
+    assert registry.KINDS[DatasetKind.NETCDF_GRID].grid.cube is None
+    assert registry.KINDS[DatasetKind.GRIB2_GRID].grid.cube is not None
+    assert registry.KINDS[DatasetKind.RADAR_GRID].grid.cube is not None
+
+
 def test_tabular_kinds_all_convert():
     for kind_, spec in registry.KINDS.items():
         if spec.tabular:
@@ -76,18 +118,49 @@ def test_preamble_csv_rejects_calendar_filters():
 
 
 def test_key_columns_differ_where_the_schema_does():
-    """``columns=`` keeps a different set per kind; it used to be passed in by hand."""
-    assert registry.KINDS[DatasetKind.PREAMBLE_CSV].key_columns == ("station_abbr", "variable", "gwl", "date")
-    assert "period" in registry.KINDS[DatasetKind.ARCHIVE_CSV].key_columns
-    assert registry.KINDS[DatasetKind.STANDARD_CSV].key_columns == ("station_abbr", "reference_timestamp")
+    """``columns=`` keeps a different set per kind, and the reader carries it.
+
+    It used to sit on KindSpec, a layer above the reader that produces the frame
+    it describes, because the pass that reads it lived in ``api``.
+    """
+    assert registry.KINDS[DatasetKind.PREAMBLE_CSV].load.key_columns == ("station_abbr", "variable", "gwl", "date")
+    assert "period" in registry.KINDS[DatasetKind.ARCHIVE_CSV].load.key_columns
+    assert registry.KINDS[DatasetKind.STANDARD_CSV].load.key_columns == ("station_abbr", "reference_timestamp")
+
+
+def test_only_the_nominal_date_kind_sorts_on_something_else():
+    """The preamble kind's dates are 0001..0030 strings, not timestamps."""
+    assert registry.KINDS[DatasetKind.PREAMBLE_CSV].load.sort_column == "date"
+    assert registry.KINDS[DatasetKind.STANDARD_CSV].load.sort_column == "reference_timestamp"
+
+
+def test_registry_load_returns_a_finished_frame():
+    """sort, columns and limit are applied here; ``api.load`` used to do it after."""
+    from foehn.readers import Filters
+
+    body = b"station_abbr;reference_timestamp;tre200d0;other\nBER;2026-01-01;1.0;9\nBER;2026-01-02;2.0;9\n"
+    fake = _fetcher([stac_item("BER", "https://data.geo.admin.ch/ogd-smn_ber_d_recent.csv")], body=body)
+
+    df = registry.load("smn", Filters.build(columns=["tre200d0"], sort="desc", limit=1), fetcher=fake)
+
+    assert df.columns == ["station_abbr", "reference_timestamp", "tre200d0"]  # key columns kept
+    assert len(df) == 1
+    assert df["tre200d0"][0] == 2.0  # newest first
 
 
 # --- dataset listings ---
 
 
-def test_tabular_and_grid_datasets_partition_the_collections():
-    assert set(registry.tabular_datasets()) | set(registry.grid_datasets()) == set(COLLECTIONS)
-    assert not set(registry.tabular_datasets()) & set(registry.grid_datasets())
+def test_tabular_and_grid_datasets_are_disjoint():
+    tabular, grid = set(registry.tabular_datasets()), set(registry.grid_datasets())
+    assert not tabular & grid
+    # climate_normals is in neither: it converts to Parquet but has no reader.
+    assert set(COLLECTIONS) - tabular - grid == {"climate_normals"}
+
+
+def test_non_grid_datasets_is_everything_but_the_grids():
+    assert set(registry.non_grid_datasets()) == set(COLLECTIONS) - set(registry.grid_datasets())
+    assert "climate_normals" in registry.non_grid_datasets()
 
 
 def test_listings_keep_declaration_order():
@@ -98,75 +171,132 @@ def test_listings_keep_declaration_order():
 # --- dispatch ---
 
 
+def _fetcher(items=(), collection=None, body=b"a;b\n1;2\n"):
+    fake = InMemoryFetcher()
+    fake.any_items = list(items)
+    fake.any_collection = collection if collection is not None else {"assets": {}}
+    fake.default_body = body
+    return fake
+
+
 @pytest.mark.parametrize(
-    ("dataset", "handler"),
+    ("dataset", "href", "written"),
     [
-        ("smn", "download_collection"),
-        ("forecast_local", "download_collection"),
-        ("climate_scenarios", "download_collection"),
-        ("climate_scenarios_indoor", "download_climate_scenarios_indoor"),
-        ("forecast_icon_ch1", "download_grib2"),
-        ("radar_precip", "download_grib2"),
-        ("surface_derived_grid", "download_netcdf"),
+        ("smn", "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv", "ogd-smn_tst_d_recent.csv"),
+        ("forecast_icon_ch1", "https://data.geo.admin.ch/f.grib2", "f.grib2"),
+        ("radar_precip", "https://data.geo.admin.ch/cpc26130000000.h5", "cpc26130000000.h5"),
+        ("surface_derived_grid", "https://data.geo.admin.ch/grid.nc", "grid.nc"),
     ],
 )
-def test_download_reaches_the_right_handler(dataset, handler, tmp_path):
-    with patch(f"foehn.registry.{handler}") as mock, patch("foehn.registry.download_metadata") as mock_meta:
-        mock.return_value = DownloadResult()
-        mock_meta.return_value = DownloadResult()
-        registry.download(dataset, tmp_path, fetcher=object())
-    assert mock.called
+def test_download_uses_each_kinds_own_listing_configuration(dataset, href, written, tmp_path):
+    """One engine, configured per row — asserted on what lands, not on who was called."""
+    fake = _fetcher([stac_item("i1", href)])
+    result = registry.download(dataset, Workspace(tmp_path), fetcher=fake)
+
+    assert (tmp_path / "bronze" / dataset / written).exists()
+    assert result.filenames == [written]
 
 
-def test_standard_download_sums_metadata_and_collection(tmp_path):
+@pytest.mark.parametrize(
+    ("dataset", "ignored"),
+    [
+        ("forecast_icon_ch1", "https://data.geo.admin.ch/cpc26130000000.h5"),
+        ("radar_precip", "https://data.geo.admin.ch/f.grib2"),
+    ],
+)
+def test_each_binary_kind_downloads_only_its_own_format(dataset, ignored, tmp_path):
+    """Radar and GRIB2 shared one suffix list while they shared one handler."""
+    fake = _fetcher([stac_item("i1", ignored)])
+    result = registry.download(dataset, Workspace(tmp_path), fetcher=fake)
+
+    assert result.downloaded == 0
+    assert fake.streams == []
+
+
+def test_the_csv_kinds_fetch_collection_metadata_in_the_same_pass(tmp_path):
     """Both callers used to do this pairing themselves, and counted it differently."""
-    with (
-        patch("foehn.registry.download_metadata") as mock_meta,
-        patch("foehn.registry.download_collection") as mock_coll,
-    ):
-        mock_meta.return_value = DownloadResult(total_assets=1, downloaded=1, filenames=["m.csv"])
-        mock_coll.return_value = DownloadResult(total_assets=2, downloaded=2, failed=1, filenames=["a.csv", "b.csv"])
+    meta = "https://data.geo.admin.ch/ogd-smn_meta_stations.csv"
+    data = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    fake = _fetcher([stac_item("i1", data)], collection=stac_collection("ch.meteoschweiz.ogd-smn", meta))
 
-        result = registry.download("smn", tmp_path, fetcher=object())
+    result = registry.download("smn", Workspace(tmp_path), fetcher=fake)
 
-    assert result.total_assets == 3
-    assert result.downloaded == 3
-    assert result.failed == 1
-    assert result.filenames == ["m.csv", "a.csv", "b.csv"]
+    assert result.total_assets == 2
+    assert result.downloaded == 2
+    assert sorted(result.filenames) == ["ogd-smn_meta_stations.csv", "ogd-smn_tst_d_recent.csv"]
+
+
+def test_the_grid_kinds_fetch_no_collection_metadata(tmp_path):
+    """Only the CSV kinds ship parameter/station/inventory files."""
+    fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/grid.nc")])
+    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
+    assert fake.collection_calls == []
 
 
 def test_download_defaults_to_the_recent_slice(tmp_path):
-    with patch("foehn.registry.download_collection") as mock_coll, patch("foehn.registry.download_metadata") as m:
-        mock_coll.return_value = m.return_value = DownloadResult()
-        registry.download("smn", tmp_path, fetcher=object())
-    assert mock_coll.call_args.kwargs["data_types"] == ["recent"]
+    base = "https://data.geo.admin.ch"
+    fake = _fetcher(
+        [
+            stac_item("i1", f"{base}/ogd-smn_tst_d_recent.csv"),
+            stac_item("i2", f"{base}/ogd-smn_tst_d_historical.csv"),
+        ]
+    )
+    result = registry.download("smn", Workspace(tmp_path), fetcher=fake)
+    assert result.filenames == ["ogd-smn_tst_d_recent.csv"]
+
+
+def test_only_the_forecast_kind_narrows_to_the_newest_run(tmp_path):
+    """A forecast item is one day of runs; the newest run bounds the set, not the newest item."""
+    base = "https://data.geo.admin.ch"
+    fake = _fetcher(
+        [
+            stac_item("d1", f"{base}/vnut12.lssw.202607210600.dkl010h0.csv"),
+            stac_item("d2", f"{base}/vnut12.lssw.202607211200.dkl010h0.csv"),
+        ]
+    )
+    result = registry.download("forecast_local", Workspace(tmp_path), fetcher=fake)
+    assert result.filenames == ["vnut12.lssw.202607211200.dkl010h0.csv"]
+
+
+def test_only_the_ephemeral_kinds_stop_at_the_first_page(tmp_path):
+    """Forecast and radar hold thousands of items; walking them all is pure cost."""
+    fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/f.grib2")])
+    registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
+    assert [max_items for *_, max_items in fake.listings] == [100]
+
+    fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/grid.nc")])
+    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
+    assert [max_items for *_, max_items in fake.listings] == [None]
 
 
 @pytest.mark.parametrize(
     ("dataset", "converter"),
     [
-        ("smn", "convert_to_parquet"),
-        ("forecast_local", "convert_to_parquet"),
-        ("climate_scenarios", "convert_climate_scenarios_to_parquet"),
-        ("climate_scenarios_indoor", "convert_climate_scenarios_indoor_to_parquet"),
+        ("smn", convert_to_parquet),
+        ("forecast_local", convert_to_parquet),
+        ("climate_scenarios", convert_preamble_to_parquet),
+        ("climate_scenarios_indoor", convert_indoor_to_parquet),
     ],
 )
-def test_convert_reaches_the_right_converter(dataset, converter, tmp_path):
-    with patch(f"foehn.registry.{converter}") as mock:
-        mock.return_value = 0
-        registry.convert(dataset, tmp_path / "bronze", tmp_path / "parquet")
-    assert mock.called
+def test_convert_reaches_the_right_converter(dataset, converter):
+    """Which converter a kind uses is its row. The registry stopped wrapping them
+    once they all took the same three arguments."""
+    assert registry.spec(dataset).convert is converter
 
 
 @pytest.mark.parametrize("dataset", ["surface_derived_grid", "forecast_icon_ch1", "radar_precip"])
 def test_convert_is_a_no_op_for_grids(dataset, tmp_path):
     """Callers used to `continue` past these; now there is nothing to skip."""
-    assert registry.convert(dataset, tmp_path / "bronze", tmp_path / "parquet") == 0
+    assert registry.convert(dataset, Workspace(tmp_path)) == 0
 
 
 def test_convert_passes_the_directories_through(tmp_path):
-    with patch("foehn.registry.convert_to_parquet") as mock:
-        mock.return_value = 3
-        failures = registry.convert("smn", Path("bronze"), Path("parquet"))
-    mock.assert_called_once_with("smn", Path("bronze"), Path("parquet"))
-    assert failures == 3
+    """The dataset key names both the bronze sub-folder read and the output written."""
+    bronze = tmp_path / "bronze" / "smn"
+    bronze.mkdir(parents=True)
+    (bronze / "ogd-smn_tst_d_recent.csv").write_text("station_abbr;value\nTST;1.0\n", encoding="utf-8")
+
+    failures = registry.convert("smn", Workspace(tmp_path))
+
+    assert failures == 0
+    assert (tmp_path / "parquet" / "smn" / "smn_d_recent.parquet").exists()

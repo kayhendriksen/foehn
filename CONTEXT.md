@@ -14,8 +14,10 @@ foehn's short key for one body of MeteoSwiss data — `smn`, `radar_precip`,
 _Avoid_: collection (that is the STAC id), source, feed, product
 
 **Collection**:
-The STAC collection a **Dataset** maps to, e.g. `ch.meteoschweiz.ogd-smn`. One
-**Dataset** is exactly one **Collection**.
+The upstream identifier a **Dataset** maps to, e.g. `ch.meteoschweiz.ogd-smn`.
+A STAC collection id for every **Dataset kind** but **Direct ZIP**, which has no
+STAC collection and whose identifier is the geo.admin path its ZIP lives under.
+One **Dataset** is exactly one **Collection**.
 _Avoid_: dataset, endpoint
 
 **Dataset kind**:
@@ -35,7 +37,7 @@ MeteoSwiss's own A–E classification of its data (A ground-based, C climate,
 D radar, E forecast). Public, and theirs — foehn reports it but never routes on it.
 _Avoid_: kind, group, class
 
-### The seven dataset kinds
+### The eight dataset kinds
 
 **Standard CSV** (10 datasets):
 Per-station CSV assets split by **Time slice** and **Granularity**. The main path:
@@ -64,6 +66,14 @@ One field per file.
 ODIM-H5 Cartesian composites, one per timestep.
 _Avoid_: HDF5 grid, GRIB2 collection — lumping radar with GRIB2 was the original
 routing mistake.
+
+**Direct ZIP** (`climate_normals`):
+A ZIP fetched from a fixed URL rather than listed on the STAC API. The only kind
+with a download path and a convert path but neither a **Reader** nor a **Grid
+reader**: its TXT files are a wide per-parameter table keyed by station *name*,
+with twelve month columns and no timestamp, so what a normals DataFrame should
+look like is an open question rather than a missing adapter.
+_Avoid_: normals kind (the kind is the shipping shape, not the subject matter)
 
 ### Assets
 
@@ -99,8 +109,16 @@ Not the **Forecast run**.
 
 ### Storage and transport
 
+**Workspace**:
+One data directory and every path foehn derives from it — **Bronze**, Parquet,
+Zarr, the ETag store and the last-run cursor. Resolved once, by one rule: the
+caller's `data_dir`, else `$FOEHN_DATA_DIR`, else `./data/meteoswiss`. The
+public functions still take `data_dir=`; everything inside foehn takes the
+**Workspace**, so no module derives one path from another.
+_Avoid_: data dir (that is the argument, not the concept), root, storage
+
 **Bronze**:
-The local cache of raw downloaded files, at `data_dir/bronze/<dataset>/`. What
+The local cache of raw downloaded files, at `<workspace>/bronze/<dataset>/`. What
 `download()` writes and what the grid readers read from.
 _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 
@@ -124,8 +142,19 @@ other three sum to it.
 
 **Reader**:
 How one **Dataset kind** becomes a Polars DataFrame — one per tabular kind,
-selected from the registry exactly as its download and convert paths are.
+selected from the registry exactly as its download and convert paths are. Owns
+what its frame looks like as well as how it is fetched: which columns an explicit
+`columns=` always keeps, and what `sort=` orders by. Hands back a finished frame,
+so nothing above the registry filters it further.
 _Avoid_: loader, parser (parsing is one step inside a reader)
+
+**Grid reader**:
+How one **Dataset kind** becomes an xarray Dataset — one per grid kind, selected
+from the registry exactly as a **Reader** is. Carries what its kind needs opened
+and, where the kind has one, how its matched files assemble into a single Zarr
+cube. A **Dataset kind** has a **Reader** or a **Grid reader**, never both.
+_Avoid_: engine, backend (those are xarray's, and one grid reader uses no xarray
+engine at all), format reader
 
 **Filters**:
 One load query, normalised: stations and granularities lowercased, scalars
@@ -143,7 +172,10 @@ _Avoid_: query, params, options
 - A **Forecast CSV** **Asset** is identified by its **Forecast run**.
 - Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
 - Every **Asset** written to **Bronze** goes through **Transfer**, which calls the **Fetcher**.
-- A **Dataset kind** has one download path, one convert path and (when tabular) one **Reader**.
+- Every path foehn reads or writes comes from a **Workspace**.
+- A **Dataset kind** has one download path and one convert path, and at most one
+  of a **Reader** (tabular) or a **Grid reader** (gridded) — never both, and
+  neither for **Direct ZIP**.
 
 ## Flagged ambiguities
 
@@ -159,3 +191,22 @@ _Avoid_: query, params, options
   `collections`, once again in the MCP layer, which could only agree or drift.
   Resolved: `collections.GRANULARITIES` and `collections.TIME_SLICES` are the
   vocabulary, `load()` enforces it, and the MCP tools restate nothing.
+- `climate_normals` was a **Dataset** in the docs and in three callers' special
+  cases, but not in the dataset table — so `foehn.list_datasets()` did not show
+  it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
+  it is a **Direct ZIP** **Dataset** like any other. What "download everything"
+  means is now *not gridded* rather than *tabular*, which is what it always meant.
+- The MCP guide restated `load()`'s filter vocabulary as prose and had drifted:
+  it told callers `sort` defaults to `"asc"` when an omitted `sort` does not sort
+  at all. Resolved: the granularity and time-slice tokens carry their own labels
+  in `collections` and the guide renders them. The worked examples stay prose —
+  they are guidance for an LLM, not a vocabulary that can drift.
+- The default data directory was written at seven call sites and only the CLI
+  read `$FOEHN_DATA_DIR`, so the same environment sent `foehn download` and
+  `foehn.download()` to different places; the ETag store was placed at whatever
+  `output_dir.parent` a caller passed. Resolved: **Workspace** owns the layout
+  and the resolution rule.
+- Which **Dataset kinds** are gridded was stated twice — as `collections.GRID_KINDS`
+  beside the kind enum, and again as the keys of the grid path's own reader table.
+  Resolved: a kind is gridded iff its registry row carries a **Grid reader**;
+  `GRID_KINDS` and `is_grid` are gone.

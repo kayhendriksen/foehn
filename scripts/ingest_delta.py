@@ -31,9 +31,12 @@ import polars as pl
 from pyspark.sql import SparkSession
 
 from foehn import registry
+from foehn.collections import DatasetKind, kind
 from foehn.convert import group_csv_files, load_metadata_types, parse_csv_bytes
 
-TABULAR_COLLECTIONS = [*registry.tabular_datasets(), "climate_normals"]
+# Every dataset that is not a grid — climate_normals included, which used to be
+# appended by hand because it converts to Parquet without being loadable.
+INGESTED_COLLECTIONS = registry.non_grid_datasets()
 
 # Collections where historical data can exceed available memory.
 # Chunked ingestion is used for these when --historical is set.
@@ -407,8 +410,9 @@ def main() -> None:
         print(f"\nDone — {ok} tables written, {skip} skipped.")
         return
 
-    for key in TABULAR_COLLECTIONS:
-        if key == "climate_normals":
+    for key in INGESTED_COLLECTIONS:
+        # The one dataset whose bronze files are TXT rather than CSV.
+        if kind(key) is DatasetKind.DIRECT_ZIP:
             ok, skip = _ingest_climate_normals(spark, bronze_base, cat, sch)
             total_ok += ok
             total_skip += skip

@@ -132,7 +132,9 @@ COLLECTIONS = {
     "surface_derived_grid": "ch.meteoschweiz.ogd-surface-derived-grid",  # C3 — Precipitation, temperature, sunshine
     "satellite_derived_grid": "ch.meteoschweiz.ogd-satellite-derived-grid",  # C4 — Radiation, clouds, LST
     "radar_derived_grid": "ch.meteoschweiz.ogd-radar-derived-grid",  # C5 — Hail (days + return periods), radar-derived
-    # C6 — Climate normals → downloaded separately as ZIP, see CLIMATE_NORMALS_ZIP_URL
+    # C6 — Station normals. The only dataset with no STAC collection: it ships as a
+    # single ZIP under this geo.admin identifier, see CLIMATE_NORMALS_ZIP_URL.
+    "climate_normals": "ch.meteoschweiz.klima",
     # C7 — Spatial climate normals (NetCDF/GeoTIFF, static reference grids)
     # Supersedes the retired per-parameter klimanormwerte-* map layers: the same
     # temp/precip/sun normals (1991-2020 and 1961-1990) are assets on this
@@ -272,6 +274,16 @@ COLLECTION_META: dict[str, dict] = {
         "frequencies": [],
         "time_slices": [],
     },
+    "climate_normals": {
+        "category": "C",
+        "subcategory": "C6",
+        "description": "Station climate normals, 1961-1990 and 1991-2020 (monthly + yearly)",
+        "format": "TXT",
+        # No reader, so no filter vocabulary to advertise: this dataset downloads
+        # and converts to Parquet but is not reachable from load().
+        "frequencies": [],
+        "time_slices": [],
+    },
     "climate_normals_grid": {
         "category": "C",
         "subcategory": "C7",
@@ -396,6 +408,15 @@ class DatasetKind(StrEnum):
     RADAR_GRID = "radar_grid"
     """ODIM-H5 Cartesian composites, one per timestep."""
 
+    DIRECT_ZIP = "direct_zip"
+    """A ZIP fetched from a fixed URL rather than listed on the STAC API.
+
+    Climate normals only. It has a download path and a convert path but no
+    reader: the TXT files are a wide per-parameter table keyed by station *name*
+    with twelve month columns and no timestamp, so what a normals DataFrame
+    should look like is an open question rather than a missing adapter.
+    """
+
 
 # One row per dataset. Adding a collection means adding it here and to
 # COLLECTIONS; a kind missing from either is caught by the tests.
@@ -417,6 +438,7 @@ KIND_OF: dict[str, DatasetKind] = {
     "radar_derived_grid": DatasetKind.NETCDF_GRID,
     "climate_normals_grid": DatasetKind.NETCDF_GRID,
     "climate_scenarios_grid": DatasetKind.NETCDF_GRID,
+    "climate_normals": DatasetKind.DIRECT_ZIP,
     "climate_scenarios": DatasetKind.PREAMBLE_CSV,
     "climate_scenarios_indoor": DatasetKind.ARCHIVE_CSV,
     # D: radar
@@ -428,9 +450,6 @@ KIND_OF: dict[str, DatasetKind] = {
     "analysis_kenda_ch1": DatasetKind.GRIB2_GRID,
     "forecast_local": DatasetKind.FORECAST_CSV,
 }
-
-# The kinds read as grids rather than tabular frames.
-GRID_KINDS = frozenset({DatasetKind.NETCDF_GRID, DatasetKind.GRIB2_GRID, DatasetKind.RADAR_GRID})
 
 # Kinds whose filenames do not carry the standard
 # ogd-{key}_{station}_{granularity}[_{timeslice}].csv pattern, so there is no
@@ -447,13 +466,10 @@ def kind(dataset: str) -> DatasetKind:
     return KIND_OF[dataset]
 
 
-def is_grid(dataset: str) -> bool:
-    """True if *dataset* is read as a grid (xarray) rather than a DataFrame."""
-    return KIND_OF[dataset] in GRID_KINDS
-
-
-# (The gridded read path's per-format engine/suffix config now lives in
-# foehn.grids._GRID_READERS, keyed off each collection's COLLECTION_META format.)
+# Whether a dataset is read as a grid is not listed here: it is whether its kind
+# has a grid reader, which is ``registry.spec(dataset).is_grid``. A set naming
+# the grid kinds beside the table that gives them their readers could only ever
+# agree with it or drift from it.
 
 
 # C6 climate normals — separate ZIP from opendata.swiss (not on STAC API).
@@ -463,14 +479,32 @@ CLIMATE_NORMALS_ZIP_URL = "https://data.geo.admin.ch/ch.meteoschweiz.klima/normw
 
 
 # Time-slice tokens that appear as the trailing filename segment of standard
-# CSV assets (ogd-{key}_{station}_{granularity}_{timeslice}.csv).
-TIME_SLICES = frozenset({"historical", "recent", "now"})
+# CSV assets (ogd-{key}_{station}_{granularity}_{timeslice}.csv), each with what
+# it covers. The MCP guide renders these rather than restating them: a token
+# added here has to reach the LLM-facing documentation, and prose cannot be
+# checked against a set.
+TIME_SLICE_LABELS: dict[str, str] = {
+    "now": "last ~24 hours, updated every 10 minutes (t, h only)",
+    "recent": "this calendar year through yesterday, updated daily (the default)",
+    "historical": "start of measurements through Dec 31 of last year",
+}
+
+TIME_SLICES = frozenset(TIME_SLICE_LABELS)
 
 # The granularity segment's vocabulary — the ``_t``/``_h``/``_d``/``_m``/``_y``
 # documented at the top of this module. Which of them a given dataset actually
 # has is ``COLLECTION_META[...]["frequencies"]``; this is the whole alphabet, and
-# the single source for it (the MCP layer used to carry its own copy).
-GRANULARITIES = frozenset({"t", "h", "d", "m", "y"})
+# the single source for it (the MCP layer used to carry its own copy of the
+# tokens, and then its own prose gloss of them).
+GRANULARITY_LABELS: dict[str, str] = {
+    "t": "10-minute (near real-time measurements)",
+    "h": "hourly",
+    "d": "daily",
+    "m": "monthly",
+    "y": "yearly",
+}
+
+GRANULARITIES = frozenset(GRANULARITY_LABELS)
 
 
 # MeteoSwiss chunks the high-frequency historical series by decade, so the slice

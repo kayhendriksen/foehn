@@ -9,20 +9,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from foehn.assets import Asset, assets_of, collection_assets, latest_run_of, select
-from foehn.collections import (
-    CLIMATE_NORMALS_ZIP_URL,
-    COLLECTIONS,
-    DatasetKind,
-    kind,
-)
+from foehn.collections import CLIMATE_NORMALS_ZIP_URL, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.transfer import (
     DownloadResult,
+    SkipRule,
+    Writer,
     atomic_write_text,
     csv_to_disk,
     fetch_all,
     stream_to_disk,
 )
+from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +28,8 @@ logger = logging.getLogger(__name__)
 # --- State files (ETags + last-run timestamp) ---
 
 
-def load_etags(data_dir: Path) -> dict:
-    path = data_dir / "_etags.json"
+def load_etags(workspace: Workspace) -> dict:
+    path = workspace.etags
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -40,15 +38,15 @@ def load_etags(data_dir: Path) -> dict:
     return {}
 
 
-def save_etags(data_dir: Path, etags: dict):
-    path = data_dir / "_etags.json"
+def save_etags(workspace: Workspace, etags: dict):
+    path = workspace.etags
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(etags, indent=2))
 
 
-def load_last_run(data_dir: Path) -> str | None:
+def load_last_run(workspace: Workspace) -> str | None:
     """Return ISO timestamp of last successful run, or None."""
-    path = data_dir / "_last_run.json"
+    path = workspace.last_run
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -59,131 +57,169 @@ def load_last_run(data_dir: Path) -> str | None:
     return None
 
 
-def save_last_run(data_dir: Path):
-    path = data_dir / "_last_run.json"
+def save_last_run(workspace: Workspace):
+    path = workspace.last_run
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
 
 
-# --- CSV downloads ---
+# --- One listing path, configured per dataset kind ---
 
 
-def download_collection(
-    collection_key: str,
-    output_dir: Path,
-    data_types: list[str] | None = None,
-    since: str | None = None,
-    workers: int = DEFAULT_WORKERS,
-    state_dir: Path | None = None,
-    *,
-    fetcher: Fetcher,
-) -> DownloadResult:
-    """Download CSVs for a collection.
-
-    Args:
-        collection_key: Key from COLLECTIONS (e.g. "smn").
-        output_dir: Root directory for bronze downloads (files go to output_dir/<key>/).
-        data_types: List of "historical", "recent", "now". Defaults to ["recent"].
-        since: ISO timestamp — only process items updated after this time.
-        workers: Number of concurrent HTTP downloads.
-        state_dir: Where ``_etags.json`` lives. Defaults to ``output_dir.parent``,
-            which is the data root when output_dir is the usual bronze directory.
-            Pass it explicitly to keep the ETag state somewhere else — calling
-            this with an arbitrary output_dir otherwise scatters state a level up.
-
-    Returns:
-        DownloadResult with counts and list of newly downloaded filenames.
-    """
-    state_dir = state_dir if state_dir is not None else output_dir.parent
-    if data_types is None:
-        data_types = ["recent"]
-
-    collection_id = COLLECTIONS[collection_key]
-    out_dir = output_dir / collection_key
-
-    etags = load_etags(state_dir)
-
+def _banner(title: str, out_dir: Path) -> None:
+    """The four download paths each printed this by hand, ten lines in total."""
     logger.info("%s", "=" * 60)
-    logger.info("Collection: %s", collection_id)
-    logger.info("Data types: %s", data_types)
+    logger.info("%s", title)
     logger.info("Output dir: %s", out_dir)
     logger.info("%s", "=" * 60)
 
-    items = fetcher.items(collection_id)
-    logger.info("  Found %d items", len(items))
 
-    # Filter to items updated since last run
-    if since:
-        items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
-        logger.info("  %d items updated since last run", len(items))
-        if not items:
+def _updated_since(items: list[dict], since: str | None) -> list[dict]:
+    """Keep only the items MeteoSwiss restated after *since*.
+
+    Written out verbatim in three of the four download paths, along with its two
+    log lines. What ``since`` means is one rule.
+    """
+    if not since:
+        return items
+    kept = [item for item in items if item.get("properties", {}).get("updated", "") > since]
+    logger.info("  %d items updated since last run", len(kept))
+    return kept
+
+
+def _prune_stale_etags(etags: dict, collection_id: str, listed: set[str]) -> None:
+    """Drop ETags for assets that no longer exist upstream.
+
+    Otherwise ``_etags.json`` grows forever — forecast runs get fresh filenames
+    every cycle. Only safe on a clean, complete listing: see the call site.
+    """
+    prefix = f"/{collection_id}/"
+    stale = [k for k in etags if prefix in k and k not in listed]
+    for k in stale:
+        del etags[k]
+    if stale:
+        logger.info("  Pruned %d stale ETag entries", len(stale))
+
+
+def stac_download(
+    *,
+    suffixes: tuple[str, ...],
+    title: str,
+    label: str = "file",
+    write: Writer = stream_to_disk,
+    skip: SkipRule | None = None,
+    etags: bool = False,
+    max_items: int | None = None,
+    time_sliced: bool = False,
+    latest_run: bool = False,
+    with_metadata: bool = False,
+):
+    """Build the download adapter for a kind whose assets come from a STAC listing.
+
+    ``download_collection``, ``download_grib2`` and ``download_netcdf`` were the
+    same body three times — list, drop what has not been restated since last run,
+    pick the assets, hand them to :func:`~foehn.transfer.fetch_all`. Only the
+    arguments below ever differed, and two of them were being re-derived from the
+    dataset key inside the loop rather than stated by the kind: whether to keep
+    only the newest forecast run, and whether the metadata pass runs first.
+
+    Returns a :class:`~foehn.registry.DownloadAdapter`, so the odd kinds that do
+    not list STAC at all (the ZIP-shipped ones) stay expressible as plain
+    functions of the same shape.
+
+    Args:
+        suffixes: Which asset file types this kind downloads.
+        title: Heading for the log banner, e.g. "GRIB2 collection".
+        label: Noun for the per-file log lines ("CSV", "binary file").
+        write: How one asset becomes one file — conditional GET for CSV,
+            straight to disk for binaries.
+        skip: Decided locally before anything is queued.
+        etags: Whether this kind keeps an ETag store (the conditional-GET path).
+        max_items: Stop paginating early. The ephemeral collections only ever
+            want the newest page.
+        time_sliced: Whether ``time_slice`` narrows this kind's assets. False
+            where the filenames carry no slice.
+        latest_run: Keep only the newest **Forecast run**. One run is ~32 files
+            at ~30 MB, and the retained window is ~40 of them.
+        with_metadata: Whether the collection-level metadata files are fetched
+            in the same pass and reported as one result.
+    """
+
+    def download(
+        dataset: str,
+        workspace: Workspace,
+        *,
+        time_slice: list[str],
+        since: str | None = None,
+        workers: int = DEFAULT_WORKERS,
+        fetcher: Fetcher,
+        **_: object,
+    ) -> DownloadResult:
+        result = DownloadResult()
+        if with_metadata:
+            result = download_metadata(dataset, workspace, workers=workers, fetcher=fetcher)
+
+        collection_id = COLLECTIONS[dataset]
+        out_dir = workspace.bronze(dataset)
+        _banner(f"{title}: {collection_id}", out_dir)
+
+        items = fetcher.items(collection_id, max_items=max_items)
+        logger.info("  Found %d items%s", len(items), " (latest page)" if max_items else "")
+
+        items = _updated_since(items, since)
+        if since and not items:
             logger.info("  Nothing changed — skipping")
-            return DownloadResult()
+            return result
 
-    # NB: a forecast item is one *day* (e.g. "20260722-ch") holding that day's ~24
-    # hourly runs × 32 parameters, not a single forecast. Selecting the latest item
-    # therefore did not select the latest run — and since the newest item is created
-    # at ~04:00 UTC and filled as the day's runs publish, it is routinely empty,
-    # which is what produced zero CSVs. Every item is kept, and the newest run is
-    # picked out of the filenames below. (Ordering the items buys nothing: the run
-    # is chosen with max(), and downloads complete out of order regardless.)
+        # ``every`` is the full pre-filter set — the prune universe below, so
+        # ETags for slices outside this run's time_slice are kept.
+        every = assets_of(items, suffixes=suffixes)
+        wanted = select(
+            every,
+            time_slices=time_slice if time_sliced else None,
+            latest_run=latest_run,
+        )
+        if latest_run and (run := latest_run_of(every)) is not None:
+            available = len({a.forecast_run for a in every if a.forecast_run is not None})
+            logger.info("  Latest forecast run: %s (of %d available)", run, available)
 
-    # ``every_csv`` is the full pre-filter set — the prune universe below, so
-    # ETags for slices outside this run's data_types are kept.
-    is_forecast = kind(collection_key) is DatasetKind.FORECAST_CSV
-    every_csv = assets_of(items, suffixes=(".csv",))
-    # One forecast run is ~32 files at ~30 MB each (~1 GB); the full retained
-    # window is ~40 runs (~40 GB). Forecast filenames carry no time slice, so
-    # narrowing to the newest run is what bounds them instead.
-    csv_assets = select(
-        every_csv,
-        time_slices=None if is_forecast else data_types,
-        latest_run=is_forecast,
-    )
-    if is_forecast and (run := latest_run_of(every_csv)) is not None:
-        available = len({a.forecast_run for a in every_csv if a.forecast_run is not None})
-        logger.info("  Latest forecast run: %s (of %d available)", run, available)
+        # The conditional-GET writer decides "unchanged" from the server's 304,
+        # so the ETag store is this kind's skip rule.
+        store = load_etags(workspace) if etags else None
+        fetched = fetch_all(
+            wanted,
+            out_dir,
+            fetcher=fetcher,
+            workers=workers,
+            write=write,
+            skip=skip,
+            etags=store,
+            label=label,
+        )
 
-    # The conditional-GET writer decides "unchanged" from the server's 304, so
-    # there is no local skip rule here — the ETag store is the skip rule.
-    result = fetch_all(
-        csv_assets,
-        out_dir,
-        fetcher=fetcher,
-        workers=workers,
-        write=csv_to_disk,
-        etags=etags,
-        label="CSV",
-    )
+        if store is not None:
+            # Only on a clean full listing: with ``since`` the item list is
+            # partial, and after failures the universe may be incomplete.
+            if since is None and fetched.failed == 0:
+                _prune_stale_etags(store, collection_id, {a.href for a in every})
+            save_etags(workspace, store)
 
-    # Prune ETags for assets that no longer exist upstream, so _etags.json
-    # doesn't grow forever (e.g. forecast runs get fresh filenames each cycle).
-    # Only on a clean full listing: with ``since`` the item list is partial, and
-    # after failures the universe may be incomplete.
-    if since is None and result.failed == 0:
-        prefix = f"/{collection_id}/"
-        listed = {a.href for a in every_csv}
-        stale = [k for k in etags if prefix in k and k not in listed]
-        for k in stale:
-            del etags[k]
-        if stale:
-            logger.info("  Pruned %d stale ETag entries", len(stale))
+        return result + fetched
 
-    save_etags(state_dir, etags)
-    return result
+    return download
 
 
 # --- Metadata downloads ---
 
 
 def download_metadata(
-    collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS, *, fetcher: Fetcher
+    dataset: str, workspace: Workspace, workers: int = DEFAULT_WORKERS, *, fetcher: Fetcher
 ) -> DownloadResult:
     """Download collection-level metadata files (stations, parameters, inventory)."""
-    coll = fetcher.collection(COLLECTIONS[collection_key])
+    coll = fetcher.collection(COLLECTIONS[dataset])
     return fetch_all(
         collection_assets(coll, suffixes=(".csv",)),
-        output_dir / collection_key,
+        workspace.bronze(dataset),
         fetcher=fetcher,
         workers=workers,
         write=csv_to_disk,
@@ -191,10 +227,10 @@ def download_metadata(
     )
 
 
-# --- GRIB2 / HDF5 downloads ---
+# --- Skip rules ---
 
 
-def _already_current(asset: Asset, filepath: Path) -> bool:
+def already_current(asset: Asset, filepath: Path) -> bool:
     """A :data:`~foehn.transfer.SkipRule`: is the local copy of *asset* up to date?
 
     Handles MeteoSwiss's in-place overwrites — e.g. CombiPrecip reanalysis
@@ -215,98 +251,9 @@ def _already_current(asset: Asset, filepath: Path) -> bool:
     return remote_dt <= local_dt
 
 
-def _exists(_asset: Asset, filepath: Path) -> bool:
+def exists(_asset: Asset, filepath: Path) -> bool:
     """A :data:`~foehn.transfer.SkipRule` for static assets: fetch each one once."""
     return filepath.exists()
-
-
-def download_grib2(
-    collection_key: str,
-    output_dir: Path,
-    since: str | None = None,
-    workers: int = DEFAULT_WORKERS,
-    *,
-    fetcher: Fetcher,
-) -> DownloadResult:
-    """Download GRIB2/HDF5 binary files (latest page only)."""
-    collection_id = COLLECTIONS[collection_key]
-
-    logger.info("%s", "=" * 60)
-    logger.info("GRIB2 Collection: %s", collection_id)
-    logger.info("Output dir: %s", output_dir / collection_key)
-    logger.info("%s", "=" * 60)
-
-    # Only the newest page — forecast/radar data is ephemeral and these
-    # collections hold thousands of items.
-    items = fetcher.items(collection_id, max_items=100)
-    logger.info("  Found %d items (latest page)", len(items))
-
-    if since:
-        items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
-        logger.info("  %d items updated since last run", len(items))
-        if not items:
-            logger.info("  Nothing changed — skipping")
-            return DownloadResult()
-
-    return fetch_all(
-        assets_of(items, suffixes=(".grib2", ".h5", ".hdf5")),
-        output_dir / collection_key,
-        fetcher=fetcher,
-        workers=workers,
-        write=stream_to_disk,
-        skip=_already_current,
-        label="binary file",
-    )
-
-
-# --- NetCDF / GeoTIFF / ZIP downloads ---
-
-
-def download_netcdf(
-    collection_key: str,
-    output_dir: Path,
-    since: str | None = None,
-    workers: int = DEFAULT_WORKERS,
-    *,
-    fetcher: Fetcher,
-) -> DownloadResult:
-    """Download NetCDF, GeoTIFF, and ZIP files for spatial/static collections.
-
-    Args:
-        collection_key: Key from COLLECTIONS.
-        output_dir: Root directory for bronze downloads.
-        since: ISO timestamp — only process items updated after this time.
-        workers: Number of concurrent HTTP downloads.
-    """
-    collection_id = COLLECTIONS[collection_key]
-
-    logger.info("%s", "=" * 60)
-    logger.info("NetCDF Collection: %s", collection_id)
-    logger.info("Output dir: %s", output_dir / collection_key)
-    logger.info("%s", "=" * 60)
-
-    items = fetcher.items(collection_id)
-    logger.info("  Found %d items", len(items))
-
-    if since:
-        items = [item for item in items if item.get("properties", {}).get("updated", "") > since]
-        logger.info("  %d items updated since last run", len(items))
-        if not items:
-            logger.info("  Nothing changed — skipping")
-            return DownloadResult()
-
-    # These are static: an existing file is never restated upstream, so a plain
-    # existence check is enough (unlike the ephemeral GRIB2/radar collections,
-    # which MeteoSwiss overwrites in place).
-    return fetch_all(
-        assets_of(items, suffixes=(".nc", ".tif", ".zip")),
-        output_dir / collection_key,
-        fetcher=fetcher,
-        workers=workers,
-        write=stream_to_disk,
-        skip=_exists,
-        label="file",
-    )
 
 
 # --- ZIP safety (zip-slip + decompression-bomb guards) ---
@@ -353,21 +300,27 @@ def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
 # --- C6 climate normals ZIP ---
 
 
-def download_climate_normals_zip(output_dir: Path, force: bool = False, *, fetcher: Fetcher) -> DownloadResult:
-    """Download C6 climate normals ZIP from opendata.swiss and extract."""
-    out_dir = output_dir / "climate_normals"
+def download_normals_zip(
+    dataset: str, workspace: Workspace, *, force: bool = False, fetcher: Fetcher, **_: object
+) -> DownloadResult:
+    """Download the C6 climate normals ZIP and extract it.
+
+    A :class:`~foehn.registry.DownloadAdapter` that never lists STAC: this is the
+    one dataset MeteoSwiss publishes as a fixed-URL ZIP rather than a collection,
+    which is why it used to be a special case in the CLI, in the to-parquet
+    command and in the Databricks ingest script instead of a row.
+    """
+    out_dir = workspace.bronze(dataset)
     out_dir.mkdir(parents=True, exist_ok=True)
     filepath = out_dir / "normwerte.zip"
 
     # Skip on the *extraction output*, not the ZIP: a run that died between
     # download and extract must not be mistaken for a completed one.
     if not force and any(out_dir.glob("*.txt")):
-        logger.info("  Climate normals already downloaded and extracted — skipping")
+        logger.info("  %s already downloaded and extracted — skipping", dataset)
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
-    logger.info("%s", "=" * 60)
-    logger.info("Climate normals (C6): downloading from opendata.swiss")
-    logger.info("%s", "=" * 60)
+    _banner("Climate normals (C6): fixed-URL ZIP", out_dir)
 
     fetcher.stream(CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
     logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)
@@ -381,38 +334,32 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False, *, fetch
 # --- Indoor climate scenarios ZIP (single .csv.zip of per-station CSVs) ---
 
 
-def download_climate_scenarios_indoor(
-    output_dir: Path,
-    collection_key: str = "climate_scenarios_indoor",
-    force: bool = False,
-    *,
-    fetcher: Fetcher,
+def download_indoor_zip(
+    dataset: str, workspace: Workspace, *, force: bool = False, fetcher: Fetcher, **_: object
 ) -> DownloadResult:
     """Download and extract the indoor climate scenarios ZIP.
 
-    The collection ships a single ``.csv.zip`` (per-station, per-scenario hourly
-    CSVs) rather than individual STAC CSV assets, so it needs its own download
-    path. The archive is fetched from the STAC API and its members extracted to
-    ``output_dir/<collection_key>/``.
+    A :class:`~foehn.registry.DownloadAdapter` that does not go through
+    :func:`stac_download`: the collection ships a single ``.csv.zip`` rather than
+    individual CSV assets, and its skip rule is "has anything been extracted",
+    which is a property of the output directory rather than of one asset.
     """
-    collection_id = COLLECTIONS[collection_key]
-    out_dir = output_dir / collection_key
+    collection_id = COLLECTIONS[dataset]
+    out_dir = workspace.bronze(dataset)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not force and any(out_dir.glob("*.csv")):
-        logger.info("  %s already extracted — skipping", collection_key)
+        logger.info("  %s already extracted — skipping", dataset)
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     items = fetcher.items(collection_id)
     archives = assets_of(items, suffixes=(".zip",))
     archive = archives[0] if archives else None
     if archive is None:
-        logger.warning("  No .zip asset found for %s", collection_key)
+        logger.warning("  No .zip asset found for %s", dataset)
         return DownloadResult()
 
-    logger.info("%s", "=" * 60)
-    logger.info("Indoor scenarios (%s): downloading ZIP", collection_id)
-    logger.info("%s", "=" * 60)
+    _banner(f"Indoor scenarios: {collection_id}", out_dir)
 
     zip_path = out_dir / archive.name
     fetcher.stream(archive.href, zip_path, timeout=300)

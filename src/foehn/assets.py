@@ -8,9 +8,9 @@ wants, happens here — in one place rather than in each caller.
 Before this module, every download and load path walked ``item["assets"]``
 itself, stripped the query string itself, and re-derived the slice and run from
 the filename itself. The forecast-run rule in particular — collect the runs,
-take ``max()``, keep only that one — was written out twice, in
-``client.download_collection`` and in ``api.load``, and had to stay in step for
-the two to agree on which forecast you get.
+take ``max()``, keep only that one — was written out twice, once in the CSV
+download path and once in the load path, and had to stay in step for the two to
+agree on which forecast you get.
 """
 
 from __future__ import annotations

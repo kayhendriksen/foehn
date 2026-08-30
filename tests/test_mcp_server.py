@@ -252,11 +252,11 @@ class TestLoadData:
             load_data("nonexistent")
 
     def test_grib2_dataset_raises(self):
-        with pytest.raises(ValueError, match="binary/grid"):
+        with pytest.raises(ValueError, match="gridded"):
             load_data("forecast_icon_ch1")
 
     def test_netcdf_dataset_raises(self):
-        with pytest.raises(ValueError, match="binary/grid"):
+        with pytest.raises(ValueError, match="gridded"):
             load_data("surface_derived_grid")
 
     def test_invalid_frequency_raises(self):
@@ -504,7 +504,7 @@ class TestDescribeData:
             describe_data("nonexistent")
 
     def test_grib2_dataset_raises(self):
-        with pytest.raises(ValueError, match="binary/grid"):
+        with pytest.raises(ValueError, match="gridded"):
             describe_data("forecast_icon_ch1")
 
     def test_invalid_frequency_raises(self):
@@ -740,15 +740,30 @@ class TestUsageGuide:
         for ds in _INSPECTABLE_GRIDS:
             assert f"`{ds}`" in result
 
-    def test_contains_frequency_docs(self):
-        result = usage_guide()
-        for freq in ("10-minute", "hourly", "daily", "monthly", "yearly"):
-            assert freq in result
+    def test_frequency_docs_come_from_the_vocabulary_load_enforces(self):
+        """A token added to GRANULARITIES has to reach the guide, not be retyped into it."""
+        from foehn.collections import GRANULARITY_LABELS
 
-    def test_contains_time_slice_docs(self):
         result = usage_guide()
-        for ts in ("now", "recent", "historical"):
-            assert f"`{ts}`" in result
+        for token, label in GRANULARITY_LABELS.items():
+            assert f"- `{token}` — {label}" in result
+
+    def test_time_slice_docs_come_from_the_vocabulary_load_enforces(self):
+        from foehn.collections import TIME_SLICE_LABELS
+
+        result = usage_guide()
+        for token, label in TIME_SLICE_LABELS.items():
+            assert f"- `{token}` — {label}" in result
+
+    def test_does_not_promise_a_sort_default_that_does_not_exist(self):
+        """load() with sort=None does not sort at all; the guide used to say "asc".
+
+        Worth a test rather than just a fix: this seam's whole risk is prose that
+        describes another module's contract, and an LLM acts on it.
+        """
+        result = usage_guide()
+        assert "oldest first, default" not in result
+        assert "unsorted" in result
 
     def test_contains_attribution(self):
         result = usage_guide()

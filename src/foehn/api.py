@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -21,8 +23,12 @@ from foehn.convert import (
     decode_meteoswiss_csv,
 )
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
-from foehn.grids import open_dataset, to_zarr
-from foehn.readers import Filters, apply_time_filters
+from foehn.grids import sanitize_noncf_time_units, write_zarr
+from foehn.readers import Filters
+from foehn.workspace import Workspace
+
+if TYPE_CHECKING:
+    import xarray as xr
 
 __all__ = [
     "download",
@@ -81,9 +87,8 @@ def download(
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    bronze_dir = data_dir / "bronze"
-    bronze_dir.mkdir(parents=True, exist_ok=True)
+    workspace = Workspace.resolve(data_dir)
+    workspace.bronze().mkdir(parents=True, exist_ok=True)
     fetcher = default_fetcher()
 
     # Each kind knows its own download path, including the grid kinds, which have
@@ -91,7 +96,7 @@ def download(
     # the CLI's --grids behaviour (and open_dataset/to_zarr).
     return registry.download(
         dataset,
-        bronze_dir,
+        workspace,
         time_slice=time_slice,
         since=since,
         workers=workers,
@@ -119,10 +124,7 @@ def to_parquet(
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    bronze_dir = data_dir / "bronze"
-    parquet_dir = data_dir / "parquet"
-    failures = registry.convert(dataset, bronze_dir, parquet_dir)
+    failures = registry.convert(dataset, Workspace.resolve(data_dir))
     if failures:
         raise RuntimeError(
             f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
@@ -217,49 +219,6 @@ def inventory(dataset: str) -> pl.DataFrame:
     )
 
 
-def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
-    """Raise ValueError naming any of *names* the loaded frame doesn't have.
-
-    Silently ignoring an unknown column turns a mistyped MeteoSwiss shortcode
-    (``tre200dO`` for ``tre200d0``) into a plausible-looking wrong answer: the
-    ``columns`` filter returns only the always-kept key columns, and
-    ``drop_null`` keeps every null row it was asked to remove. Both are worth an
-    error, especially on the MCP surface where the caller is an LLM guessing
-    parameter names.
-    """
-    missing = [n for n in names if n not in df.columns]
-    if not missing:
-        return
-    available = ", ".join(sorted(df.columns))
-    raise ValueError(f"Unknown column(s) {missing} in {label}=. This dataset has: {available}")
-
-
-def _apply_post_filters(df: pl.DataFrame, dataset: str, filters: Filters) -> pl.DataFrame:
-    """Apply the row/column filters that are the same for every kind.
-
-    Which columns an explicit ``columns=`` selection always keeps is a property of
-    the dataset's kind, so it is read from the registry rather than passed in —
-    callers were previously stating their own schema across this seam, and only
-    one of the three got it right for its kind. Running this once here, after
-    whichever reader produced the frame, is what keeps the readers free of it.
-    """
-    spec = registry.spec(dataset)
-    df = apply_time_filters(df, filters)
-    if filters.drop_null:
-        _require_columns(df, [filters.drop_null], "drop_null")
-        df = df.filter(pl.col(filters.drop_null).is_not_null())
-    if filters.sort in ("asc", "desc"):
-        df = df.sort(spec.sort_column, descending=(filters.sort == "desc"))
-    if filters.columns:
-        _require_columns(df, list(filters.columns), "columns")
-        keep = [c for c in spec.key_columns if c in df.columns]
-        keep += [c for c in filters.columns if c not in keep]
-        df = df.select(keep)
-    if filters.limit is not None:
-        df = df.head(filters.limit)
-    return df
-
-
 def load(
     dataset: str,
     *,
@@ -338,7 +297,7 @@ def load(
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     spec = registry.spec(dataset)
     if not spec.tabular:
-        raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
+        raise ValueError(registry.unreadable_message(dataset))
     if frequency is not None and not spec.supports_granularity:
         raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
     if sort is not None and sort not in ("asc", "desc"):
@@ -372,5 +331,194 @@ def load(
             "year/month/date_from/date_to filters are not supported."
         )
 
-    df = registry.load(dataset, filters, fetcher=default_fetcher())
-    return _apply_post_filters(df, dataset, filters)
+    return registry.load(dataset, filters, fetcher=default_fetcher())
+
+
+# --- Gridded datasets --------------------------------------------------------
+
+
+def _store_slug(match: str) -> str:
+    """Filesystem-safe fragment derived from a ``match`` filter for store names."""
+    return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
+
+
+def _resolve_store(dataset: str, match: str | None, workspace: Workspace, store) -> Path:
+    """Resolve the .zarr output path: explicit ``store`` wins, else the workspace's."""
+    if store is not None:
+        return Path(store)
+    return workspace.zarr(dataset if match is None else f"{dataset}__{_store_slug(match)}")
+
+
+def open_dataset(
+    dataset: str,
+    *,
+    variables: str | list[str] | None = None,
+    match: str | None = None,
+    data_dir: Path | str | None = None,
+) -> xr.Dataset:
+    """Open a gridded dataset as an xarray Dataset.
+
+    The grid analog of ``foehn.load()``, for NetCDF collections (climate grids,
+    normals, scenarios), GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM
+    radar composites (CombiPrecip, hail). This is *download-then-lazy*: the source
+    file(s) are fetched in full to ``data_dir/bronze/<dataset>/`` on first use,
+    then opened and read from that local copy. It is not cloud-lazy — there is no
+    byte-range/partial read of the remote file, so the first call pays the full
+    file size up front. Subsequent calls reuse the cache.
+
+    GRIB2 and radar (HDF5) collections **require** ``match``, and it must resolve
+    to a *single* file:
+
+    * GRIB2 forecast collections hold thousands of files (one per variable ×
+      ensemble member × lead time × reference time), and ICON's native
+      unstructured (icosahedral) grid — a 1-D ``values`` dimension with no
+      dimension coordinate — can't be stacked by ``combine_by_coords``. Include
+      the reference + lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``. The
+      one field comes back on the ``values`` grid with cell ``lat``/``lon``
+      coordinates joined from the collection's horizontal-constants file.
+    * Radar collections hold one Cartesian composite per timestep (every ~5 min).
+      Match a single file, e.g. ``match="cpc2613000000"``. The composite is read
+      with ODIM gain/offset scaling, ``nodata`` masked to NaN, on Swiss LV95
+      ``x``/``y`` coordinates (matching the NetCDF grids).
+
+    ``open_dataset`` reads one field; to assemble many matched files into a cube
+    use ``to_zarr(..., stack=True)`` instead.
+
+    Args:
+        dataset: Dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",
+            "radar_precip"). Use list_datasets() to see options. Must be a NetCDF,
+            GRIB2, or HDF5/radar collection.
+        variables: Restrict to these data variable(s). If None, all are kept.
+        match: Keep only source files whose name contains this substring. Narrows
+            a heterogeneous multi-file collection to one coherent set — analogous
+            to the station/frequency filters on load(). Required for GRIB2 and
+            radar collections, where it must select a single file.
+        data_dir: Root data directory. Defaults to ./data/meteoswiss.
+
+    Returns:
+        An xarray Dataset backed by the local file(s), downloaded in full first
+        (see the download-then-lazy note above) — e.g. the first
+        ``climate_scenarios_grid`` call fetches ~900 MB before you read a pixel.
+
+    Raises:
+        ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
+            collection opened without a single-file ``match``, or if its files
+            cannot be combined into a single Dataset (narrow it with ``match``).
+        ImportError: If the optional 'grids' dependencies are not installed.
+            Raised before anything is downloaded.
+
+    Example::
+
+        import foehn
+
+        # NetCDF: a coherent single-parameter slice of a multi-file collection
+        ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")
+        ds = foehn.open_dataset("climate_scenarios_grid", match="_pr_", variables="pr")
+
+        # GRIB2: a single forecast field — variable + member + reference + lead time
+        ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+
+        # Radar: a single CombiPrecip composite (one 5-min timestep)
+        ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
+    """
+    if dataset not in COLLECTIONS:
+        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
+
+    return registry.open_grid(
+        dataset,
+        match=match,
+        variables=variables,
+        workspace=Workspace.resolve(data_dir),
+        fetcher=default_fetcher(),
+    )
+
+
+def to_zarr(
+    dataset: str,
+    *,
+    variables: str | list[str] | None = None,
+    match: str | None = None,
+    data_dir: Path | str | None = None,
+    store: Path | str | None = None,
+    rechunk: dict[str, int] | None = None,
+    mode: str = "w",
+    stack: bool = False,
+) -> Path:
+    """Materialise a gridded dataset to a Zarr store on disk.
+
+    The grid analog of ``foehn.to_parquet()``: reads the source (NetCDF, GRIB2,
+    or HDF5/radar) via ``open_dataset()`` and writes a single Zarr store under
+    ``data_dir/zarr/``. (GRIB2 and radar collections require ``match`` — see
+    ``open_dataset``.)
+
+    The default store name encodes ``match`` so that different filtered slices of
+    the same collection don't silently overwrite each other:
+    ``<dataset>.zarr`` when unfiltered, ``<dataset>__<match>.zarr`` otherwise
+    (e.g. ``surface_derived_grid__rhiresd.zarr``). Pass ``store`` for an explicit
+    path that overrides this.
+
+    Args:
+        dataset: Dataset name. Must be a NetCDF, GRIB2, or HDF5/radar collection.
+        variables: Restrict to these data variable(s) before writing.
+        match: Narrow a multi-file collection to a coherent set (see open_dataset);
+            required for GRIB2 and radar collections, and for ``stack``.
+        data_dir: Root data directory. Defaults to ./data/meteoswiss.
+        store: Explicit output path for the ``.zarr`` store. Overrides the
+            derived ``data_dir/zarr/<name>.zarr`` location when given.
+        rechunk: Optional dim→chunk-size mapping applied before writing, e.g.
+            ``{"time": 24}``. Requires ``dask`` (not part of the 'grids' extra —
+            install separately with ``pip install dask``); raises ImportError
+            if it is missing. Not supported together with ``stack``.
+        mode: Zarr write mode (default "w" — overwrite the store at this path).
+            Note distinct ``match`` values map to distinct default paths, so this
+            only overwrites a prior run of the *same* slice, not a different one.
+        stack: Assemble the matched files into one cube, using whichever method
+            the dataset's kind uses — radar stacks CombiPrecip timesteps into a
+            ``(time, y, x)`` cube incrementally (dask-free, one timestep in
+            memory); GRIB2 promotes whichever of number/time/step vary into an
+            N-D cube (e.g. ``(time, step, values)``) via ``combine_by_coords``
+            (whole set in memory, capped at 1000 files). NetCDF has no cube
+            builder — a multi-file ``match`` already combines on read — so
+            ``stack`` is a no-op there. Incompatible with ``rechunk``.
+
+    Returns:
+        Path to the written ``.zarr`` store.
+    """
+    if dataset not in COLLECTIONS:
+        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
+    if stack and rechunk:
+        raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
+
+    workspace = Workspace.resolve(data_dir)
+    store_path = _resolve_store(dataset, match, workspace, store)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Whether this kind has a cube builder is a fact on its row. NetCDF has none
+    # and needs none, so it falls through to the single-write path below.
+    grid = registry.spec(dataset).grid
+    if stack and grid is not None and grid.cube is not None:
+        registry.write_cube(
+            dataset,
+            store_path,
+            match=match,
+            variables=variables,
+            mode=mode,
+            workspace=workspace,
+            fetcher=default_fetcher(),
+        )
+        return store_path
+
+    ds = sanitize_noncf_time_units(open_dataset(dataset, variables=variables, match=match, data_dir=workspace.root))
+
+    if rechunk:
+        import importlib.util
+
+        if importlib.util.find_spec("dask") is None:
+            raise ImportError(
+                "to_zarr(rechunk=...) requires dask, which is not part of the "
+                "'grids' extra. Install it with:\n\n  pip install dask\n"
+            )
+        ds = ds.chunk(rechunk)
+
+    write_zarr(ds, store_path, mode)
+    return store_path

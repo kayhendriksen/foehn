@@ -9,10 +9,12 @@ to drop: these readers depend on ``assets``, ``client``, ``convert`` and
 ``download`` and ``convert`` ones. All three pipeline stages now route the
 same way.
 
-Each reader returns the concatenated frame for its kind. The filters that apply
-uniformly — ``drop_null``, ``columns``, ``sort``, ``limit`` and the calendar
-predicates — are applied once by ``api.load`` afterwards, so a reader never has
-to know a dataset's key columns or what ``sort`` orders by.
+Each :class:`Reader` fetches, parses and then finishes its frame: the filters
+that apply uniformly — ``drop_null``, ``columns``, ``sort``, ``limit`` and the
+calendar predicates — run in :meth:`Reader.finish`. They used to run in
+``api.load`` instead, which meant ``registry.load`` handed back a half-filtered
+frame and the two schema facts that pass needs, ``key_columns`` and
+``sort_column``, sat on ``KindSpec`` where only ``api`` ever read them.
 """
 
 from __future__ import annotations
@@ -135,10 +137,74 @@ def _as_tuple(value):
     return tuple(value) or None
 
 
-class Reader(Protocol):
-    """How one :class:`~foehn.collections.DatasetKind` becomes a DataFrame."""
+class ReadAdapter(Protocol):
+    """How one :class:`~foehn.collections.DatasetKind` fetches and parses its frame."""
 
     def __call__(self, dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame: ...
+
+
+def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
+    """Raise ValueError naming any of *names* the loaded frame doesn't have.
+
+    Silently ignoring an unknown column turns a mistyped MeteoSwiss shortcode
+    (``tre200dO`` for ``tre200d0``) into a plausible-looking wrong answer: the
+    ``columns`` filter returns only the always-kept key columns, and
+    ``drop_null`` keeps every null row it was asked to remove. Both are worth an
+    error, especially on the MCP surface where the caller is an LLM guessing
+    parameter names.
+    """
+    missing = [n for n in names if n not in df.columns]
+    if not missing:
+        return
+    available = ", ".join(sorted(df.columns))
+    raise ValueError(f"Unknown column(s) {missing} in {label}=. This dataset has: {available}")
+
+
+@dataclass(frozen=True)
+class Reader:
+    """How one tabular :class:`~foehn.collections.DatasetKind` becomes a DataFrame.
+
+    Constructed in :data:`~foehn.registry.KINDS`, exactly as
+    :class:`~foehn.grids.GridReader` is. ``key_columns`` and ``sort_column`` used
+    to sit on :class:`~foehn.registry.KindSpec` instead — they are facts about
+    the frame a reader produces, and they lived a layer above the reader only
+    because the post-filter did. Both are here now, so the reader finishes its
+    own frame and ``registry.load`` hands back a complete one.
+    """
+
+    read: ReadAdapter
+    """Fetches and parses. The only part that differs between kinds."""
+
+    key_columns: tuple[str, ...] = ("station_abbr", "reference_timestamp")
+    """Columns an explicit ``columns=`` selection always keeps."""
+
+    sort_column: str = "reference_timestamp"
+    """What ``sort=`` orders by. The nominal-date kind has no real timestamp."""
+
+    def finish(self, df: pl.DataFrame, filters: Filters) -> pl.DataFrame:
+        """Apply the row/column filters that are the same for every kind.
+
+        Uniform, which is why it is one method rather than part of each
+        ``read``: ``read_standard`` applies the time filters per CSV to bound
+        peak memory, and everything else happens once, here, on the concatenated
+        frame. ``drop_null`` deliberately runs only here — a frame missing that
+        column keeps every row, while after a diagonal concat the column exists
+        as null across those rows and they are dropped.
+        """
+        df = apply_time_filters(df, filters)
+        if filters.drop_null:
+            _require_columns(df, [filters.drop_null], "drop_null")
+            df = df.filter(pl.col(filters.drop_null).is_not_null())
+        if filters.sort in ("asc", "desc"):
+            df = df.sort(self.sort_column, descending=(filters.sort == "desc"))
+        if filters.columns:
+            _require_columns(df, list(filters.columns), "columns")
+            keep = [c for c in self.key_columns if c in df.columns]
+            keep += [c for c in filters.columns if c not in keep]
+            df = df.select(keep)
+        if filters.limit is not None:
+            df = df.head(filters.limit)
+        return df
 
 
 # --- Shared row predicates ---
@@ -341,6 +407,7 @@ def read_archive(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Data
 
 __all__ = [
     "Filters",
+    "ReadAdapter",
     "Reader",
     "apply_time_filters",
     "read_archive",

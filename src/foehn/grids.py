@@ -1,13 +1,22 @@
-"""Open MeteoSwiss gridded collections as xarray Datasets.
+"""How one gridded :class:`~foehn.collections.DatasetKind` becomes an xarray Dataset.
 
-This is the gridded counterpart to the tabular ``foehn.load()`` path: where
-``load()`` returns a Polars DataFrame for CSV station data, ``open_dataset()``
-returns an xarray Dataset for the N-dimensional grid collections.
+The grid counterpart to :mod:`foehn.readers`, and placed the same way: below
+:mod:`foehn.registry`, so :class:`~foehn.registry.KindSpec` can carry a
+:class:`GridReader` beside its ``download``, ``convert`` and ``load`` adapters.
+The public ``open_dataset`` and ``to_zarr`` live in :mod:`foehn.api`, exactly as
+``load`` does.
+
+This module used to sit *above* the registry and keep a second table of its own,
+keyed by the same ``DatasetKind`` — and test that enum by hand eight more times
+on top of it: which optional import to require, which reader opens a file,
+whether the STAC ``datetime`` is a model run, whether to attach ICON
+coordinates, which cube builder ``stack=`` meant, and twice more inside the cube
+builders re-checking the kind they had just been routed to. All of it is a row
+now, and the routing is the registry's, as it already was for the other three
+pipeline stages.
 
 Supported formats
 -----------------
-Routing keys off each collection's ``format`` (see ``_GRID_READERS``):
-
 * NetCDF (climate grids, normals, scenarios) — xarray auto-detects the engine.
 * GRIB2 (ICON-CH1/CH2 forecasts, KENDA analysis) — cfgrib engine.
 * HDF5/ODIM radar composites (CombiPrecip, hail) — bespoke ODIM reader. These are
@@ -16,18 +25,18 @@ Routing keys off each collection's ``format`` (see ``_GRID_READERS``):
 
 All formats install via the single optional 'grids' extra (``pip install
 "foehn[grids]"``). GRIB2 and radar collections hold thousands of single-field
-files, so ``open_dataset`` requires a ``match`` that resolves to one file (the
+files, so opening one requires a ``match`` that resolves to a single file (the
 cap is enforced before downloading). ICON GRIB2 comes back on a 1-D ``values``
 dimension; cell ``lat``/``lon`` are joined from the collection's horizontal-
 constants file (best-effort), so the unstructured grid is geo-referenced.
 
-``open_dataset()`` reads a single file; ``to_zarr(..., stack="auto")`` assembles
-the matched set into one cube using the best method per format — radar stacks
+Opening reads a single file; a kind's :attr:`GridReader.cube` assembles the
+matched set into one store using the best method for that kind — radar stacks
 timesteps into ``(time, y, x)`` incrementally, GRIB2 promotes its varying
-forecast axes into an N-D cube via combine_by_coords. ``open_dataset()`` and
-``to_zarr()`` download to the local bronze cache and read from disk (the tabular
-``to_parquet()`` analog). A cloud-lazy GRIB2 path (kerchunk/VirtualiZarr, to
-avoid loading the whole set into memory) is future work.
+forecast axes into an N-D cube via combine_by_coords. Both paths download to the
+local bronze cache and read from disk (the tabular ``to_parquet()`` analog). A
+cloud-lazy GRIB2 path (kerchunk/VirtualiZarr, to avoid loading the whole set
+into memory) is future work.
 """
 
 from __future__ import annotations
@@ -36,20 +45,25 @@ import contextlib
 import logging
 import re
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Protocol
 
 from foehn.assets import Asset, assets_of, collection_assets, other_extensions
-from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, is_grid, kind
-from foehn.fetch import Fetcher, FetchError, default_fetcher
+from foehn.collections import COLLECTION_META, COLLECTIONS
+from foehn.fetch import Fetcher, FetchError
 from foehn.transfer import fetch_all
+from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import xarray as xr
+
+
+# --- Optional dependencies -------------------------------------------------
 
 
 def _require_xarray():
@@ -65,8 +79,14 @@ def _require_xarray():
     return xr
 
 
-def _require_cfgrib():
-    """Import cfgrib, or raise a helpful error pointing at the 'grids' extra."""
+def require_netcdf() -> None:
+    """A :data:`Require`: NetCDF needs only xarray."""
+    _require_xarray()
+
+
+def require_grib2() -> None:
+    """A :data:`Require`: GRIB2 needs xarray plus cfgrib + eccodes."""
+    _require_xarray()
     try:
         import cfgrib  # noqa: F401
     except ImportError as exc:
@@ -77,8 +97,9 @@ def _require_cfgrib():
         ) from exc
 
 
-def _require_radar_deps():
-    """Import h5py + pyproj, or raise a helpful error pointing at the 'grids' extra."""
+def require_radar() -> None:
+    """A :data:`Require`: ODIM composites need xarray plus h5py + pyproj."""
+    _require_xarray()
     try:
         import h5py  # noqa: F401
         import pyproj  # noqa: F401
@@ -90,63 +111,123 @@ def _require_radar_deps():
         ) from exc
 
 
+# --- The adapter -----------------------------------------------------------
+
+
+Require = Callable[[], None]
+"""Raise ImportError if this kind's optional dependencies are missing.
+
+A separate field rather than the first line of :data:`OpenAdapter` on purpose:
+the registry calls it *before* fetching anything, so a missing cfgrib fails in
+milliseconds instead of after a 900 MB download.
+"""
+
+
+class OpenAdapter(Protocol):
+    """How one grid kind opens a matched set of local files.
+
+    Every adapter takes the same arguments and ignores what its kind does not
+    use — the same convention as :class:`~foehn.registry.DownloadAdapter`, and
+    for the same reason: the alternative is a per-kind call shape, which is the
+    ladder this replaces.
+    """
+
+    def __call__(
+        self,
+        files: list[Path],
+        *,
+        dataset: str,
+        workspace: Workspace,
+        fetcher: Fetcher,
+    ) -> xr.Dataset: ...
+
+
+class CubeAdapter(Protocol):
+    """How one grid kind assembles a matched set into a single Zarr store.
+
+    Writes rather than returns, which is not symmetry for its own sake: the
+    radar cube appends one timestep at a time so peak memory stays at a single
+    file however many timesteps the match spans. An adapter that returned a
+    Dataset would have to materialise the lot first.
+    """
+
+    def __call__(
+        self,
+        files: list[Path],
+        store: Path,
+        *,
+        dataset: str,
+        workspace: Workspace,
+        fetcher: Fetcher,
+        variables: str | list[str] | None,
+        mode: str,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class GridReader:
-    """How one gridded :class:`DatasetKind` is read.
+    """How one grid kind is read. Constructed in :data:`~foehn.registry.KINDS`.
 
-    Typed rather than a bare dict, for the same reason :class:`registry.KindSpec`
-    is: callers used to index this table with string literals, and the radar row
-    carried a ``reader`` key the others lacked — so every read of it needed a
-    ``.get`` and a typo was a runtime KeyError.
+    The per-kind functions live here beside the implementation they call; the
+    configuration is stated in the registry row, exactly as ``key_columns`` and
+    ``sort_column`` are for the tabular readers.
     """
 
     suffixes: tuple[str, ...]
     """Asset extensions this kind reads. Other payloads (GeoTIFF/ZIP copies) are ignored."""
 
-    reader: Literal["xarray", "odim"] = "xarray"
-    """``"odim"`` selects the bespoke ODIM-composite reader instead of an xarray engine."""
+    require: Require
+    """Checked before anything is fetched."""
 
-    engine: str | None = None
-    """xarray backend. None lets xarray auto-detect NetCDF-3 vs NetCDF-4/HDF5."""
+    open: OpenAdapter
+    """Opens the matched files as one Dataset."""
 
-    backend_kwargs: dict | None = None
-    """Extra backend options — GRIB2 disables cfgrib's .idx sidecar files."""
+    cube: CubeAdapter | None = None
+    """Assembles the matched set into one store, or None for a kind that needs no
+    cube builder — NetCDF combines a multi-file ``match`` on read already."""
 
     max_files: int | None = None
-    """How many matched files one ``open_dataset`` may combine.
+    """How many matched files one open may combine.
 
     None for NetCDF, which combines cleanly via combine_by_coords. GRIB2 and HDF5
     are capped at 1: ICON forecasts are on an unstructured grid combine_by_coords
     can't stack, and radar is one Cartesian composite per timestep (thousands per
-    collection). ``to_zarr(stack=...)`` lifts the cap to build cubes. The cap is
-    checked against the *remote* listing before downloading, so an over-broad
-    match is rejected even when one matching file already happens to be cached.
+    collection). The cap is checked against the *remote* listing before
+    downloading, so an over-broad match is rejected even when one matching file
+    already happens to be cached.
+    """
+
+    cube_max_files: int | None = None
+    """The same cap for the cube path, which is a different number per kind.
+
+    GRIB2 holds the whole set in memory at once, so it is capped; radar appends
+    incrementally and deliberately wants every timestep the match spans.
     """
 
     match_example: str | None = None
     """Seeds the "narrow your match" guidance for the capped kinds."""
 
+    cube_match_example: str | None = None
+    """The same seed for the cube path, where a useful match is a wider one.
 
-_GRID_READERS: dict[DatasetKind, GridReader] = {
-    DatasetKind.NETCDF_GRID: GridReader(suffixes=(".nc",)),
-    DatasetKind.GRIB2_GRID: GridReader(
-        suffixes=(".grib2", ".grib"),
-        engine="cfgrib",
-        backend_kwargs={"indexpath": ""},
-        max_files=1,
-        match_example="202605231500-0-t_2m-ctrl",
-    ),
-    DatasetKind.RADAR_GRID: GridReader(
-        suffixes=(".h5",),
-        reader="odim",
-        max_files=1,
-        match_example="cpc2613000000",
-    ),
-}
+    A single radar file is ``cpc2613000000``; a radar cube wants the day prefix
+    ``cpc26130``. Different advice, so a different field.
+    """
+
+    run_datetime: bool = False
+    """Whether a STAC item's ``datetime`` is the model run embedded in the filename.
+
+    True for GRIB2 only. The CSV and radar collections set ``datetime`` to a
+    catalog-refresh timestamp unrelated to the data, where filtering on a real
+    data date matches nothing.
+    """
+
+
+# --- Listing and fetching --------------------------------------------------
 
 
 # Grid collections are listed on *every* open, including repeat opens of an
-# already-cached file: _ensure_grid_files deliberately verifies the match against
+# already-cached file: ensure_grid_files deliberately verifies the match against
 # the collection rather than the local cache. That is why this path lists with
 # cache=True while the download paths do not — noticing what changed upstream is
 # their job. How long a cached listing stays valid is derived from what the walk
@@ -160,20 +241,19 @@ _GRID_READERS: dict[DatasetKind, GridReader] = {
 _RUN_STAMP_RE = re.compile(r"(?<!\d)(\d{12})(?!\d)")
 
 
-def _run_datetime_filter(collection_key: str, match: str | None) -> str | None:
-    """Map a GRIB2 ``match`` onto a STAC ``datetime`` query, when it names one run.
+def _run_datetime_filter(match: str | None) -> str | None:
+    """Map a ``match`` onto a STAC ``datetime`` query, when it names one run.
 
     The forecast collections are one STAC item *per file* — forecast_icon_ch1 is
     ~57,000 items over ~571 pages, about 170s to walk in full, and that walk runs
     on every open. Their item ``datetime`` is the model run time, so a match that
     names a run narrows the listing server-side to that run's ~200 items (~0.5s).
 
-    GRIB2 only, deliberately: the CSV and radar collections set ``datetime`` to a
-    catalog-refresh timestamp unrelated to the data, where filtering on a real
-    data date matches nothing. Those listings are small anyway (radar_precip is
+    Only reached for a kind whose :attr:`GridReader.run_datetime` says its
+    ``datetime`` means that. The other listings are small anyway (radar_precip is
     16 items), so they lose nothing by walking in full.
     """
-    if match is None or KIND_OF.get(collection_key) is not DatasetKind.GRIB2_GRID:
+    if match is None:
         return None
     found = _RUN_STAMP_RE.search(match)
     if not found:
@@ -185,7 +265,7 @@ def _run_datetime_filter(collection_key: str, match: str | None) -> str | None:
     return run.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _raise_if_too_many(collection_key: str, match: str | None, names: list[str], max_files: int | None) -> None:
+def _raise_if_too_many(dataset: str, match: str | None, names: list[str], max_files: int | None) -> None:
     """Refuse a match that resolves to more files than the caller can handle at once."""
     if max_files is None or len(names) <= max_files:
         return
@@ -199,8 +279,7 @@ def _raise_if_too_many(collection_key: str, match: str | None, names: list[str],
             "at once). Narrow match= to a smaller set"
         )
     raise ValueError(
-        f"match={match!r} matched {len(names)} files for {collection_key!r}, {detail}. "
-        f"Matches include:\n{examples}{more}"
+        f"match={match!r} matched {len(names)} files for {dataset!r}, {detail}. Matches include:\n{examples}{more}"
     )
 
 
@@ -220,13 +299,14 @@ def _grid_assets(items: list[dict], suffixes: tuple[str, ...], match: str | None
     return matched, other_exts
 
 
-def _ensure_grid_files(
-    collection_key: str,
-    bronze_dir: Path,
+def ensure_grid_files(
+    dataset: str,
+    workspace: Workspace,
+    *,
     suffixes: tuple[str, ...] = (".nc",),
     match: str | None = None,
     max_files: int | None = None,
-    *,
+    run_datetime: bool = False,
     fetcher: Fetcher,
 ) -> list[Path]:
     """Return local grid files for a collection, downloading them if absent.
@@ -245,12 +325,12 @@ def _ensure_grid_files(
     unreachable, it falls back to the cache (with a warning), still enforcing the
     per-format file cap on whatever is cached.
     """
-    out_dir = bronze_dir / collection_key
+    out_dir = workspace.bronze(dataset)
     local = sorted(f for s in suffixes for f in out_dir.glob(f"*{s}"))
 
     sfx = "/".join(suffixes)
-    collection_id = COLLECTIONS[collection_key]
-    datetime_filter = _run_datetime_filter(collection_key, match)
+    collection_id = COLLECTIONS[dataset]
+    datetime_filter = _run_datetime_filter(match) if run_datetime else None
     try:
         items = fetcher.items(collection_id, cache=True, datetime_filter=datetime_filter)
     except FetchError as exc:
@@ -258,9 +338,9 @@ def _ensure_grid_files(
         if cached:
             # Offline: can't check the collection, but still enforce the cap on
             # what's cached so an over-broad match can't slip through silently.
-            _raise_if_too_many(collection_key, match, [f.name for f in cached], max_files)
+            _raise_if_too_many(dataset, match, [f.name for f in cached], max_files)
             warnings.warn(
-                f"Could not reach the STAC API to verify the {collection_key!r} cache "
+                f"Could not reach the STAC API to verify the {dataset!r} cache "
                 f"({type(exc).__name__}); using {len(cached)} locally cached file(s) without "
                 "checking the collection for a complete/unique match.",
                 stacklevel=2,
@@ -280,13 +360,13 @@ def _ensure_grid_files(
 
     if not matched:
         if match is not None:
-            raise ValueError(f"No {sfx} assets matching {match!r} found for {collection_key!r}.")
+            raise ValueError(f"No {sfx} assets matching {match!r} found for {dataset!r}.")
         found = ", ".join(sorted(other_exts)) or "none"
-        raise ValueError(f"No {sfx} assets found for {collection_key!r} (available asset types: {found}).")
+        raise ValueError(f"No {sfx} assets found for {dataset!r} (available asset types: {found}).")
 
     # Enforce the per-format file cap before downloading so an over-broad match
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
-    _raise_if_too_many(collection_key, match, [a.name for a in matched], max_files)
+    _raise_if_too_many(dataset, match, [a.name for a in matched], max_files)
 
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
     # grid read cannot proceed on a partial set, so the first failure is fatal.
@@ -302,6 +382,9 @@ def _ensure_grid_files(
     return sorted({out_dir / asset.name for asset in matched})
 
 
+# --- Writing ---------------------------------------------------------------
+
+
 # CF-compliant temporal base units that xarray/cftime can decode. Anything else
 # in a "<unit> since <ref>" string (notably "years"/"months", used by MeteoSwiss
 # climate normals) breaks CF decoding.
@@ -310,7 +393,7 @@ _CF_TIME_UNITS = frozenset(
 )
 
 
-def _sanitize_noncf_time_units(ds):
+def sanitize_noncf_time_units(ds):
     """Rename non-CF temporal unit attrs so the dataset can be re-decoded later.
 
     A store written with a ``years since ...`` units attribute throws on every
@@ -328,6 +411,38 @@ def _sanitize_noncf_time_units(ds):
                 var.encoding.pop("units", None)
                 var.encoding.pop("calendar", None)
     return ds
+
+
+def write_zarr(ds, store: Path, mode: str, append_dim: str | None = None) -> None:
+    """Write a Dataset to a Zarr store, suppressing only zarr's consolidated-metadata notice."""
+    with warnings.catch_warnings():
+        # xarray writes consolidated metadata by default. zarr-python 3 warns that
+        # this is outside the Zarr v3 spec, but we keep it on purpose: it's purely
+        # additive (every per-array zarr.json is still written), makes the common
+        # open_zarr() path fast and warning-free, and zarr-python reads it back
+        # natively. Suppress only that one deliberate warning — nothing else.
+        warnings.filterwarnings(
+            "ignore",
+            message="Consolidated metadata is currently not part in the Zarr format 3 specification",
+        )
+        if append_dim is not None:
+            ds.to_zarr(store, mode=mode, append_dim=append_dim)
+        else:
+            ds.to_zarr(store, mode=mode)
+
+
+def select_variables(ds, variables: str | list[str] | None):
+    """Restrict a Dataset to the requested data variable(s), or return it whole.
+
+    Uniform across kinds, so the registry applies it once to whatever an open
+    adapter returned rather than each adapter restating it.
+    """
+    if variables is None:
+        return ds
+    return ds[[variables] if isinstance(variables, str) else list(variables)]
+
+
+# --- xarray-backed opens ---------------------------------------------------
 
 
 def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict | None = None):
@@ -370,6 +485,9 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
             return _do(decode_times=False)
         except Exception as retry_exc:
             raise retry_exc from exc
+
+
+# --- ODIM radar ------------------------------------------------------------
 
 
 def _attr(group, key, default=None):
@@ -450,25 +568,29 @@ def _open_odim_composite(xr, path: Path):
     return ds
 
 
+# --- ICON unstructured coordinates -----------------------------------------
+
+
 # Parsed ICON/KENDA cell lat/lon — the constants GRIB is ~11 MB and the same grid
-# for every field in a collection, so parse it once. Keyed by (collection, bronze
-# dir): the constants file is resolved *under* bronze_dir, so keying on the
-# collection alone hands a second data_dir the first one's coordinates.
+# for every field in a collection, so parse it once. Keyed by (dataset,
+# workspace root): the constants file is resolved inside the workspace, so
+# keying on the dataset alone hands a second workspace the first one's
+# coordinates.
 _ICON_COORDS_CACHE: dict[tuple[str, str], tuple] = {}
 
 
-def _ensure_constants_file(collection_key: str, bronze_dir: Path, *, fetcher: Fetcher) -> Path | None:
+def _ensure_constants_file(dataset: str, workspace: Workspace, *, fetcher: Fetcher) -> Path | None:
     """Locate (or download) a GRIB2 collection's horizontal-constants file.
 
     Returns the local path, or None if the collection exposes no such asset.
     The constants file is a collection-level STAC asset (not a per-item one).
     """
-    out_dir = bronze_dir / collection_key
+    out_dir = workspace.bronze(dataset)
     cached = sorted(out_dir.glob("horizontal_constants*.grib2"))
     if cached:
         return cached[0]
 
-    meta = fetcher.collection(COLLECTIONS[collection_key])
+    meta = fetcher.collection(COLLECTIONS[dataset])
     constants = collection_assets(meta, key_contains="horizontal_constants")
     if not constants:
         return None
@@ -481,20 +603,20 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path, *, fetcher: Fe
     return path
 
 
-def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path, *, fetcher: Fetcher):
+def _icon_unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher):
     """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
 
     Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
     the same ``values`` dimension as the forecast fields). Cached per collection.
     """
-    cache_key = (collection_key, str(bronze_dir))
+    cache_key = (dataset, str(workspace.root))
     if cache_key in _ICON_COORDS_CACHE:
         return _ICON_COORDS_CACHE[cache_key]
 
     import cfgrib
 
     lat = lon = None
-    path = _ensure_constants_file(collection_key, bronze_dir, fetcher=fetcher)
+    path = _ensure_constants_file(dataset, workspace, fetcher=fetcher)
     if path is not None:
         for ds in cfgrib.open_datasets(path, backend_kwargs={"indexpath": ""}):
             if "tlat" in ds.variables:
@@ -509,172 +631,71 @@ def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path, *, fetcher:
     return lat, lon
 
 
-def _validate_grid_dataset(dataset: str) -> None:
-    """Guard shared by open_dataset/to_zarr. Allows NetCDF/GRIB2/HDF5 grids; rejects tabular."""
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-    if is_grid(dataset):
-        return
-    fmt = COLLECTION_META[dataset]["format"]
-    raise ValueError(f"Dataset {dataset!r} is tabular ({fmt}). Use foehn.load() to get a Polars DataFrame instead.")
+def _attach_icon_lonlat(ds, dataset: str, workspace: Workspace, *, fetcher: Fetcher, what: str):
+    """Attach ICON cell lat/lon to an unstructured Dataset, best-effort.
 
-
-def open_dataset(
-    dataset: str,
-    *,
-    variables: str | list[str] | None = None,
-    match: str | None = None,
-    data_dir: Path | str | None = None,
-    engine: str | None = None,
-) -> xr.Dataset:
-    """Open a gridded dataset as an xarray Dataset.
-
-    The grid analog of ``foehn.load()``, for NetCDF collections (climate grids,
-    normals, scenarios), GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM
-    radar composites (CombiPrecip, hail). This is *download-then-lazy*: the source
-    file(s) are fetched in full to ``data_dir/bronze/<dataset>/`` on first use,
-    then opened and read from that local copy. It is not cloud-lazy — there is no
-    byte-range/partial read of the remote file, so the first call pays the full
-    file size up front. Subsequent calls reuse the cache.
-
-    GRIB2 and radar (HDF5) collections **require** ``match``, and it must resolve
-    to a *single* file:
-
-    * GRIB2 forecast collections hold thousands of files (one per variable ×
-      ensemble member × lead time × reference time), and ICON's native
-      unstructured (icosahedral) grid — a 1-D ``values`` dimension with no
-      dimension coordinate — can't be stacked by ``combine_by_coords``. Include
-      the reference + lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``. The
-      one field comes back on the ``values`` grid with cell ``lat``/``lon``
-      coordinates joined from the collection's horizontal-constants file.
-    * Radar collections hold one Cartesian composite per timestep (every ~5 min).
-      Match a single file, e.g. ``match="cpc2613000000"``. The composite is read
-      with ODIM gain/offset scaling, ``nodata`` masked to NaN, on Swiss LV95
-      ``x``/``y`` coordinates (matching the NetCDF grids).
-
-    ``open_dataset`` reads one field; to assemble many matched files into a cube
-    use ``to_zarr(..., stack="auto")`` instead.
-
-    Args:
-        dataset: Dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",
-            "radar_precip"). Use list_datasets() to see options. Must be a NetCDF,
-            GRIB2, or HDF5/radar collection.
-        variables: Restrict to these data variable(s). If None, all are kept.
-        match: Keep only source files whose name contains this substring. Narrows
-            a heterogeneous multi-file collection to one coherent set — analogous
-            to the station/frequency filters on load(). Required for GRIB2 and
-            radar collections, where it must select a single file.
-        data_dir: Root data directory. Defaults to ./data/meteoswiss.
-        engine: xarray backend engine. Default None auto-selects per format —
-            xarray auto-detects NetCDF-3 vs NetCDF-4/HDF5, GRIB2 uses cfgrib, and
-            radar uses a bespoke ODIM-composite reader (ignores ``engine``).
-
-    Returns:
-        An xarray Dataset backed by the local file(s), downloaded in full first
-        (see the download-then-lazy note above) — e.g. the first
-        ``climate_scenarios_grid`` call fetches ~900 MB before you read a pixel.
-
-    Raises:
-        ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
-            collection opened without a single-file ``match``, or if its files
-            cannot be combined into a single Dataset (narrow it with ``match``).
-        ImportError: If the optional 'grids' dependencies are not installed.
-
-    Example::
-
-        import foehn
-
-        # NetCDF: a coherent single-parameter slice of a multi-file collection
-        ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")
-        ds = foehn.open_dataset("climate_scenarios_grid", match="_pr_", variables="pr")
-
-        # GRIB2: a single forecast field — variable + member + reference + lead time
-        ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
-
-        # Radar: a single CombiPrecip composite (one 5-min timestep)
-        ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
+    ICON/KENDA are on an unstructured grid (1-D ``values``, no lat/lon in the
+    GRIB), so the coordinates come from the collection's constants file. Warn and
+    continue if it is unavailable (e.g. offline) rather than failing an
+    otherwise-good read.
     """
-    _validate_grid_dataset(dataset)
-    fetcher = default_fetcher()
-    dataset_kind = kind(dataset)
-    fmt = COLLECTION_META[dataset]["format"]
-    reader = _GRID_READERS[dataset_kind]
-
-    xr = _require_xarray()
-    if dataset_kind is DatasetKind.GRIB2_GRID:
-        _require_cfgrib()
-    elif dataset_kind is DatasetKind.RADAR_GRID:
-        _require_radar_deps()
-
-    # Single-file formats (GRIB2, radar) have thousands of files per collection,
-    # so an unfiltered open would download the lot — require a narrowing match.
-    if reader.max_files == 1 and match is None:
-        raise ValueError(
-            f"Dataset {dataset!r} is a {fmt} collection of many single-field files; opening it "
-            "unfiltered would download them all. Narrow to one file with match=, e.g. "
-            f'foehn.open_dataset({dataset!r}, match="{reader.match_example}").'
+    if "values" not in ds.dims or "lat" in ds.coords:
+        return ds
+    try:
+        lat, lon = _icon_unstructured_lonlat(dataset, workspace, fetcher=fetcher)
+        if lat is not None and lon is not None and lat.size == ds.sizes["values"]:
+            return ds.assign_coords(
+                lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
+                lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
+            )
+    except Exception as exc:
+        warnings.warn(
+            f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); {what}",
+            stacklevel=2,
         )
-
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    bronze_dir = data_dir / "bronze"
-    files = _ensure_grid_files(
-        dataset, bronze_dir, suffixes=reader.suffixes, match=match, max_files=reader.max_files, fetcher=fetcher
-    )
-
-    if reader.reader == "odim":
-        ds = _open_odim_composite(xr, files[0])
-    else:
-        engine = engine if engine is not None else reader.engine
-        try:
-            ds = _open_grid(xr, files, engine, reader.backend_kwargs)
-        except Exception as exc:
-            if len(files) > 1:
-                raise ValueError(
-                    f"Could not combine the {len(files)} {fmt} files for {dataset!r} into one Dataset "
-                    f"({type(exc).__name__}: {exc}). This set mixes parameters/levels/resolutions — "
-                    "narrow to a coherent set with match=, e.g. "
-                    f'foehn.open_dataset({dataset!r}, match="<parameter>").'
-                ) from exc
-            raise
-
-        # ICON/KENDA are on an unstructured grid (1-D ``values``, no lat/lon in
-        # the GRIB). Attach cell lat/lon from the collection's constants file so
-        # the data is geo-referenced. Best-effort: warn and continue if it's
-        # unavailable (e.g. offline) rather than failing an otherwise-good read.
-        if dataset_kind is DatasetKind.GRIB2_GRID and "values" in ds.dims and "lat" not in ds.coords:
-            try:
-                lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir, fetcher=fetcher)
-                if lat is not None and lon is not None and lat.size == ds.sizes["values"]:
-                    ds = ds.assign_coords(
-                        lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
-                        lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
-                    )
-            except Exception as exc:
-                warnings.warn(
-                    f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); "
-                    "returning the unstructured grid without coordinates.",
-                    stacklevel=2,
-                )
-
-    if variables is not None:
-        wanted = [variables] if isinstance(variables, str) else list(variables)
-        ds = ds[wanted]
-
     return ds
 
 
-def _store_slug(match: str) -> str:
-    """Filesystem-safe fragment derived from a ``match`` filter for store names."""
-    return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
+# --- The open adapters -----------------------------------------------------
 
 
-def _resolve_store(dataset: str, match: str | None, data_dir, store) -> Path:
-    """Resolve the .zarr output path: explicit ``store`` wins, else data_dir/zarr/<name>."""
-    if store is not None:
-        return Path(store)
-    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    name = dataset if match is None else f"{dataset}__{_store_slug(match)}"
-    return root / "zarr" / f"{name}.zarr"
+def open_netcdf(files: list[Path], *, dataset: str, **_: object) -> xr.Dataset:
+    """Open one or more NetCDF files, combining them on their coordinates."""
+    xr = _require_xarray()
+    try:
+        return _open_grid(xr, files, engine=None)
+    except Exception as exc:
+        if len(files) > 1:
+            fmt = COLLECTION_META[dataset]["format"]
+            raise ValueError(
+                f"Could not combine the {len(files)} {fmt} files for {dataset!r} into one Dataset "
+                f"({type(exc).__name__}: {exc}). This set mixes parameters/levels/resolutions — "
+                "narrow to a coherent set with match=, e.g. "
+                f'foehn.open_dataset({dataset!r}, match="<parameter>").'
+            ) from exc
+        raise
+
+
+def open_grib2(files: list[Path], *, dataset: str, workspace: Workspace, fetcher: Fetcher, **_: object) -> xr.Dataset:
+    """Open one GRIB2 field via cfgrib, geo-referenced onto the ICON cell grid."""
+    xr = _require_xarray()
+    ds = _open_grid(xr, files, engine="cfgrib", backend_kwargs={"indexpath": ""})
+    return _attach_icon_lonlat(
+        ds,
+        dataset,
+        workspace,
+        fetcher=fetcher,
+        what="returning the unstructured grid without coordinates.",
+    )
+
+
+def open_radar(files: list[Path], **_: object) -> xr.Dataset:
+    """Open one ODIM-H5 Cartesian composite."""
+    xr = _require_xarray()
+    return _open_odim_composite(xr, files[0])
+
+
+# --- The cube adapters -----------------------------------------------------
 
 
 # Fixed time encoding for stacked writes. Incremental Zarr appends must share one
@@ -683,53 +704,21 @@ def _resolve_store(dataset: str, match: str | None, data_dir, store) -> Path:
 _STACK_TIME_ENCODING = {"units": "seconds since 1970-01-01", "calendar": "proleptic_gregorian", "dtype": "int64"}
 
 
-def _write_zarr(ds, store: Path, mode: str, append_dim: str | None = None) -> None:
-    """Write a Dataset to a Zarr store, suppressing only zarr's consolidated-metadata notice."""
-    with warnings.catch_warnings():
-        # xarray writes consolidated metadata by default. zarr-python 3 warns that
-        # this is outside the Zarr v3 spec, but we keep it on purpose: it's purely
-        # additive (every per-array zarr.json is still written), makes the common
-        # open_zarr() path fast and warning-free, and zarr-python reads it back
-        # natively. Suppress only that one deliberate warning — nothing else.
-        warnings.filterwarnings(
-            "ignore",
-            message="Consolidated metadata is currently not part in the Zarr format 3 specification",
-        )
-        if append_dim is not None:
-            ds.to_zarr(store, mode=mode, append_dim=append_dim)
-        else:
-            ds.to_zarr(store, mode=mode)
-
-
-def _to_zarr_stacked(dataset, *, variables, match, data_dir, store, mode, fetcher) -> Path:
-    """Stack a matched set of radar composites into one ``(time, y, x)`` Zarr cube.
+def cube_radar(
+    files: list[Path],
+    store: Path,
+    *,
+    variables: str | list[str] | None = None,
+    mode: str = "w",
+    **_: object,
+) -> None:
+    """Stack matched radar composites into one ``(time, y, x)`` Zarr cube.
 
     Written incrementally — one timestep appended at a time along ``time`` — so
     peak memory stays at a single file no matter how many timesteps the match
     spans, and no dask is needed.
     """
-    dataset_kind = kind(dataset)
-    if dataset_kind is not DatasetKind.RADAR_GRID:
-        fmt = COLLECTION_META[dataset]["format"]
-        raise ValueError(
-            f"stack='time' is only supported for radar (HDF5) collections; {dataset!r} is {fmt}. "
-            "NetCDF multi-file matches already combine via match=; GRIB2 uses stack='auto'."
-        )
-    if match is None:
-        raise ValueError(
-            f"Stacking radar timesteps needs match= to scope the time range for {dataset!r} "
-            '(e.g. a day prefix like match="cpc26130").'
-        )
-
     xr = _require_xarray()
-    _require_radar_deps()
-    reader = _GRID_READERS[dataset_kind]
-
-    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    # No single-file cap here: stacking deliberately wants the whole matched set.
-    files = _ensure_grid_files(dataset, root / "bronze", suffixes=reader.suffixes, match=match, fetcher=fetcher)
-    store_path = _resolve_store(dataset, match, data_dir, store)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
 
     wanted = None
     if variables is not None:
@@ -742,19 +731,21 @@ def _to_zarr_stacked(dataset, *, variables, match, data_dir, store, mode, fetche
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
         if wanted is not None:
             ds = ds[wanted]
-        ds = _sanitize_noncf_time_units(ds).expand_dims("time")
+        ds = sanitize_noncf_time_units(ds).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
-        _write_zarr(ds, store_path, mode if i == 0 else "a", append_dim=None if i == 0 else "time")
-    return store_path
+        write_zarr(ds, store, mode if i == 0 else "a", append_dim=None if i == 0 else "time")
 
 
-# Cap on how many GRIB2 files a single stack="auto" cube may load. The whole set
-# is held in memory at once (no dask), so this guards against an over-broad match
-# OOM-ing the process; it's enforced before downloading.
-_HYPERCUBE_MAX_FILES = 1000
-
-
-def _to_zarr_hypercube(dataset, *, variables, match, data_dir, store, mode, fetcher) -> Path:
+def cube_grib2(
+    files: list[Path],
+    store: Path,
+    *,
+    dataset: str,
+    workspace: Workspace,
+    fetcher: Fetcher,
+    variables: str | list[str] | None = None,
+    mode: str = "w",
+) -> None:
     """Combine matched GRIB2 files into one N-D cube over their varying axes.
 
     Each ICON/KENDA file is a single (variable, member, lead time, reference time)
@@ -764,32 +755,9 @@ def _to_zarr_hypercube(dataset, *, variables, match, data_dir, store, mode, fetc
     derived ``valid_time`` is dropped before combining (it conflicts on concat)
     and recomputed afterwards. The whole set is loaded into memory at once.
     """
-    dataset_kind = kind(dataset)
-    if dataset_kind is not DatasetKind.GRIB2_GRID:
-        fmt = COLLECTION_META[dataset]["format"]
-        raise ValueError(
-            f"stack='auto' is only supported for GRIB2 collections; {dataset!r} is {fmt}. "
-            "Radar uses stack='time'; NetCDF multi-file matches already combine via match=."
-        )
-    if match is None:
-        raise ValueError(
-            f"stack='auto' needs match= to scope the cube for {dataset!r}, e.g. "
-            'match="-t_2m-ctrl" (one variable + member across runs and lead times).'
-        )
-
     xr = _require_xarray()
-    _require_cfgrib()
-    reader = _GRID_READERS[dataset_kind]
 
-    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    bronze_dir = root / "bronze"
-    files = _ensure_grid_files(
-        dataset, bronze_dir, suffixes=reader.suffixes, match=match, max_files=_HYPERCUBE_MAX_FILES, fetcher=fetcher
-    )
-    store_path = _resolve_store(dataset, match, data_dir, store)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-
-    datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs=reader.backend_kwargs) for f in sorted(files)]
+    datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs={"indexpath": ""}) for f in sorted(files)]
     # Promote whichever independent axes actually differ across the matched files.
     varying = [
         coord
@@ -798,7 +766,7 @@ def _to_zarr_hypercube(dataset, *, variables, match, data_dir, store, mode, fetc
     ]
     if not varying:
         raise ValueError(
-            f"match={match!r} selected files that don't differ in number/time/step — "
+            f"The match selected files that don't differ in number/time/step for {dataset!r} — "
             "nothing to assemble into a cube (open it as a single field instead)."
         )
     prepared = [ds.drop_vars("valid_time", errors="ignore").expand_dims(varying) for ds in datasets]
@@ -806,119 +774,32 @@ def _to_zarr_hypercube(dataset, *, variables, match, data_dir, store, mode, fetc
     if "time" in cube.coords and "step" in cube.coords:
         cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])
 
-    if variables is not None:
-        cube = cube[[variables] if isinstance(variables, str) else list(variables)]
-
-    if "values" in cube.dims and "lat" not in cube.coords:
-        try:
-            lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir, fetcher=fetcher)
-            if lat is not None and lon is not None and lat.size == cube.sizes["values"]:
-                cube = cube.assign_coords(
-                    lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
-                    lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
-                )
-        except Exception as exc:
-            warnings.warn(
-                f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); "
-                "the cube is on the bare unstructured grid.",
-                stacklevel=2,
-            )
-
-    _write_zarr(_sanitize_noncf_time_units(cube), store_path, mode)
-    return store_path
+    cube = select_variables(cube, variables)
+    cube = _attach_icon_lonlat(
+        cube,
+        dataset,
+        workspace,
+        fetcher=fetcher,
+        what="the cube is on the bare unstructured grid.",
+    )
+    write_zarr(sanitize_noncf_time_units(cube), store, mode)
 
 
-def to_zarr(
-    dataset: str,
-    *,
-    variables: str | list[str] | None = None,
-    match: str | None = None,
-    data_dir: Path | str | None = None,
-    store: Path | str | None = None,
-    rechunk: dict[str, int] | None = None,
-    mode: str = "w",
-    stack: str | None = None,
-) -> Path:
-    """Materialise a gridded dataset to a Zarr store on disk.
-
-    The grid analog of ``foehn.to_parquet()``: reads the source (NetCDF, GRIB2,
-    or HDF5/radar) via ``open_dataset()`` and writes a single Zarr store under
-    ``data_dir/zarr/``. (GRIB2 and radar collections require ``match`` — see
-    ``open_dataset``.)
-
-    The default store name encodes ``match`` so that different filtered slices of
-    the same collection don't silently overwrite each other:
-    ``<dataset>.zarr`` when unfiltered, ``<dataset>__<match>.zarr`` otherwise
-    (e.g. ``surface_derived_grid__rhiresd.zarr``). Pass ``store`` for an explicit
-    path that overrides this.
-
-    Args:
-        dataset: Dataset name. Must be a NetCDF, GRIB2, or HDF5/radar collection.
-        variables: Restrict to these data variable(s) before writing.
-        match: Narrow a multi-file collection to a coherent set (see open_dataset);
-            required for GRIB2 and radar collections.
-        data_dir: Root data directory. Defaults to ./data/meteoswiss.
-        store: Explicit output path for the ``.zarr`` store. Overrides the
-            derived ``data_dir/zarr/<name>.zarr`` location when given.
-        rechunk: Optional dim→chunk-size mapping applied before writing, e.g.
-            ``{"time": 24}``. Requires ``dask`` (not part of the 'grids' extra —
-            install separately with ``pip install dask``); raises ImportError
-            if it is missing. Not supported together with ``stack``.
-        mode: Zarr write mode (default "w" — overwrite the store at this path).
-            Note distinct ``match`` values map to distinct default paths, so this
-            only overwrites a prior run of the *same* slice, not a different one.
-        stack: ``"auto"`` assembles the matched files into one cube using the
-            best method for the format — radar stacks CombiPrecip timesteps into
-            a ``(time, y, x)`` cube incrementally (dask-free, one timestep in
-            memory); GRIB2 promotes whichever of number/time/step vary into an
-            N-D cube (e.g. ``(time, step, values)``) via ``combine_by_coords``
-            (whole set in memory, capped at 1000 files); NetCDF needs nothing
-            extra since a multi-file ``match`` already combines on read.
-            ``"time"`` is the explicit radar path (same result as ``"auto"`` for
-            radar). Default None reads a single file. Incompatible with ``rechunk``.
-
-    Returns:
-        Path to the written ``.zarr`` store.
-    """
-    _validate_grid_dataset(dataset)
-    dataset_kind = kind(dataset)
-
-    if stack is not None:
-        if stack not in ("auto", "time"):
-            raise ValueError(f"stack={stack!r} is not supported; use 'auto' (any gridded format) or 'time' (radar).")
-        if rechunk:
-            raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
-        kwargs = {
-            "variables": variables,
-            "match": match,
-            "data_dir": data_dir,
-            "store": store,
-            "mode": mode,
-            "fetcher": default_fetcher(),
-        }
-        # "auto" routes to each format's best cube builder; "time" is the explicit radar path.
-        if stack == "time" or dataset_kind is DatasetKind.RADAR_GRID:
-            return _to_zarr_stacked(dataset, **kwargs)  # radar: incremental (time, y, x)
-        if dataset_kind is DatasetKind.GRIB2_GRID:
-            return _to_zarr_hypercube(dataset, **kwargs)  # forecasts: N-D combine_by_coords
-        # NetCDF + stack="auto": open_dataset already combines a multi-file match,
-        # so just fall through to the normal single-write path below.
-
-    ds = open_dataset(dataset, variables=variables, match=match, data_dir=data_dir)
-    ds = _sanitize_noncf_time_units(ds)
-
-    store = _resolve_store(dataset, match, data_dir, store)
-    store.parent.mkdir(parents=True, exist_ok=True)
-
-    if rechunk:
-        import importlib.util
-
-        if importlib.util.find_spec("dask") is None:
-            raise ImportError(
-                "to_zarr(rechunk=...) requires dask, which is not part of the "
-                "'grids' extra. Install it with:\n\n  pip install dask\n"
-            )
-        ds = ds.chunk(rechunk)
-
-    _write_zarr(ds, store, mode)
-    return store
+__all__ = [
+    "CubeAdapter",
+    "GridReader",
+    "OpenAdapter",
+    "Require",
+    "cube_grib2",
+    "cube_radar",
+    "ensure_grid_files",
+    "open_grib2",
+    "open_netcdf",
+    "open_radar",
+    "require_grib2",
+    "require_netcdf",
+    "require_radar",
+    "sanitize_noncf_time_units",
+    "select_variables",
+    "write_zarr",
+]

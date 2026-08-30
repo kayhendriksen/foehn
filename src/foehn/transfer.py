@@ -4,9 +4,8 @@
 pool, destination de-duplication, per-asset failure isolation, ETag bookkeeping,
 atomic writes and the counting that produces a :class:`DownloadResult`.
 
-Before this module that loop was written five times — once in each of
-``client.download_collection``, ``download_metadata``, ``download_grib2`` and
-``download_netcdf``, and once more in ``grids._ensure_grid_files``. All five
+Before this module that loop was written five times — once in each of the four
+download paths in ``client``, and once more in ``grids.ensure_grid_files``. All five
 were the same body; only three things ever varied, and they are the three
 parameters :func:`fetch_all` takes:
 

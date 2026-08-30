@@ -6,9 +6,11 @@ from unittest.mock import patch
 import pytest
 
 import foehn
+from foehn.api import open_dataset, to_zarr
 from foehn.collections import COLLECTIONS
 from foehn.fetch import FetchError
-from foehn.grids import _ensure_grid_files, open_dataset, to_zarr
+from foehn.grids import ensure_grid_files
+from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
 
 
@@ -69,7 +71,7 @@ def test_ensure_netcdf_files_raises_when_no_nc_assets(fetcher, tmp_path):
         {"assets": {"b": {"href": "https://data.geo.admin.ch/x/bundle.zip"}}},
     ]
     with pytest.raises(ValueError, match=r"No \.nc assets"):
-        _ensure_grid_files("climate_normals_grid", tmp_path / "bronze", fetcher=fetcher)
+        ensure_grid_files("climate_normals_grid", Workspace(tmp_path), fetcher=fetcher)
 
 
 def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
@@ -83,7 +85,7 @@ def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
 
     items = _items_for("x.rhiresd_ch01h.nc", "x.ranomm9120_ch01r.nc")
     fake = _fake(items)
-    result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
     assert len(fake.listings) == 1  # multi-file format always verifies against remote
     assert fake.streams == []  # both already cached
     assert result == [keep]
@@ -102,7 +104,7 @@ def test_ensure_netcdf_files_match_downloads_missing_from_partial_cache(tmp_path
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
     assert len(fake.streams) == 1  # the missing part 2 is fetched
     assert {p.name for p in result} == {"rhiresd_part1.nc", "rhiresd_part2.nc"}
 
@@ -134,7 +136,7 @@ def test_ensure_grid_files_fetches_missing_concurrently(tmp_path):
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
     assert len(fake.streams) == len(names)
     assert peak > 1  # genuinely overlapping
@@ -161,7 +163,7 @@ def test_ensure_grid_files_deduplicates_repeated_asset(tmp_path):
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
     assert len(fake.streams) == 1
     assert [p.name for p in result] == ["rhiresd_ch01h.nc"]
@@ -180,28 +182,36 @@ def test_grid_listing_accepts_a_cached_walk(tmp_path):
     (out_dir / "x.rhiresd_ch01h.nc").write_bytes(b"x")
     fake = _fake(_items_for("x.rhiresd_ch01h.nc"))
 
-    _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
     assert [cache for _, cache, _, _ in fake.listings] == [True]
 
 
-def test_run_datetime_filter_only_applies_to_grib2():
-    """A run stamp narrows GRIB2 listings; other formats must keep the full walk.
-
-    CSV and radar collections set item datetime to a catalog-refresh time, so
-    filtering on a real data date there would match nothing.
-    """
+def test_run_datetime_filter_reads_the_run_stamp():
+    """A match naming a run becomes a STAC datetime; anything else stays unfiltered."""
     from foehn.grids import _run_datetime_filter
 
-    assert _run_datetime_filter("forecast_icon_ch1", "202605231500-0-t_2m-ctrl") == "2026-05-23T15:00:00Z"
-    assert _run_datetime_filter("analysis_kenda_ch1", "202605231500-0-t_2m-ctrl") == "2026-05-23T15:00:00Z"
-    # radar (HDF5) and NetCDF opt out entirely, even with a 12-digit run in match
-    assert _run_datetime_filter("radar_precip", "cpc202605231500") is None
-    assert _run_datetime_filter("surface_derived_grid", "202605231500") is None
-    # no parseable run stamp, or an impossible one
-    assert _run_datetime_filter("forecast_icon_ch1", "t_2m-ctrl") is None
-    assert _run_datetime_filter("forecast_icon_ch1", "209913451500") is None
-    assert _run_datetime_filter("forecast_icon_ch1", None) is None
+    assert _run_datetime_filter("202605231500-0-t_2m-ctrl") == "2026-05-23T15:00:00Z"
+    # no parseable run stamp, an impossible one, or no match at all
+    assert _run_datetime_filter("t_2m-ctrl") is None
+    assert _run_datetime_filter("cpc26130") is None
+    assert _run_datetime_filter("209913451500") is None
+    assert _run_datetime_filter(None) is None
+
+
+def test_only_grib2_rows_narrow_by_run():
+    """Whether an item's datetime *is* the run is a row, not a test inside the filter.
+
+    CSV and radar collections set item datetime to a catalog-refresh time, so
+    filtering on a real data date there would match nothing — those rows opt out,
+    which is why a 12-digit stamp in a radar match is never sent as a filter.
+    """
+    from foehn import registry
+
+    assert registry.spec("forecast_icon_ch1").grid.run_datetime is True
+    assert registry.spec("analysis_kenda_ch1").grid.run_datetime is True
+    assert registry.spec("radar_precip").grid.run_datetime is False
+    assert registry.spec("surface_derived_grid").grid.run_datetime is False
 
 
 def test_ensure_grid_files_narrows_forecast_listing_by_run(tmp_path):
@@ -212,12 +222,13 @@ def test_ensure_grid_files_narrows_forecast_listing_by_run(tmp_path):
     (out_dir / name).write_bytes(b"x")
 
     fake = _fake(_items_for(name))
-    _ensure_grid_files(
+    ensure_grid_files(
         "forecast_icon_ch1",
-        tmp_path / "bronze",
+        Workspace(tmp_path),
         suffixes=(".grib2",),
         match="202605231500-0-t_2m-ctrl",
         max_files=1,
+        run_datetime=True,
         fetcher=fake,
     )
 
@@ -241,12 +252,13 @@ def test_ensure_grid_files_falls_back_when_filtered_listing_misses(tmp_path):
     fake = _FilteredMiss()
     fake.any_items = _items_for(name)
     fake.default_body = b"x"
-    result = _ensure_grid_files(
+    result = ensure_grid_files(
         "forecast_icon_ch1",
-        tmp_path / "bronze",
+        Workspace(tmp_path),
         suffixes=(".grib2",),
         match="202605231500-0-t_2m-ctrl",
         max_files=1,
+        run_datetime=True,
         fetcher=fake,
     )
     assert [p.name for p in result] == [name]
@@ -266,9 +278,9 @@ def test_ensure_single_file_match_validated_against_remote_not_cache(tmp_path):
     )
     fake = _fake(items)
     with pytest.raises(ValueError, match="one file at a time"):
-        _ensure_grid_files(
+        ensure_grid_files(
             "forecast_icon_ch1",
-            tmp_path / "bronze",
+            Workspace(tmp_path),
             suffixes=(".grib2", ".grib"),
             match="t_2m-ctrl",
             max_files=1,
@@ -286,9 +298,9 @@ def test_ensure_single_file_serves_cache_when_remote_unique(tmp_path):
 
     items = _items_for("icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2")
     fake = _fake(items)
-    result = _ensure_grid_files(
+    result = ensure_grid_files(
         "forecast_icon_ch1",
-        tmp_path / "bronze",
+        Workspace(tmp_path),
         suffixes=(".grib2", ".grib"),
         match="t_2m-ctrl",
         max_files=1,
@@ -301,7 +313,7 @@ def test_ensure_single_file_serves_cache_when_remote_unique(tmp_path):
 def test_ensure_netcdf_files_match_no_remote_match_raises(tmp_path):
     fake = _fake([{"assets": {"a": {"href": "https://data.geo.admin.ch/x/ranomm9120.nc"}}}])
     with pytest.raises(ValueError, match="matching 'rhiresd'"):
-        _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
 
 def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tmp_path):
@@ -321,7 +333,7 @@ def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tm
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
     assert len(fake.listings) == 1
     assert len(fake.streams) == 1  # only the missing file is fetched; cache reused
@@ -337,7 +349,7 @@ def test_ensure_netcdf_files_offline_falls_back_to_cache(tmp_path):
     fake = _fake()
     fake.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
     with pytest.warns(UserWarning, match="without checking the collection"):
-        result = _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+        result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
     assert [p.name for p in result] == ["a.nc"]
 
 
@@ -346,7 +358,7 @@ def test_ensure_netcdf_files_offline_no_cache_reraises(tmp_path):
     fake = _fake()
     fake.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
     with pytest.raises(FetchError):
-        _ensure_grid_files("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
 
 def test_open_dataset_reads_local_netcdf(fetcher, tmp_path):
@@ -473,7 +485,7 @@ def test_ensure_constants_file_uses_cache(tmp_path):
     f.write_bytes(b"x")
 
     fake = _fake()
-    result = _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake)
+    result = _ensure_constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
     assert fake.collection_calls == []  # the cached file short-circuits the lookup
     assert result == f
@@ -486,7 +498,7 @@ def test_ensure_constants_file_none_when_absent(tmp_path):
     fake = _fake()
     fake.any_collection = {"assets": {"params.csv": {"href": "https://data.geo.admin.ch/x/params.csv"}}}
 
-    assert _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake) is None
+    assert _ensure_constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake) is None
 
 
 def test_ensure_constants_file_downloads_when_missing(tmp_path):
@@ -501,7 +513,7 @@ def test_ensure_constants_file_downloads_when_missing(tmp_path):
         "assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": "https://data.geo.admin.ch/x/hc.grib2"}}
     }
     fake.stream_hook = fake_download
-    path = _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake)
+    path = _ensure_constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
     assert len(fake.streams) == 1
     assert path.name == "hc.grib2"
@@ -526,8 +538,8 @@ def test_icon_unstructured_lonlat_reads_and_caches(tmp_path):
         patch("foehn.grids._ensure_constants_file", return_value=fake_path),
         patch.object(cfgrib, "open_datasets", return_value=[const]) as mock_open,
     ):
-        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze", fetcher=_fake())
-        _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze", fetcher=_fake())  # cached → no re-parse
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())
+        _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())  # cached → no re-parse
 
     assert list(lat) == [46.0, 47.0]
     assert list(lon) == [7.0, 8.0]
@@ -541,7 +553,7 @@ def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
 
     _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
     with patch("foehn.grids._ensure_constants_file", return_value=None):
-        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze", fetcher=_fake())
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())
     assert lat is None and lon is None
     _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
 
@@ -571,9 +583,9 @@ def test_icon_unstructured_lonlat_cache_is_keyed_on_data_dir(tmp_path):
 
     with patch("foehn.grids._ensure_constants_file", return_value=fake_path):
         with patch.object(cfgrib, "open_datasets", return_value=[const(46.0)]):
-            lat_a, _ = _icon_unstructured_lonlat("forecast_icon_ch1", dir_a, fetcher=_fake())
+            lat_a, _ = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(dir_a), fetcher=_fake())
         with patch.object(cfgrib, "open_datasets", return_value=[const(99.0)]) as mock_b:
-            lat_b, _ = _icon_unstructured_lonlat("forecast_icon_ch1", dir_b, fetcher=_fake())
+            lat_b, _ = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(dir_b), fetcher=_fake())
 
     assert list(lat_a) == [46.0]
     assert list(lat_b) == [99.0]  # not dir_a's cached value
@@ -591,12 +603,12 @@ def test_icon_unstructured_lonlat_does_not_cache_failure(tmp_path):
 
     from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
 
-    bronze = tmp_path / "bronze"
-    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(bronze)), None)
+    workspace = Workspace(tmp_path)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(workspace.root)), None)
 
     # First call: constants unreachable (offline) → (None, None), not memoised.
     with patch("foehn.grids._ensure_constants_file", return_value=None):
-        assert _icon_unstructured_lonlat("forecast_icon_ch1", bronze, fetcher=_fake()) == (None, None)
+        assert _icon_unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=_fake()) == (None, None)
 
     const = xr.Dataset({"tlat": ("values", np.array([46.0])), "tlon": ("values", np.array([7.0]))})
     fake_path = tmp_path / "hc.grib2"
@@ -605,17 +617,17 @@ def test_icon_unstructured_lonlat_does_not_cache_failure(tmp_path):
         patch("foehn.grids._ensure_constants_file", return_value=fake_path),
         patch.object(cfgrib, "open_datasets", return_value=[const]),
     ):
-        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", bronze, fetcher=_fake())
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=_fake())
 
     assert list(lat) == [46.0] and list(lon) == [7.0]
-    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(bronze)), None)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(workspace.root)), None)
 
 
-# ── GRIB2 hypercube (stack="auto") ────────────────────────────────────────────
+# ── GRIB2 hypercube (stack=True) ────────────────────────────────────────────
 
 
 def test_to_zarr_grib2_hypercube(fetcher, tmp_path):
-    """stack='auto' promotes the varying forecast axes (time, step) into one cube."""
+    """stack= promotes the varying forecast axes (time, step) into one cube."""
     pytest.importorskip("xarray")
     pytest.importorskip("cfgrib")
     pytest.importorskip("eccodes")
@@ -633,27 +645,22 @@ def test_to_zarr_grib2_hypercube(fetcher, tmp_path):
         for st in (0, 6):
             _write_grib2(base / f"icon-ch1-eps-20260523{dt:04d}-{st}-t_2m-ctrl.grib2", step=st, datatime=dt)
 
-    store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack="auto")
+    store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
     cube = xr.open_zarr(store)
     assert "time" in cube.dims and "step" in cube.dims
     assert cube.sizes["time"] == 2 and cube.sizes["step"] == 2
     assert cube["t2m"].dims[-2:] == ("latitude", "longitude")  # spatial dims preserved
 
 
-def test_to_zarr_auto_requires_match(tmp_path):
-    """stack='auto' needs a match to scope the cube."""
+def test_to_zarr_grib2_stack_requires_match(tmp_path):
+    """A GRIB2 cube needs a match to scope it."""
     pytest.importorskip("cfgrib")
     with pytest.raises(ValueError, match="needs match="):
-        to_zarr("forecast_icon_ch1", data_dir=tmp_path, stack="auto")
+        to_zarr("forecast_icon_ch1", data_dir=tmp_path, stack=True)
 
 
-def test_to_zarr_invalid_stack_value(tmp_path):
-    with pytest.raises(ValueError, match="stack="):
-        to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="x", stack="member")
-
-
-def test_to_zarr_netcdf_auto_writes_combined(fetcher, tmp_path):
-    """stack='auto' on NetCDF just writes the already-combined multi-file match (no special path)."""
+def test_to_zarr_netcdf_stack_writes_combined(fetcher, tmp_path):
+    """NetCDF has no cube builder, so stack= writes the already-combined match."""
     fetcher.any_items = _items_for("g.rain.nc", "g.anom.nc")
     xr = pytest.importorskip("xarray")
     pytest.importorskip("h5netcdf")
@@ -664,7 +671,7 @@ def test_to_zarr_netcdf_auto_writes_combined(fetcher, tmp_path):
     _write_nc(base / "g.rain.nc", xr, np, var="rain")
     _write_nc(base / "g.anom.nc", xr, np, var="anom")
 
-    store = to_zarr("surface_derived_grid", data_dir=tmp_path, match="g.", stack="auto")
+    store = to_zarr("surface_derived_grid", data_dir=tmp_path, match="g.", stack=True)
     ds = xr.open_zarr(store)
     assert "rain" in ds.data_vars
     assert "anom" in ds.data_vars  # both files combined into one store
@@ -746,9 +753,8 @@ def test_to_zarr_radar_writes_store(fetcher, tmp_path):
     assert "acrr" in xr.open_zarr(store).data_vars
 
 
-@pytest.mark.parametrize("stack", ["time", "auto"])
-def test_to_zarr_radar_stacked_time_cube(fetcher, tmp_path, stack):
-    """Both stack='time' and stack='auto' assemble radar timesteps into one (time, y, x) cube."""
+def test_to_zarr_radar_stacked_time_cube(fetcher, tmp_path):
+    """stack= assembles radar timesteps into one (time, y, x) cube."""
     fetcher.any_items = _items_for("cpc26130000000.h5", "cpc26130000500.h5", "cpc26130001000.h5")
     pytest.importorskip("xarray")
     pytest.importorskip("h5py")
@@ -762,7 +768,7 @@ def test_to_zarr_radar_stacked_time_cube(fetcher, tmp_path, stack):
     _write_odim_composite(base / "cpc26130000500.h5", time="000500")
     _write_odim_composite(base / "cpc26130001000.h5", time="001000")
 
-    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=stack)
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
     ds = xr.open_zarr(store)
     assert ds["acrr"].dims == ("time", "y", "x")
     assert dict(ds.sizes) == {"time": 3, "y": 2, "x": 3}
@@ -774,17 +780,11 @@ def test_to_zarr_radar_stacked_time_cube(fetcher, tmp_path, stack):
 
 
 def test_to_zarr_stack_requires_match(tmp_path):
-    """stack='time' needs a match to scope the time range."""
+    """A radar cube needs a match to scope the time range."""
     pytest.importorskip("h5py")
     pytest.importorskip("pyproj")
     with pytest.raises(ValueError, match="needs match="):
-        to_zarr("radar_precip", data_dir=tmp_path, stack="time")
-
-
-def test_to_zarr_stack_rejected_for_netcdf(tmp_path):
-    """stack= is radar-only; NetCDF matches already combine."""
-    with pytest.raises(ValueError, match="only supported for radar"):
-        to_zarr("surface_derived_grid", data_dir=tmp_path, match="rhiresd", stack="time")
+        to_zarr("radar_precip", data_dir=tmp_path, stack=True)
 
 
 def test_open_dataset_match_selects_subset(fetcher, tmp_path):
@@ -809,14 +809,14 @@ def test_open_netcdf_combines_multiple_files_without_dask(tmp_path):
     pytest.importorskip("h5netcdf")
     import numpy as np
 
-    from foehn.grids import _open_grid
+    from foehn.grids import open_netcdf
 
     a = tmp_path / "a.nc"
     b = tmp_path / "b.nc"
     xr.Dataset({"t": (("x",), np.array([1.0, 2.0], "float32"))}, coords={"x": [0, 1]}).to_netcdf(a, engine="h5netcdf")
     xr.Dataset({"t": (("x",), np.array([3.0, 4.0], "float32"))}, coords={"x": [2, 3]}).to_netcdf(b, engine="h5netcdf")
 
-    ds = _open_grid(xr, [a, b], engine=None)
+    ds = open_netcdf([a, b], dataset="surface_derived_grid")
     assert ds["t"].shape == (4,)
     assert list(ds["x"].values) == [0, 1, 2, 3]
 
@@ -827,7 +827,7 @@ def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
     pytest.importorskip("h5netcdf")
     import numpy as np
 
-    from foehn.grids import _open_grid
+    from foehn.grids import open_netcdf
 
     a = tmp_path / "a.nc"
     b = tmp_path / "b.nc"
@@ -842,7 +842,7 @@ def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
         attrs={"title": "rhiresd", "history": "made tuesday", "source": "B"},
     ).to_netcdf(b, engine="h5netcdf")
 
-    ds = _open_grid(xr, [a, b], engine=None)
+    ds = open_netcdf([a, b], dataset="surface_derived_grid")
     assert ds["t"].shape == (4,)
     # Shared attrs survive; conflicting ones are dropped rather than raising.
     assert ds.attrs.get("title") == "rhiresd"
@@ -960,13 +960,13 @@ def test_sanitize_noncf_time_units_moves_bad_units():
     xr = pytest.importorskip("xarray")
     import numpy as np
 
-    from foehn.grids import _sanitize_noncf_time_units
+    from foehn.grids import sanitize_noncf_time_units
 
     ds = xr.Dataset(
         {"v": (("time",), np.array([1.0]))},
         coords={"time": ("time", np.array([0.0]), {"units": "years since 1991-01-01", "calendar": "standard"})},
     )
-    out = _sanitize_noncf_time_units(ds)
+    out = sanitize_noncf_time_units(ds)
     assert "units" not in out["time"].attrs
     assert out["time"].attrs["units_noncf"] == "years since 1991-01-01"
     assert out["time"].attrs["calendar_noncf"] == "standard"
@@ -977,13 +977,13 @@ def test_sanitize_keeps_valid_cf_time_units():
     xr = pytest.importorskip("xarray")
     import numpy as np
 
-    from foehn.grids import _sanitize_noncf_time_units
+    from foehn.grids import sanitize_noncf_time_units
 
     ds = xr.Dataset(
         {"v": (("time",), np.array([1.0]))},
         coords={"time": ("time", np.array([0.0]), {"units": "days since 2000-01-01"})},
     )
-    out = _sanitize_noncf_time_units(ds)
+    out = sanitize_noncf_time_units(ds)
     assert out["time"].attrs["units"] == "days since 2000-01-01"
     assert "units_noncf" not in out["time"].attrs
 

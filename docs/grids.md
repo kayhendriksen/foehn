@@ -94,7 +94,6 @@ ds["TabsD"].sel(x=2_600_000, y=1_200_000, method="nearest")  # nearest grid cell
 | `variables` | `str` or `list[str]` | Restrict to these data variable(s) |
 | `match` | `str` | Keep only source files whose name contains this substring (required for GRIB2 and radar, where it must select one file) |
 | `data_dir` | `str` or `Path` | Root data directory (default `./data/meteoswiss`) |
-| `engine` | `str` | xarray backend; default auto-detects (NetCDF-3/4) or uses cfgrib (GRIB2); ignored for radar (bespoke ODIM reader) |
 
 ---
 
@@ -141,23 +140,24 @@ differently from the static NetCDF grids:
   # -> data/meteoswiss/zarr/forecast_icon_ch1__202605231500_0_t_2m_ctrl.zarr
   ```
 
-### Cubing forecasts (stack="auto")
+### Cubing forecasts (`stack=True`)
 
-To assemble a *cube* instead of one field, use `to_zarr(..., stack="auto")` with
+To assemble a *cube* instead of one field, use `to_zarr(..., stack=True)` with
 a broader `match`. It opens every matched file, promotes whichever forecast axes
 **vary** (`number` / `time` / `step`) into dimensions, and merges them with
 `combine_by_coords` — so e.g. all lead times of one variable+member across runs
 becomes a `(time, step, values)` cube (carrying the joined `lat`/`lon`):
 
 ```python
-store = foehn.to_zarr("forecast_icon_ch1", match="-t_2m-ctrl", stack="auto")
+store = foehn.to_zarr("forecast_icon_ch1", match="-t_2m-ctrl", stack=True)
 cube = xarray.open_zarr(store)        # dims e.g. (time, step, values)
 cube["t2m"].isel(time=-1)             # latest run, all lead times (var named by cfgrib)
 ```
 
-`stack="auto"` works for **any** gridded format — it just dispatches to the best
-method: the GRIB2 combine above, radar's incremental time-stack (below), or, for
-NetCDF, nothing special (a multi-file `match` already combines on read). Unlike
+`stack=True` works for **any** gridded format — each dataset kind carries its own
+cube builder: the GRIB2 combine above, radar's incremental time-stack (below), or,
+for NetCDF, none at all (a multi-file `match` already combines on read, so `stack`
+is a no-op there). Unlike
 radar's incremental path, the GRIB2 combine loads the whole matched set into
 memory at once, so it's **capped at 1000 files** — narrow `match` if you hit
 that. A cloud-lazy kerchunk path (to avoid the in-memory load) remains future work.
@@ -191,12 +191,11 @@ ds["acrr"]  # accumulated rainfall (mm), dims (y, x) on Swiss LV95
 ### Stacking a time series
 
 `open_dataset` reads one timestep. To assemble a whole day/range into a single
-**`(time, y, x)`** Zarr cube, use `to_zarr(..., stack="time")` (or the generic
-`stack="auto"`, which is identical for radar) with a `match` that selects the
-timesteps:
+**`(time, y, x)`** Zarr cube, use `to_zarr(..., stack=True)` with a `match` that
+selects the timesteps:
 
 ```python
-store = foehn.to_zarr("radar_precip", match="cpc26130", stack="time")
+store = foehn.to_zarr("radar_precip", match="cpc26130", stack=True)
 cube = xarray.open_zarr(store)        # dims (time, y, x)
 cube["acrr"].sel(x=2_600_000, y=1_200_000, method="nearest")  # rain time-series at a point
 ```
