@@ -94,9 +94,9 @@ def test_workflow_env_block_holds_the_single_copy_pins():
     GitHub refused to start the workflow. actionlint (a pre-commit hook now)
     catches the general case; this pins the specific keys.
     """
-    from ruamel.yaml import YAML
+    yaml = pytest.importorskip("ruamel.yaml", reason="strict YAML parser not installed")
 
-    workflow = YAML(typ="safe").load(WORKFLOW.read_text())
+    workflow = yaml.YAML(typ="safe").load(WORKFLOW.read_text())
 
     assert set(workflow["concurrency"]) == {"group", "cancel-in-progress"}
     assert set(workflow["env"]) == {

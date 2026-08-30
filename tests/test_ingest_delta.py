@@ -146,7 +146,15 @@ def test_scan_and_collect_single_file(smn_bronze_dir):
 # ── _write_to_delta ──────────────────────────────────────────────────────────
 
 
+# scripts.ingest_delta._write_to_delta hands Spark an Arrow table, so anything
+# reaching it needs pyarrow. It has no wheels for 3.15 yet, where this module is
+# otherwise importable — skip rather than error, as the grids tests do for xarray.
+def _require_arrow():
+    pytest.importorskip("pyarrow", reason="pyarrow has no wheels for this interpreter")
+
+
 def test_write_to_delta(mock_spark):
+    _require_arrow()
     df = pl.DataFrame({"a": [1, 2], "b": ["x", "y"]})
     _write_to_delta(mock_spark, df, "`cat`.`sch`.`tbl`")
 
@@ -157,6 +165,7 @@ def test_write_to_delta(mock_spark):
 
 
 def test_write_to_delta_append_mode(mock_spark):
+    _require_arrow()
     df = pl.DataFrame({"a": [1]})
     _write_to_delta(mock_spark, df, "`cat`.`sch`.`tbl`", mode="append")
 
@@ -304,6 +313,7 @@ def test_ingest_metadata_no_files(tmp_path, mock_spark):
 
 
 def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark):
+    _require_arrow()
     ok, skip = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
     assert ok == 1
     assert skip == 0

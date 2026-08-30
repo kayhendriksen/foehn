@@ -107,8 +107,25 @@ jobs:
       # Core + mcp only. The grids stack has no 3.15 wheels yet (pandas, pyproj,
       # netCDF4, h5py, pyarrow), so installing [dev] here would fail on packaging
       # rather than on anything foehn controls.
-      - run: uv pip install -e ".[mcp]" "pytest>=8"
-      - run: .venv/bin/pytest --ignore=tests/test_grids.py -p no:cov
+      - run: uv pip install -e ".[mcp]" "pytest>=8" "ruamel.yaml>=0.18"
+      # polars ships abi3 ("py3") wheels with no cp315 build, so it installs on
+      # 3.15 but cannot construct a temporal Series — every test that builds a
+      # frame with a timestamp dies inside polars. That drowned this job in ~22
+      # failures for one upstream reason, which is how it came to be ignored.
+      # Check for it up front and say so once, rather than 22 times. The suite
+      # runs again automatically once polars supports 3.15; when that happens,
+      # delete this step.
+      - name: Check polars works on this interpreter
+        id: polars
+        run: |
+          if .venv/bin/python -c "import datetime, polars as pl; pl.DataFrame({'t': [datetime.datetime(2026, 1, 1)]})"; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::polars cannot build a temporal Series on this interpreter (no cp315 wheel). Skipping the suite — this job reports nothing about foehn until polars supports 3.15."
+          fi
+      - if: steps.polars.outputs.usable == 'true'
+        run: .venv/bin/pytest --ignore=tests/test_grids.py -p no:cov
 
   build:
     name: build (packaging smoke test)
