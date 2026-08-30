@@ -1,0 +1,16 @@
+# Tools CI runs but nothing imports. Pinned rather than floored: each one gates
+# a job, so a surprise upgrade turns a green PR red with no code change.
+#
+# Declared here so Dependabot's pip ecosystem bumps them — it does not track
+# inline `pip install` or `uvx tool@version` in a workflow, which is why these
+# went unbumped for as long as they did. The workflows read the versions back
+# with scripts/tool_version.sh rather than repeating them.
+#
+# ruff and zizmor are NOT here: they are pinned in .pre-commit-config.yaml, so
+# that local hooks and CI cannot disagree. ty is pinned in pyproject's dev extra,
+# because the typecheck job installs it rather than running it through uvx.
+bandit==1.9.4
+build==1.6.0
+cyclonedx-bom==7.3.1
+pip-audit==2.9.0
+twine==7.0.0
