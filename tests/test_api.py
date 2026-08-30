@@ -2,7 +2,7 @@
 
 import io
 import zipfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import polars as pl
 import pytest
@@ -18,6 +18,7 @@ from foehn.api import (
     to_parquet,
 )
 from foehn.collections import COLLECTIONS
+from foehn.fetch import default_fetcher
 
 
 def test_import_from_foehn():
@@ -63,7 +64,7 @@ def test_download_grib2_dataset_routes_to_handler(mock_dl, tmp_path):
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
     res = download("forecast_icon_ch1", data_dir=tmp_path)
-    mock_dl.assert_called_once_with("forecast_icon_ch1", tmp_path / "bronze", since=None, workers=8)
+    mock_dl.assert_called_once_with("forecast_icon_ch1", tmp_path / "bronze", since=None, workers=8, fetcher=ANY)
     assert res.downloaded == 1
 
 
@@ -73,7 +74,7 @@ def test_download_netcdf_dataset_routes_to_handler(mock_dl, tmp_path):
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
     res = download("surface_derived_grid", data_dir=tmp_path)
-    mock_dl.assert_called_once_with("surface_derived_grid", tmp_path / "bronze", since=None, workers=8)
+    mock_dl.assert_called_once_with("surface_derived_grid", tmp_path / "bronze", since=None, workers=8, fetcher=ANY)
     assert res.downloaded == 1
 
 
@@ -96,7 +97,7 @@ def test_download_indoor_routes_to_handler(mock_dl, tmp_path):
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
     res = download("climate_scenarios_indoor", data_dir=tmp_path)
-    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor", force=False)
+    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor", force=False, fetcher=ANY)
     assert res.downloaded == 1
 
 
@@ -128,15 +129,10 @@ def test_load_indoor_frequency_raises():
         load("climate_scenarios_indoor", frequency="h")
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api._retry_session")
-def test_load_indoor_returns_dataframe(mock_session, mock_items):
-    mock_items.return_value = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+def test_load_indoor_returns_dataframe(fetcher):
+    fetcher.any_items = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
     zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(zip_bytes))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = zip_bytes
 
     df = load("climate_scenarios_indoor")
     assert isinstance(df, pl.DataFrame)
@@ -147,15 +143,10 @@ def test_load_indoor_returns_dataframe(mock_session, mock_items):
     assert len(df) == 4
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api._retry_session")
-def test_load_indoor_station_filter(mock_session, mock_items):
-    mock_items.return_value = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+def test_load_indoor_station_filter(fetcher):
+    fetcher.any_items = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
     zip_bytes = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv", "AIG_2060_RCP26_DRY.csv"])
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(zip_bytes))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = zip_bytes
 
     df = load("climate_scenarios_indoor", station="ABO")
     assert set(df["station_abbr"].unique()) == {"ABO"}
@@ -182,15 +173,10 @@ def test_load_climate_scenarios_year_filter_raises():
         load("climate_scenarios", year=2025)
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api._retry_session")
-def test_load_climate_scenarios_returns_dataframe(mock_session, mock_items):
+def test_load_climate_scenarios_returns_dataframe(fetcher):
     href = "https://data.geo.admin.ch/x/ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
-    mock_items.return_value = [{"id": "abe", "assets": {"d": {"href": href}}}]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_CS_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.any_items = [{"id": "abe", "assets": {"d": {"href": href}}}]
+    fetcher.default_body = _CS_CSV
 
     df = load("climate_scenarios")
     assert isinstance(df, pl.DataFrame)
@@ -205,17 +191,11 @@ def test_load_climate_scenarios_returns_dataframe(mock_session, mock_items):
 _FORECAST_LOCAL_CSV = "point_id;point_type_id;Date;dkl010h0\n1;1;202605202100;282\n1;1;202605202200;315\n"
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, mock_items):
-    mock_meta.return_value = {"assets": {}}
+def test_load_forecast_local_adds_reference_timestamp(fetcher):
+    fetcher.any_collection = {"assets": {}}
     href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
-    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.any_items = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    fetcher.default_body = _FORECAST_LOCAL_CSV
 
     df = load("forecast_local")
     assert "reference_timestamp" in df.columns
@@ -223,23 +203,17 @@ def test_load_forecast_local_adds_reference_timestamp(mock_session, mock_meta, m
     assert df["reference_timestamp"][0].year == 2026
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_forecast_local_date_filter_applies(mock_session, mock_meta, mock_items):
+def test_load_forecast_local_date_filter_applies(fetcher):
     """forecast_local rows are filtered by date even though its timestamp is derived.
 
     Its reference_timestamp is synthesised from the compact Date column, which
     used to happen only after the concat — so the per-frame filter pass has to
     derive it first or it would silently skip filtering this dataset.
     """
-    mock_meta.return_value = {"assets": {}}
+    fetcher.any_collection = {"assets": {}}
     href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
-    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.any_items = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    fetcher.default_body = _FORECAST_LOCAL_CSV
 
     both = load("forecast_local")
     assert len(both) == 2
@@ -250,20 +224,14 @@ def test_load_forecast_local_date_filter_applies(mock_session, mock_meta, mock_i
     assert narrowed["reference_timestamp"][0].hour == 21
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_time_filters_match_across_multiple_stations(mock_session, mock_meta, mock_items):
+def test_load_time_filters_match_across_multiple_stations(fetcher):
     """Filtering per-frame must give the same rows as filtering after the concat."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = [
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
         {"id": s, "assets": {"data": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{s.lower()}_d_recent.csv"}}}
         for s in ("BER", "ZUR", "GVE")
     ]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FILTER_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = _FILTER_CSV
 
     everything = load("smn", frequency="d")
     narrowed = load("smn", frequency="d", year=2025, month=[6, 7])
@@ -290,38 +258,29 @@ def _forecast_item(item_id: str, runs: dict[str, list[str]]) -> dict:
     }
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_forecast_local_skips_empty_newest_item(mock_session, mock_meta, mock_items):
+def test_load_forecast_local_skips_empty_newest_item(fetcher):
     """The newest day is created empty at ~04:00 UTC and filled as runs publish.
 
     Selecting it as "latest" returned zero CSVs — the cause of issue #27.
     """
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = [
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
         _forecast_item("20260720-ch", {"202607200600": ["dkl010h0"]}),
         _forecast_item("20260721-ch", {"202607210600": ["dkl010h0"]}),
         _forecast_item("20260722-ch", {}),  # newest day, not yet populated
     ]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = _FORECAST_LOCAL_CSV
 
     df = load("forecast_local")
     assert len(df) > 0
     # Newest *run* across the populated days, not the newest item.
-    assert "202607210600" in session.get.call_args[0][0]
+    assert "202607210600" in fetcher.gets[-1]
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_forecast_local_fetches_only_latest_run(mock_session, mock_meta, mock_items):
+def test_load_forecast_local_fetches_only_latest_run(fetcher):
     """One run is ~32 files at ~30 MB; the retained window is ~40 runs (~40 GB)."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = [
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
         _forecast_item(
             "20260721-ch",
             {
@@ -331,13 +290,10 @@ def test_load_forecast_local_fetches_only_latest_run(mock_session, mock_meta, mo
             },
         )
     ]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = _FORECAST_LOCAL_CSV
 
     load("forecast_local")
-    fetched = [c[0][0] for c in session.get.call_args_list]
+    fetched = fetcher.gets
     assert len(fetched) == 2
     assert all("202607210600" in url for url in fetched)
 
@@ -351,8 +307,10 @@ def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):
     mock_dl.return_value = DownloadResult(total_assets=2, downloaded=2, skipped=0, filenames=["a.csv", "b.csv"])
 
     result = download("smn", data_dir=tmp_path, time_slice=["historical"])
-    mock_meta.assert_called_once_with("smn", tmp_path / "bronze", workers=8)
-    mock_dl.assert_called_once_with("smn", tmp_path / "bronze", data_types=["historical"], since=None, workers=8)
+    mock_meta.assert_called_once_with("smn", tmp_path / "bronze", workers=8, fetcher=ANY)
+    mock_dl.assert_called_once_with(
+        "smn", tmp_path / "bronze", data_types=["historical"], since=None, workers=8, fetcher=ANY
+    )
 
     assert isinstance(result, DownloadResult)
     assert result.total_assets == 3
@@ -430,28 +388,19 @@ def _mock_response(content, status_code=200):
     return resp
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_returns_dataframe(mock_session, mock_meta, mock_items):
+def test_load_returns_dataframe(fetcher):
     """load() should download CSVs in memory and return a concatenated DataFrame."""
     # No metadata assets
-    mock_meta.return_value = {"assets": {}}
+    fetcher.any_collection = {"assets": {}}
 
     # Two STAC items, each with one CSV asset
-    mock_items.return_value = [
+    fetcher.any_items = [
         {"assets": {"data": {"href": "https://data.geo.admin.ch/smn/file1_recent.csv"}}},
         {"assets": {"data": {"href": "https://data.geo.admin.ch/smn/file2_recent.csv"}}},
     ]
 
-    csv1 = "station;temperature\nBER;20.5\nZUR;18.3\n"
-    csv2 = "station;temperature\nGEN;22.1\n"
-
-    session = MagicMock()
-    responses = [_mock_response(csv1), _mock_response(csv2)]
-    session.get = MagicMock(side_effect=responses)
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.add_body("https://data.geo.admin.ch/smn/file1_recent.csv", "station;temperature\nBER;20.5\nZUR;18.3\n")
+    fetcher.add_body("https://data.geo.admin.ch/smn/file2_recent.csv", "station;temperature\nGEN;22.1\n")
 
     df = load("smn")
 
@@ -461,31 +410,19 @@ def test_load_returns_dataframe(mock_session, mock_meta, mock_items):
     assert "temperature" in df.columns
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_with_metadata_types(mock_session, mock_meta, mock_items):
+def test_load_with_metadata_types(fetcher):
     """load() should use metadata to infer column types."""
     meta_csv = "parameter_shortname;parameter_datatype\nvalue;float\n"
-    mock_meta.return_value = {
+    fetcher.any_collection = {
         "assets": {"params": {"href": "https://data.geo.admin.ch/smn/ogd-smn_meta_parameters.csv"}}
     }
 
-    mock_items.return_value = [
+    fetcher.any_items = [
         {"assets": {"data": {"href": "https://data.geo.admin.ch/smn/file_recent.csv"}}},
     ]
 
-    data_csv = "station;value\nBER;20.5\n"
-
-    session = MagicMock()
-    session.get = MagicMock(
-        side_effect=[
-            _mock_response(meta_csv),
-            _mock_response(data_csv),
-        ]
-    )
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.add_body("https://data.geo.admin.ch/smn/ogd-smn_meta_parameters.csv", meta_csv)
+    fetcher.add_body("https://data.geo.admin.ch/smn/file_recent.csv", "station;value\nBER;20.5\n")
 
     df = load("smn")
 
@@ -493,14 +430,11 @@ def test_load_with_metadata_types(mock_session, mock_meta, mock_items):
     assert df.schema["value"] == pl.Float64
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_filters_time_slice(mock_session, mock_meta, mock_items):
+def test_load_filters_time_slice(fetcher):
     """load() should only include CSVs matching the requested time_slice."""
-    mock_meta.return_value = {"assets": {}}
+    fetcher.any_collection = {"assets": {}}
 
-    mock_items.return_value = [
+    fetcher.any_items = [
         {
             "assets": {
                 "recent": {"href": "https://data.geo.admin.ch/smn/file_recent.csv"},
@@ -511,29 +445,19 @@ def test_load_filters_time_slice(mock_session, mock_meta, mock_items):
 
     csv_data = "station;temp\nBER;20\n"
 
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", time_slice=["recent"])
 
     assert isinstance(df, pl.DataFrame)
     # Only one CSV should have been fetched (the recent one)
-    assert session.get.call_count == 1
+    assert len(fetcher.gets) == 1
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_no_csvs_raises(mock_session, mock_meta, mock_items):
+def test_load_no_csvs_raises(fetcher):
     """load() should raise ValueError when no CSVs match."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = [{"assets": {"data": {"href": "https://data.geo.admin.ch/smn/file_historical.csv"}}}]
-
-    session = MagicMock()
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [{"assets": {"data": {"href": "https://data.geo.admin.ch/smn/file_historical.csv"}}}]
 
     with pytest.raises(ValueError, match="No CSV files found"):
         load("smn", time_slice=["now"])
@@ -554,107 +478,77 @@ def _smn_items(*stations):
     ]
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_station_filter_single(mock_session, mock_meta, mock_items):
+def test_load_station_filter_single(fetcher):
     """load(station='ber') should only download files for that station."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber", "zur", "gen")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber", "zur", "gen")
 
     csv_data = "station;temp\nBER;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", station="BER")
 
     assert isinstance(df, pl.DataFrame)
     # 3 granularities (d, h, t) for 1 station
-    assert session.get.call_count == 3
+    assert len(fetcher.gets) == 3
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_station_filter_multiple(mock_session, mock_meta, mock_items):
+def test_load_station_filter_multiple(fetcher):
     """load(station=['ber', 'zur']) should download files for both stations."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber", "zur", "gen")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber", "zur", "gen")
 
     csv_data = "station;temp\nX;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", station=["BER", "ZUR"])
 
     assert isinstance(df, pl.DataFrame)
     # 3 granularities × 2 stations = 6
-    assert session.get.call_count == 6
+    assert len(fetcher.gets) == 6
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_frequency_filter(mock_session, mock_meta, mock_items):
+def test_load_frequency_filter(fetcher):
     """load(frequency='d') should only download daily files."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber")
 
     csv_data = "station;temp\nBER;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", station="BER", frequency="d")
 
     assert isinstance(df, pl.DataFrame)
     # Only 1 file: ber_d_recent
-    assert session.get.call_count == 1
+    assert len(fetcher.gets) == 1
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_frequency_filter_multiple(mock_session, mock_meta, mock_items):
+def test_load_frequency_filter_multiple(fetcher):
     """load(frequency=['d', 'h']) should download daily + hourly."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber")
 
     csv_data = "station;temp\nBER;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", station="BER", frequency=["d", "h"])
 
     assert isinstance(df, pl.DataFrame)
     # 2 files: ber_d_recent + ber_h_recent
-    assert session.get.call_count == 2
+    assert len(fetcher.gets) == 2
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_station_case_insensitive(mock_session, mock_meta, mock_items):
+def test_load_station_case_insensitive(fetcher):
     """Station filter should be case-insensitive."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber")
 
     csv_data = "station;temp\nBER;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", station="ber", frequency="d")
     assert isinstance(df, pl.DataFrame)
-    assert session.get.call_count == 1
+    assert len(fetcher.gets) == 1
 
 
 # --- metadata tests ---
@@ -691,14 +585,9 @@ def _stac_assets(suffix, href):
     return {"assets": {suffix: {"href": href}}}
 
 
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_parameters_returns_dataframe(mock_session, mock_meta):
-    mock_meta.return_value = _stac_assets("params", "https://data.geo.admin.ch/smn/ogd-smn_meta_parameters.csv")
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_PARAMS_CSV.encode("windows-1252")))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+def test_parameters_returns_dataframe(fetcher):
+    fetcher.any_collection = _stac_assets("params", "https://data.geo.admin.ch/smn/ogd-smn_meta_parameters.csv")
+    fetcher.default_body = _PARAMS_CSV.encode("windows-1252")
 
     df = parameters("smn")
 
@@ -709,14 +598,9 @@ def test_parameters_returns_dataframe(mock_session, mock_meta):
     assert df["unit"][0] == "°C"
 
 
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_stations_returns_dataframe(mock_session, mock_meta):
-    mock_meta.return_value = _stac_assets("stations", "https://data.geo.admin.ch/smn/ogd-smn_meta_stations.csv")
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_STATIONS_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+def test_stations_returns_dataframe(fetcher):
+    fetcher.any_collection = _stac_assets("stations", "https://data.geo.admin.ch/smn/ogd-smn_meta_stations.csv")
+    fetcher.default_body = _STATIONS_CSV
 
     df = stations("smn")
 
@@ -757,13 +641,12 @@ def test_declared_time_slices_match_what_meteoswiss_publishes():
         NETCDF_COLLECTIONS,
         time_slice_from_filename,
     )
-    from foehn.stac import get_collection_items
 
     tabular = [k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS | NETCDF_COLLECTIONS | CSV_ZIP_COLLECTIONS]
     mismatches = {}
     for key in tabular:
         found = set()
-        for item in get_collection_items(COLLECTIONS[key], verbose=False):
+        for item in default_fetcher().items(COLLECTIONS[key]):
             for asset in item.get("assets", {}).values():
                 name = asset_filename(asset.get("href", ""))
                 if name.endswith(".csv") and "_meta_" not in name:
@@ -810,14 +693,9 @@ def test_stations_live_returns_lv95_and_source_date_format():
     assert row["data_since"] == "01.01.1864"
 
 
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_inventory_returns_dataframe(mock_session, mock_meta):
-    mock_meta.return_value = _stac_assets("inv", "https://data.geo.admin.ch/smn/ogd-smn_meta_datainventory.csv")
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_INVENTORY_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+def test_inventory_returns_dataframe(fetcher):
+    fetcher.any_collection = _stac_assets("inv", "https://data.geo.admin.ch/smn/ogd-smn_meta_datainventory.csv")
+    fetcher.default_body = _INVENTORY_CSV
 
     df = inventory("smn")
 
@@ -842,11 +720,8 @@ def test_inventory_unknown_dataset_raises():
         inventory("nonexistent")
 
 
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_metadata_no_matching_asset_raises(mock_session, mock_meta):
-    mock_meta.return_value = {"assets": {}}
-    mock_session.return_value = MagicMock()
+def test_metadata_no_matching_asset_raises(fetcher):
+    fetcher.any_collection = {"assets": {}}
 
     with pytest.raises(ValueError, match="No _meta_parameters metadata found"):
         parameters("smn")
@@ -871,80 +746,56 @@ _FILTER_CSV = (
 )
 
 
-def _setup_filter_mocks(mock_session, mock_meta, mock_items):
-    """Set up common mocks for filter tests."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = [
+def _setup_filter_fetcher(fetcher):
+    """Wire the fetcher every filter test shares."""
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
         {"id": "BER", "assets": {"data": {"href": "https://data.geo.admin.ch/smn/ogd-smn_ber_d_recent.csv"}}},
     ]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FILTER_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = _FILTER_CSV
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_year_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_year_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", year=2025)
     assert len(df) == 4
     assert all(ts.year == 2025 for ts in df["reference_timestamp"].to_list())
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_year_filter_list(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_year_filter_list(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", year=[2024, 2025])
     assert len(df) == 5
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_month_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_month_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", month=[6, 7])
     assert len(df) == 3
     assert all(ts.month in (6, 7) for ts in df["reference_timestamp"].to_list())
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_year_and_month_combined(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_year_and_month_combined(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", year=2025, month=7)
     assert len(df) == 1
     assert df["temp"][0] == 25.0
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_date_from_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_date_from_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", date_from="2025-06-01")
     assert len(df) == 3
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_date_to_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_date_to_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", date_to="2025-01-15")
     assert len(df) == 2
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_date_range_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_date_range_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", date_from="2025-06-01", date_to="2025-08-31")
     assert len(df) == 2
 
@@ -1011,72 +862,51 @@ def test_date_filter_on_date_typed_column_does_not_raise():
     assert out["reference_timestamp"][0] == date(2025, 6, 1)
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_drop_null_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_drop_null_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", drop_null="precip")
     assert len(df) == 4
     assert df["precip"].null_count() == 0
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_drop_null_nonexistent_column_raises(mock_session, mock_meta, mock_items):
+def test_load_drop_null_nonexistent_column_raises(fetcher):
     # Silently ignoring the filter would return every null row it was asked to
     # drop — a plausible-looking wrong answer for a mistyped shortcode.
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     with pytest.raises(ValueError, match=r"Unknown column\(s\) \['nonexistent'\] in drop_null="):
         load("smn", station="BER", frequency="d", drop_null="nonexistent")
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_sort_desc(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_sort_desc(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", sort="desc")
     timestamps = df["reference_timestamp"].to_list()
     assert timestamps == sorted(timestamps, reverse=True)
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_sort_asc(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_sort_asc(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", sort="asc")
     timestamps = df["reference_timestamp"].to_list()
     assert timestamps == sorted(timestamps)
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_columns_filter(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_columns_filter(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", columns=["temp"])
     assert set(df.columns) == {"station_abbr", "reference_timestamp", "temp"}
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_columns_nonexistent_raises(mock_session, mock_meta, mock_items):
+def test_load_columns_nonexistent_raises(fetcher):
     # Dropping the unknown name silently would hand back only the always-kept
     # key columns, with no signal that the requested parameter was a typo.
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     with pytest.raises(ValueError, match=r"Unknown column\(s\) \['nonexistent'\] in columns="):
         load("smn", station="BER", frequency="d", columns=["temp", "nonexistent"])
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_all_filters_combined(mock_session, mock_meta, mock_items):
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+def test_load_all_filters_combined(fetcher):
+    _setup_filter_fetcher(fetcher)
     df = load(
         "smn",
         station="BER",
@@ -1094,56 +924,49 @@ def test_load_all_filters_combined(mock_session, mock_meta, mock_items):
 # --- column projection (parsed columns pushed into read_csv) ---
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_columns_projection_matches_unprojected(mock_session, mock_meta, mock_items):
+def test_load_columns_projection_matches_unprojected(fetcher):
     """Selecting columns up front must give exactly what selecting afterwards did."""
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     projected = load("smn", station="BER", frequency="d", columns=["temp"])
 
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     everything = load("smn", station="BER", frequency="d")
 
     assert projected.columns == ["station_abbr", "reference_timestamp", "temp"]
     assert projected.to_dicts() == everything.select(projected.columns).to_dicts()
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_columns_projection_keeps_drop_null_column(mock_session, mock_meta, mock_items):
+def test_load_columns_projection_keeps_drop_null_column(fetcher):
     """drop_null must still work on a column the caller didn't ask to return.
 
     The projection has to keep it, or the filter silently loses its subject.
     """
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", columns=["temp"], drop_null="precip")
 
     assert df.columns == ["station_abbr", "reference_timestamp", "temp"]
     assert len(df) == 4  # the one null-precip row is gone
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_columns_projection_handles_station_missing_the_column(mock_session, mock_meta, mock_items):
+def test_load_columns_projection_handles_station_missing_the_column(fetcher):
     """A station whose file lacks the column still contributes rows, padded with null.
 
     Projecting per file must not turn a heterogeneous schema into a hard error —
     the diagonal concat filled these with nulls before and must keep doing so.
     """
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = [
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
         {"id": s, "assets": {"d": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{s.lower()}_d_recent.csv"}}}
         for s in ("BER", "ZUR")
     ]
-    with_temp = b"station_abbr;reference_timestamp;temp\nBER;2025-06-15T00:00:00;20.0\n"
-    without = b"station_abbr;reference_timestamp;precip\nZUR;2025-06-16T00:00:00;3.0\n"
-    session = MagicMock()
-    session.get = MagicMock(side_effect=[_mock_response(with_temp), _mock_response(without)])
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.add_body(
+        "https://data.geo.admin.ch/smn/ogd-smn_ber_d_recent.csv",
+        b"station_abbr;reference_timestamp;temp\nBER;2025-06-15T00:00:00;20.0\n",
+    )
+    fetcher.add_body(
+        "https://data.geo.admin.ch/smn/ogd-smn_zur_d_recent.csv",
+        b"station_abbr;reference_timestamp;precip\nZUR;2025-06-16T00:00:00;3.0\n",
+    )
 
     df = load("smn", frequency="d", columns=["temp"], sort="asc")
 
@@ -1152,18 +975,12 @@ def test_load_columns_projection_handles_station_missing_the_column(mock_session
     assert df.to_dicts()[1]["temp"] is None
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_columns_projection_keeps_forecast_local_date(mock_session, mock_meta, mock_items):
+def test_load_columns_projection_keeps_forecast_local_date(fetcher):
     """forecast_local derives its timestamp from Date, so the projection must keep it."""
-    mock_meta.return_value = {"assets": {}}
+    fetcher.any_collection = {"assets": {}}
     href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
-    mock_items.return_value = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(_FORECAST_LOCAL_CSV))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.any_items = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    fetcher.default_body = _FORECAST_LOCAL_CSV
 
     df = load("forecast_local", columns=["dkl010h0"])
 
@@ -1175,22 +992,16 @@ def test_load_columns_projection_keeps_forecast_local_date(mock_session, mock_me
 # --- limit + concurrent fetching ---
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_limit_caps_rows(mock_session, mock_meta, mock_items):
+def test_load_limit_caps_rows(fetcher):
     """limit param should cap the returned DataFrame to N rows."""
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", limit=2)
     assert len(df) == 2
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_limit_applied_after_sort(mock_session, mock_meta, mock_items):
+def test_load_limit_applied_after_sort(fetcher):
     """limit + sort='desc' should give the N newest rows."""
-    _setup_filter_mocks(mock_session, mock_meta, mock_items)
+    _setup_filter_fetcher(fetcher)
     df = load("smn", station="BER", frequency="d", sort="desc", limit=1)
     assert len(df) == 1
     # newest row in _FILTER_CSV is 2025-12-01
@@ -1198,39 +1009,27 @@ def test_load_limit_applied_after_sort(mock_session, mock_meta, mock_items):
     assert df["reference_timestamp"][0].month == 12
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_workers_one_uses_serial_path(mock_session, mock_meta, mock_items):
+def test_load_workers_one_uses_serial_path(fetcher):
     """workers=1 should still produce a correct DataFrame (covers the serial branch)."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber")
 
     csv_data = "station;temp\nBER;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", station="BER", frequency="d", workers=1)
     assert isinstance(df, pl.DataFrame)
 
 
-@patch("foehn.api.get_collection_items")
-@patch("foehn.api.get_collection_metadata")
-@patch("foehn.api._retry_session")
-def test_load_concurrent_fetch_multiple_files(mock_session, mock_meta, mock_items):
+def test_load_concurrent_fetch_multiple_files(fetcher):
     """With multiple CSVs and workers>1, all are fetched and concatenated."""
-    mock_meta.return_value = {"assets": {}}
-    mock_items.return_value = _smn_items("ber", "zur", "gen")
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = _smn_items("ber", "zur", "gen")
 
     csv_data = "station;temp\nX;20\n"
-    session = MagicMock()
-    session.get = MagicMock(return_value=_mock_response(csv_data))
-    session.__enter__.return_value = session
-    mock_session.return_value = session
+    fetcher.default_body = csv_data
 
     df = load("smn", frequency="d", workers=4)
     # 3 stations × 1 frequency = 3 fetches
-    assert session.get.call_count == 3
+    assert len(fetcher.gets) == 3
     assert len(df) == 3

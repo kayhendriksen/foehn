@@ -35,16 +35,15 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
-import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from foehn._urls import asset_filename, clean_href, validate_download_href
+from foehn._urls import asset_filename, clean_href
 from foehn.collections import COLLECTION_META, COLLECTIONS
-from foehn.stac import get_collection_items, get_collection_metadata
+from foehn.fetch import DEFAULT_WORKERS, Fetcher, FetchError, default_fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -127,43 +126,11 @@ _GRID_READERS: dict[str, dict] = {
 
 # Grid collections are listed on *every* open, including repeat opens of an
 # already-cached file: _ensure_grid_files deliberately verifies the match against
-# the collection rather than the local cache. Cost varies enormously — smn is 2
-# pages and radar_precip 1, but forecast_icon_ch1 is 571 pages (~170s), because
-# the forecast collections carry one item per file.
-#
-# The TTL is therefore derived from what the walk cost, so an entry is never cheaper to
-# re-fetch than to keep: a listing is held for ~10x the time it took to build,
-# floored and capped. A fixed TTL got this exactly backwards — at 120s the
-# 171s forecast walk expired before any follow-up call could reuse it, so the
-# one collection that truly needed caching never got it.
-_LISTING_TTL_FACTOR = 10.0
-_LISTING_TTL_MIN_SECONDS = 120.0
-_LISTING_TTL_MAX_SECONDS = 1800.0
-_LISTING_CACHE: dict[tuple[str, str | None], tuple[float, float, list[dict]]] = {}
-
-
-def _cached_collection_items(collection_id: str, datetime_filter: str | None = None) -> list[dict]:
-    """Return a collection's STAC items, reusing a recent listing when there is one.
-
-    Only the gridded read path uses this. The download path keeps calling
-    ``get_collection_items`` directly — its whole job is to notice what changed
-    upstream, so a cache there would suppress exactly the updates it looks for.
-
-    Keyed on the datetime filter too: a run-narrowed listing is not a substitute
-    for the full one.
-    """
-    key = (collection_id, datetime_filter)
-    hit = _LISTING_CACHE.get(key)
-    now = time.monotonic()
-    if hit is not None and now - hit[0] < hit[1]:
-        return hit[2]
-
-    started = time.monotonic()
-    items = get_collection_items(collection_id, require_csv=False, verbose=False, datetime_filter=datetime_filter)
-    elapsed = time.monotonic() - started
-    ttl = min(max(elapsed * _LISTING_TTL_FACTOR, _LISTING_TTL_MIN_SECONDS), _LISTING_TTL_MAX_SECONDS)
-    _LISTING_CACHE[key] = (time.monotonic(), ttl, items)
-    return items
+# the collection rather than the local cache. That is why this path lists with
+# cache=True while the download paths do not — noticing what changed upstream is
+# their job. How long a cached listing stays valid is derived from what the walk
+# cost, which only the fetcher can measure, so it lives there (see
+# foehn.fetch._LISTING_TTL_FACTOR).
 
 
 # A GRIB2 forecast filename carries its model run as a bare YYYYMMDDHHMM stamp
@@ -243,6 +210,8 @@ def _ensure_grid_files(
     suffixes: tuple[str, ...] = (".nc",),
     match: str | None = None,
     max_files: int | None = None,
+    *,
+    fetcher: Fetcher,
 ) -> list[Path]:
     """Return local grid files for a collection, downloading them if absent.
 
@@ -263,18 +232,12 @@ def _ensure_grid_files(
     out_dir = bronze_dir / collection_key
     local = sorted(f for s in suffixes for f in out_dir.glob(f"*{s}"))
 
-    # Lazy import to avoid a hard dependency on requests at module import time
-    # for callers that only touch the registry helpers.
-    import requests
-
-    from foehn.client import DEFAULT_WORKERS, _download_binary, _thread_local_session
-
     sfx = "/".join(suffixes)
     collection_id = COLLECTIONS[collection_key]
     datetime_filter = _run_datetime_filter(collection_key, match)
     try:
-        items = _cached_collection_items(collection_id, datetime_filter)
-    except requests.exceptions.RequestException as exc:
+        items = fetcher.items(collection_id, cache=True, datetime_filter=datetime_filter)
+    except FetchError as exc:
         cached = [f for f in local if match is None or match in f.name]
         if cached:
             # Offline: can't check the collection, but still enforce the cap on
@@ -296,7 +259,7 @@ def _ensure_grid_files(
         # report a file as missing on the strength of an optimisation, fall back
         # to the full walk — slow, but it is exactly what happened before.
         logger.debug("No %s assets for %r under datetime=%s; retrying unfiltered", sfx, match, datetime_filter)
-        items = _cached_collection_items(collection_id)
+        items = fetcher.items(collection_id, cache=True)
         hrefs, other_exts = _grid_asset_hrefs(items, suffixes, match)
 
     if not hrefs:
@@ -315,7 +278,6 @@ def _ensure_grid_files(
     # keys, and two workers streaming into the same ``.part`` would corrupt it.
     targets: dict[Path, str] = {}
     for href in hrefs:
-        validate_download_href(href)
         filepath = out_dir / asset_filename(href)
         paths.append(filepath)
         if not filepath.exists() and filepath not in targets:
@@ -325,10 +287,8 @@ def _ensure_grid_files(
         # Fetch concurrently, like the CSV path. Serial downloads made the network
         # the dominant cost of building a cube: stack="auto" admits up to
         # _HYPERCUBE_MAX_FILES files, each previously fetched one after another.
-        get_session = _thread_local_session()
-
         def _fetch(filepath: Path, href: str) -> None:
-            _download_binary(get_session(), href, filepath)
+            fetcher.stream(href, filepath)
 
         with ThreadPoolExecutor(max_workers=min(DEFAULT_WORKERS, len(targets))) as pool:
             futures = [pool.submit(_fetch, fp, href) for fp, href in targets.items()]
@@ -493,7 +453,7 @@ def _open_odim_composite(xr, path: Path):
 _ICON_COORDS_CACHE: dict[tuple[str, str], tuple] = {}
 
 
-def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None:
+def _ensure_constants_file(collection_key: str, bronze_dir: Path, *, fetcher: Fetcher) -> Path | None:
     """Locate (or download) a GRIB2 collection's horizontal-constants file.
 
     Returns the local path, or None if the collection exposes no such asset.
@@ -504,7 +464,7 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None
     if cached:
         return cached[0]
 
-    meta = get_collection_metadata(COLLECTIONS[collection_key])
+    meta = fetcher.collection(COLLECTIONS[collection_key])
     href = next(
         (a.get("href", "") for k, a in meta.get("assets", {}).items() if "horizontal_constants" in k.lower()),
         "",
@@ -512,18 +472,14 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path) -> Path | None
     if not href:
         return None
 
-    from foehn.client import _download_binary, _retry_session
-
-    validate_download_href(href)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / asset_filename(href)
     if not path.exists():
-        with _retry_session() as session:
-            _download_binary(session, href, path)
+        fetcher.stream(href, path)
     return path
 
 
-def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path):
+def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path, *, fetcher: Fetcher):
     """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
 
     Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
@@ -536,7 +492,7 @@ def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path):
     import cfgrib
 
     lat = lon = None
-    path = _ensure_constants_file(collection_key, bronze_dir)
+    path = _ensure_constants_file(collection_key, bronze_dir, fetcher=fetcher)
     if path is not None:
         for ds in cfgrib.open_datasets(path, backend_kwargs={"indexpath": ""}):
             if "tlat" in ds.variables:
@@ -637,6 +593,7 @@ def open_dataset(
         ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
     """
     _validate_grid_dataset(dataset)
+    fetcher = default_fetcher()
     fmt = COLLECTION_META[dataset]["format"]
     reader = _GRID_READERS[fmt]
 
@@ -658,7 +615,7 @@ def open_dataset(
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     files = _ensure_grid_files(
-        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=reader["max_files"]
+        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=reader["max_files"], fetcher=fetcher
     )
 
     if reader.get("reader") == "odim":
@@ -683,7 +640,7 @@ def open_dataset(
         # unavailable (e.g. offline) rather than failing an otherwise-good read.
         if fmt == "GRIB2" and "values" in ds.dims and "lat" not in ds.coords:
             try:
-                lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir)
+                lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir, fetcher=fetcher)
                 if lat is not None and lon is not None and lat.size == ds.sizes["values"]:
                     ds = ds.assign_coords(
                         lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
@@ -741,7 +698,7 @@ def _write_zarr(ds, store: Path, mode: str, append_dim: str | None = None) -> No
             ds.to_zarr(store, mode=mode)
 
 
-def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -> Path:
+def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode, fetcher) -> Path:
     """Stack a matched set of radar composites into one ``(time, y, x)`` Zarr cube.
 
     Written incrementally — one timestep appended at a time along ``time`` — so
@@ -765,7 +722,7 @@ def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -
 
     root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     # No single-file cap here: stacking deliberately wants the whole matched set.
-    files = _ensure_grid_files(dataset, root / "bronze", suffixes=reader["suffixes"], match=match)
+    files = _ensure_grid_files(dataset, root / "bronze", suffixes=reader["suffixes"], match=match, fetcher=fetcher)
     store_path = _resolve_store(dataset, match, data_dir, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -792,7 +749,7 @@ def _to_zarr_stacked(dataset, fmt, *, variables, match, data_dir, store, mode) -
 _HYPERCUBE_MAX_FILES = 1000
 
 
-def _to_zarr_hypercube(dataset, fmt, *, variables, match, data_dir, store, mode) -> Path:
+def _to_zarr_hypercube(dataset, fmt, *, variables, match, data_dir, store, mode, fetcher) -> Path:
     """Combine matched GRIB2 files into one N-D cube over their varying axes.
 
     Each ICON/KENDA file is a single (variable, member, lead time, reference time)
@@ -820,7 +777,7 @@ def _to_zarr_hypercube(dataset, fmt, *, variables, match, data_dir, store, mode)
     root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = root / "bronze"
     files = _ensure_grid_files(
-        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=_HYPERCUBE_MAX_FILES
+        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=_HYPERCUBE_MAX_FILES, fetcher=fetcher
     )
     store_path = _resolve_store(dataset, match, data_dir, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -847,7 +804,7 @@ def _to_zarr_hypercube(dataset, fmt, *, variables, match, data_dir, store, mode)
 
     if "values" in cube.dims and "lat" not in cube.coords:
         try:
-            lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir)
+            lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir, fetcher=fetcher)
             if lat is not None and lon is not None and lat.size == cube.sizes["values"]:
                 cube = cube.assign_coords(
                     lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
@@ -924,7 +881,14 @@ def to_zarr(
             raise ValueError(f"stack={stack!r} is not supported; use 'auto' (any gridded format) or 'time' (radar).")
         if rechunk:
             raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
-        kwargs = {"variables": variables, "match": match, "data_dir": data_dir, "store": store, "mode": mode}
+        kwargs = {
+            "variables": variables,
+            "match": match,
+            "data_dir": data_dir,
+            "store": store,
+            "mode": mode,
+            "fetcher": default_fetcher(),
+        }
         # "auto" routes to each format's best cube builder; "time" is the explicit radar path.
         if stack == "time" or fmt == "HDF5":
             return _to_zarr_stacked(dataset, fmt, **kwargs)  # radar: incremental (time, y, x)

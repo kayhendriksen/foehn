@@ -4,35 +4,24 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 import zipfile
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-from foehn._urls import asset_filename, clean_href, validate_download_href
+from foehn._urls import asset_filename, clean_href
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
     COLLECTIONS,
     FORECAST_CSV_COLLECTIONS,
-    STAC_API_BASE,
     forecast_run_from_filename,
     time_slice_from_filename,
 )
 from foehn.convert import utf8_meteoswiss_csv
-from foehn.stac import get_collection_items, get_collection_metadata
+from foehn.fetch import DEFAULT_WORKERS, Fetcher
 
 logger = logging.getLogger(__name__)
-
-# Default concurrency for per-asset downloads. Kept modest to stay polite on the
-# MeteoSwiss/CSCS CDNs — they handle bursts fine but we don't need to hammer them.
-DEFAULT_WORKERS = 8
 
 
 @dataclass
@@ -54,58 +43,6 @@ class DownloadResult:
     skipped: int = 0
     failed: int = 0
     filenames: list[str] = field(default_factory=list)
-
-
-def _retry_session(
-    retries: int = 3,
-    backoff_factor: float = 1.0,
-    status_forcelist: tuple[int, ...] = (429, 500, 502, 503, 504),
-    pool_maxsize: int = DEFAULT_WORKERS,
-) -> requests.Session:
-    """Return a requests session with automatic retry on transient errors."""
-    session = requests.Session()
-    retry = Retry(
-        total=retries,
-        backoff_factor=backoff_factor,
-        status_forcelist=status_forcelist,
-        allowed_methods=["GET"],
-        raise_on_status=False,
-        connect=retries,
-        read=retries,
-    )
-    adapter = HTTPAdapter(
-        max_retries=retry,
-        pool_connections=pool_maxsize,
-        pool_maxsize=pool_maxsize,
-    )
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-def _thread_local_session(factory: Callable[[], requests.Session] | None = None) -> Callable[[], requests.Session]:
-    """Return a getter that lazily creates one ``requests.Session`` per worker thread.
-
-    ``requests.Session`` is not fully thread-safe (cookie jar, headers), so any
-    parallel download path should use this rather than sharing a single session
-    across a ``ThreadPoolExecutor``. Sessions live for the lifetime of the
-    returned closure — when the caller drops the getter, the per-thread sessions
-    are garbage-collected with it.
-
-    ``factory`` overrides how a session is built. ``foehn.api`` passes one that
-    resolves ``_retry_session`` from its own module namespace, which is what lets
-    it share this implementation while keeping the patch seam tests rely on at
-    ``foehn.api._retry_session``.
-    """
-    local = threading.local()
-    build = factory if factory is not None else (lambda: _retry_session(pool_maxsize=1))
-
-    def get() -> requests.Session:
-        if not hasattr(local, "session"):
-            local.session = build()
-        return local.session
-
-    return get
 
 
 def _dedupe_by_destination(pairs: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
@@ -183,7 +120,7 @@ def save_last_run(data_dir: Path):
 
 
 def _download_csv(
-    session: requests.Session,
+    fetcher: Fetcher,
     href: str,
     filepath: Path,
     old_etag: str | None,
@@ -191,19 +128,19 @@ def _download_csv(
     """Fetch a single CSV, re-encode to UTF-8, and write it to disk.
 
     Returns (status, href, filename, new_etag) where status is "downloaded" or "skipped".
+    Only sends the stored ETag when the local file is still there — otherwise a
+    304 would report "skipped" over a file that no longer exists.
     """
-    validate_download_href(href)
     filename = filepath.name
-    headers = {"If-None-Match": old_etag} if old_etag and filepath.exists() else {}
-    resp = session.get(href, headers=headers, timeout=60)
-    if resp.status_code == 304:
+    etag = old_etag if old_etag and filepath.exists() else None
+    fetched = fetcher.get(href, etag=etag, timeout=60)
+    if fetched.not_modified:
         return ("skipped", href, filename, None)
-    resp.raise_for_status()
     # MeteoSwiss CSVs are usually UTF-8 but some are Windows-1252; normalise to UTF-8.
     # Bytes in, bytes out — decoding to str here only to re-encode on write would
     # hold three copies of a multi-hundred-MB CSV at once, times ``workers``.
-    _atomic_write_bytes(filepath, utf8_meteoswiss_csv(resp.content))
-    return ("downloaded", href, filename, resp.headers.get("ETag"))
+    _atomic_write_bytes(filepath, utf8_meteoswiss_csv(fetched.body))
+    return ("downloaded", href, filename, fetched.etag)
 
 
 def download_collection(
@@ -213,6 +150,8 @@ def download_collection(
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
     state_dir: Path | None = None,
+    *,
+    fetcher: Fetcher,
 ) -> DownloadResult:
     """Download CSVs for a collection.
 
@@ -246,7 +185,7 @@ def download_collection(
     logger.info("Output dir: %s", out_dir)
     logger.info("%s", "=" * 60)
 
-    items = get_collection_items(collection_id)
+    items = fetcher.items(collection_id)
     logger.info("  Found %d items", len(items))
 
     # Filter to items updated since last run
@@ -298,10 +237,8 @@ def download_collection(
 
     logger.info("  %d CSV files to process", len(csv_assets))
 
-    get_session = _thread_local_session()
-
     def _do_csv(href: str, filepath: Path, etag: str | None) -> tuple[str, str, str, str | None]:
-        return _download_csv(get_session(), href, filepath, etag)
+        return _download_csv(fetcher, href, filepath, etag)
 
     total = len(csv_assets)
     downloaded = 0
@@ -363,13 +300,15 @@ def download_collection(
 # --- Metadata downloads ---
 
 
-def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS) -> DownloadResult:
+def download_metadata(
+    collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS, *, fetcher: Fetcher
+) -> DownloadResult:
     """Download collection-level metadata files (stations, parameters, inventory)."""
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    coll = get_collection_metadata(collection_id)
+    coll = fetcher.collection(collection_id)
     assets = coll.get("assets", {})
     if not assets:
         return DownloadResult()
@@ -384,10 +323,8 @@ def download_metadata(collection_key: str, output_dir: Path, workers: int = DEFA
     if not targets:
         return DownloadResult()
 
-    get_session = _thread_local_session()
-
     def _do_csv(href: str, filepath: Path) -> tuple[str, str, str, str | None]:
-        return _download_csv(get_session(), href, filepath, None)
+        return _download_csv(fetcher, href, filepath, None)
 
     downloaded = 0
     failed = 0
@@ -437,34 +374,13 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
     return remote_dt > local_dt
 
 
-def _download_binary(session: requests.Session, href: str, filepath: Path, timeout: int = 120) -> str:
-    """Stream a binary asset to disk atomically. Returns the filename.
-
-    Streams into a sibling ``.part`` file and only ``Path.replace``s it onto the
-    final path once the body is fully written. A timeout or connection drop
-    mid-stream therefore leaves no file at ``filepath`` — so the next run's
-    existence/mtime check won't mistake a truncated download for a complete one.
-    """
-    validate_download_href(href)
-    tmp = filepath.with_name(filepath.name + ".part")
-    try:
-        with session.get(href, stream=True, timeout=timeout) as resp:
-            resp.raise_for_status()
-            with tmp.open("wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    f.write(chunk)
-        tmp.replace(filepath)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    return filepath.name
-
-
 def download_grib2(
     collection_key: str,
     output_dir: Path,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
+    *,
+    fetcher: Fetcher,
 ) -> DownloadResult:
     """Download GRIB2/HDF5 binary files (latest page only)."""
     collection_id = COLLECTIONS[collection_key]
@@ -476,12 +392,9 @@ def download_grib2(
     logger.info("Output dir: %s", out_dir)
     logger.info("%s", "=" * 60)
 
-    # Only fetch first page — forecast/radar data is ephemeral
-    url = f"{STAC_API_BASE}/collections/{collection_id}/items?limit=100"
-    with _retry_session() as session:
-        resp = session.get(url, timeout=30)
-        resp.raise_for_status()
-        items = resp.json().get("features", [])
+    # Only the newest page — forecast/radar data is ephemeral and these
+    # collections hold thousands of items.
+    items = fetcher.items(collection_id, max_items=100)
     logger.info("  Found %d items (latest page)", len(items))
 
     if since:
@@ -515,10 +428,9 @@ def download_grib2(
         ]
     )
 
-    get_session = _thread_local_session()
-
     def _do_binary(href: str, filepath: Path) -> str:
-        return _download_binary(get_session(), href, filepath)
+        fetcher.stream(href, filepath)
+        return filepath.name
 
     total = len(to_fetch)
     downloaded = 0
@@ -558,6 +470,8 @@ def download_netcdf(
     output_dir: Path,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
+    *,
+    fetcher: Fetcher,
 ) -> DownloadResult:
     """Download NetCDF, GeoTIFF, and ZIP files for spatial/static collections.
 
@@ -576,7 +490,7 @@ def download_netcdf(
     logger.info("Output dir: %s", out_dir)
     logger.info("%s", "=" * 60)
 
-    items = get_collection_items(collection_id, require_csv=False)
+    items = fetcher.items(collection_id)
     logger.info("  Found %d items", len(items))
 
     if since:
@@ -601,10 +515,9 @@ def download_netcdf(
             targets.append((href, filepath))
     targets = _dedupe_by_destination(targets)
 
-    get_session = _thread_local_session()
-
     def _do_binary(href: str, filepath: Path) -> str:
-        return _download_binary(get_session(), href, filepath)
+        fetcher.stream(href, filepath)
+        return filepath.name
 
     downloaded = 0
     failed = 0
@@ -676,7 +589,7 @@ def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
 # --- C6 climate normals ZIP ---
 
 
-def download_climate_normals_zip(output_dir: Path, force: bool = False) -> DownloadResult:
+def download_climate_normals_zip(output_dir: Path, force: bool = False, *, fetcher: Fetcher) -> DownloadResult:
     """Download C6 climate normals ZIP from opendata.swiss and extract."""
     out_dir = output_dir / "climate_normals"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -692,8 +605,7 @@ def download_climate_normals_zip(output_dir: Path, force: bool = False) -> Downl
     logger.info("Climate normals (C6): downloading from opendata.swiss")
     logger.info("%s", "=" * 60)
 
-    with _retry_session() as session:
-        _download_binary(session, CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
+    fetcher.stream(CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
     logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)
 
     extracted = _safe_extract_zip(filepath, out_dir)
@@ -709,6 +621,8 @@ def download_climate_scenarios_indoor(
     output_dir: Path,
     collection_key: str = "climate_scenarios_indoor",
     force: bool = False,
+    *,
+    fetcher: Fetcher,
 ) -> DownloadResult:
     """Download and extract the indoor climate scenarios ZIP.
 
@@ -725,7 +639,7 @@ def download_climate_scenarios_indoor(
         logger.info("  %s already extracted — skipping", collection_key)
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
-    items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    items = fetcher.items(collection_id)
     zip_href = next(
         (
             asset_info.get("href", "")
@@ -744,8 +658,7 @@ def download_climate_scenarios_indoor(
     logger.info("%s", "=" * 60)
 
     zip_path = out_dir / asset_filename(zip_href)
-    with _retry_session() as session:
-        _download_binary(session, zip_href, zip_path, timeout=300)
+    fetcher.stream(zip_href, zip_path, timeout=300)
     logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)
 
     extracted = _safe_extract_zip(zip_path, out_dir)

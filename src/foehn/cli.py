@@ -34,6 +34,7 @@ from foehn.convert import (
     convert_climate_scenarios_to_parquet,
     convert_to_parquet,
 )
+from foehn.fetch import default_fetcher
 
 
 def _resolve_data_dir(args_data_dir: Path | None) -> Path:
@@ -139,23 +140,26 @@ def cmd_download(args: argparse.Namespace) -> None:
     print(f"Time slices: {time_slices}", flush=True)
 
     datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
+    fetcher = default_fetcher()
 
     workers = args.workers
     failures = 0
     download_failures = 0
     for ds in datasets:
         if ds in GRIB2_COLLECTIONS:
-            download_failures += download_grib2(ds, bronze_dir, since=since, workers=workers).failed
+            download_failures += download_grib2(ds, bronze_dir, since=since, workers=workers, fetcher=fetcher).failed
         elif ds in NETCDF_COLLECTIONS:
-            download_failures += download_netcdf(ds, bronze_dir, since=since, workers=workers).failed
+            download_failures += download_netcdf(ds, bronze_dir, since=since, workers=workers, fetcher=fetcher).failed
         elif ds in CSV_ZIP_COLLECTIONS:
-            download_failures += download_climate_scenarios_indoor(bronze_dir, ds, force=full_refresh).failed
+            download_failures += download_climate_scenarios_indoor(
+                bronze_dir, ds, force=full_refresh, fetcher=fetcher
+            ).failed
             if not args.no_parquet:
                 failures += convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
         else:
-            download_failures += download_metadata(ds, bronze_dir, workers=workers).failed
+            download_failures += download_metadata(ds, bronze_dir, workers=workers, fetcher=fetcher).failed
             download_failures += download_collection(
-                ds, bronze_dir, data_types=time_slices, since=since, workers=workers
+                ds, bronze_dir, data_types=time_slices, since=since, workers=workers, fetcher=fetcher
             ).failed
             if not args.no_parquet:
                 if ds in PREAMBLE_CSV_COLLECTIONS:
@@ -165,7 +169,7 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     # C6 climate normals (ZIP from opendata.swiss, not STAC)
     if not args.datasets:
-        download_climate_normals_zip(bronze_dir, force=full_refresh)
+        download_climate_normals_zip(bronze_dir, force=full_refresh, fetcher=fetcher)
         if not args.no_parquet:
             failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
 

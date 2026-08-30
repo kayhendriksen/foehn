@@ -8,13 +8,10 @@ from pathlib import Path
 
 import polars as pl
 
-from foehn._urls import asset_filename, clean_href, validate_download_href
+from foehn._urls import asset_filename, clean_href
 from foehn.client import (
-    DEFAULT_WORKERS,
     DownloadResult,
     _check_zip_size,
-    _retry_session,
-    _thread_local_session,
     download_climate_scenarios_indoor,
     download_collection,
     download_grib2,
@@ -46,8 +43,8 @@ from foehn.convert import (
     parse_indoor_filename,
     utf8_meteoswiss_csv,
 )
+from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import open_dataset, to_zarr
-from foehn.stac import get_collection_items, get_collection_metadata
 
 __all__ = [
     "download",
@@ -109,19 +106,22 @@ def download(
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     bronze_dir.mkdir(parents=True, exist_ok=True)
+    fetcher = default_fetcher()
 
     # Binary/grid datasets have no Parquet path — download the raw assets so the
     # Python API mirrors the CLI's --grids behaviour (and open_dataset/to_zarr).
     if dataset in GRIB2_COLLECTIONS:
-        return download_grib2(dataset, bronze_dir, since=since, workers=workers)
+        return download_grib2(dataset, bronze_dir, since=since, workers=workers, fetcher=fetcher)
     if dataset in NETCDF_COLLECTIONS:
-        return download_netcdf(dataset, bronze_dir, since=since, workers=workers)
+        return download_netcdf(dataset, bronze_dir, since=since, workers=workers, fetcher=fetcher)
 
     if dataset in CSV_ZIP_COLLECTIONS:
-        return download_climate_scenarios_indoor(bronze_dir, dataset, force=force)
+        return download_climate_scenarios_indoor(bronze_dir, dataset, force=force, fetcher=fetcher)
 
-    meta = download_metadata(dataset, bronze_dir, workers=workers)
-    coll = download_collection(dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers)
+    meta = download_metadata(dataset, bronze_dir, workers=workers, fetcher=fetcher)
+    coll = download_collection(
+        dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers, fetcher=fetcher
+    )
 
     return DownloadResult(
         total_assets=meta.total_assets + coll.total_assets,
@@ -180,16 +180,13 @@ def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
     collection_id = COLLECTIONS[dataset]
+    fetcher = default_fetcher()
 
-    coll = get_collection_metadata(collection_id)
+    coll = fetcher.collection(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
         if clean_href(href).endswith(".csv") and suffix in href:
-            validate_download_href(href)
-            with _retry_session() as session:
-                resp = session.get(href, timeout=60)
-                resp.raise_for_status()
-            content = decode_meteoswiss_csv(resp.content)
+            content = decode_meteoswiss_csv(fetcher.get(href, timeout=60).body)
             return pl.read_csv(content.encode("utf-8"), separator=";")
 
     raise ValueError(f"No {suffix} metadata found for dataset {dataset!r}.")
@@ -377,7 +374,8 @@ def _load_indoor(
     import zipfile
 
     collection_id = COLLECTIONS[dataset]
-    items = get_collection_items(collection_id, require_csv=False, verbose=False)
+    fetcher = default_fetcher()
+    items = fetcher.items(collection_id)
     zip_href = next(
         (
             asset_info.get("href", "")
@@ -394,13 +392,10 @@ def _load_indoor(
     if station is not None:
         station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
 
-    validate_download_href(zip_href)
-    with _retry_session() as session:
-        resp = session.get(zip_href, timeout=300)
-        resp.raise_for_status()
+    archive = fetcher.get(zip_href, timeout=300).body
 
     frames: list[pl.DataFrame] = []
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         # Everything below is parsed in memory — refuse a decompression bomb.
         _check_zip_size(zf, zip_href.split("/")[-1])
         for name in zf.namelist():
@@ -451,12 +446,13 @@ def _load_climate_scenarios(
     string ``date`` column.
     """
     collection_id = COLLECTIONS[dataset]
+    fetcher = default_fetcher()
 
     station_filter: set[str] | None = None
     if station is not None:
         station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
 
-    items = get_collection_items(collection_id, verbose=False)
+    items = fetcher.items(collection_id)
     if station_filter is not None:
         items = [item for item in items if item.get("id", "").lower() in station_filter]
 
@@ -471,16 +467,10 @@ def _load_climate_scenarios(
     if not hrefs:
         raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
 
-    # One session per worker thread — requests.Session is not fully thread-safe.
-    # The factory closes over this module's _retry_session, so the seam stays
-    # patchable at foehn.api while the implementation is shared with the client.
-    get_session = _thread_local_session(lambda: _retry_session(pool_maxsize=1))
-
+    # The fetcher is safe to share across the pool: it hands each worker thread
+    # its own session.
     def _fetch(href: str) -> pl.DataFrame:
-        validate_download_href(href)
-        resp = get_session().get(href, timeout=120)
-        resp.raise_for_status()
-        return parse_climate_scenarios_csv(resp.content, asset_filename(href))
+        return parse_climate_scenarios_csv(fetcher.get(href, timeout=120).body, asset_filename(href))
 
     if len(hrefs) == 1 or workers <= 1:
         frames = [_fetch(h) for h in hrefs]
@@ -641,22 +631,19 @@ def load(
             freq_filter = {f.lower() for f in frequency}
 
     collection_id = COLLECTIONS[dataset]
+    fetcher = default_fetcher()
 
     # 1. Fetch metadata types for schema inference.
     metadata_types: dict[str, type[pl.DataType]] = {}
-    coll = get_collection_metadata(collection_id)
+    coll = fetcher.collection(collection_id)
     for asset_info in coll.get("assets", {}).values():
         href = asset_info.get("href", "")
         if clean_href(href).endswith(".csv") and "_meta_parameters" in href:
-            validate_download_href(href)
-            with _retry_session() as session:
-                resp = session.get(href, timeout=60)
-                resp.raise_for_status()
-            metadata_types = _parse_metadata_types(decode_meteoswiss_csv(resp.content))
+            metadata_types = _parse_metadata_types(decode_meteoswiss_csv(fetcher.get(href, timeout=60).body))
             break
 
     # 2. Get STAC items and collect matching CSV URLs.
-    items = get_collection_items(collection_id, verbose=False)
+    items = fetcher.items(collection_id)
 
     # Filter items by station (item id = station abbreviation).
     if station_filter is not None:
@@ -703,10 +690,8 @@ def load(
         filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"
         raise ValueError(f"No CSV files found for {dataset!r} with {filters}.")
 
-    # 3. Download and parse each CSV concurrently, one session per worker thread
-    # (requests.Session is not fully thread-safe). Sessions are scoped to this
-    # call — garbage-collected when the function returns. The factory closes over
-    # this module's _retry_session so it stays patchable at foehn.api.
+    # 3. Download and parse each CSV concurrently. The fetcher is safe to share
+    # across the pool: it hands each worker thread its own session.
     # With an explicit ``columns=``, tell the parser up front instead of parsing all
     # ~42 columns of every station file and selecting afterwards. The frame retained
     # per station drops by an order of magnitude, which is what bounds peak memory
@@ -720,15 +705,11 @@ def load(
         if dataset == "forecast_local":
             wanted_columns.add("Date")  # reference_timestamp is derived from it
 
-    get_session = _thread_local_session(lambda: _retry_session(pool_maxsize=1))
-
     def _fetch(href: str) -> pl.DataFrame:
-        validate_download_href(href)
-        resp = get_session().get(href, timeout=60)
-        resp.raise_for_status()
         # Zero-copy when the payload is already UTF-8 (the usual case): these are
         # the big files, and ``workers`` of them are in flight at once.
-        frame = parse_csv_bytes(utf8_meteoswiss_csv(resp.content), metadata_types, wanted_columns=wanted_columns)
+        body = fetcher.get(href, timeout=60).body
+        frame = parse_csv_bytes(utf8_meteoswiss_csv(body), metadata_types, wanted_columns=wanted_columns)
         # Drop the rows this call can never return *before* they reach the
         # concat. Every frame is otherwise held in full until the whole matched
         # set is materialised, so a narrow year= over many stations peaked at the

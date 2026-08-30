@@ -1,0 +1,131 @@
+# foehn
+
+A Python toolkit for MeteoSwiss Open Government Data: it downloads what MeteoSwiss
+publishes, and hands it back as Polars DataFrames, Parquet, xarray Datasets or Zarr.
+This is the language foehn uses for MeteoSwiss's concepts and for its own.
+
+## Language
+
+### Datasets
+
+**Dataset**:
+foehn's short key for one body of MeteoSwiss data — `smn`, `radar_precip`,
+`climate_scenarios`. The unit every public function takes.
+_Avoid_: collection (that is the STAC id), source, feed, product
+
+**Collection**:
+The STAC collection a **Dataset** maps to, e.g. `ch.meteoschweiz.ogd-smn`. One
+**Dataset** is exactly one **Collection**.
+_Avoid_: dataset, endpoint
+
+**Dataset kind**:
+Which pipeline handles a **Dataset** — its download path, convert path and load
+path. Seven values, listed below. Internal to foehn, and deliberately distinct
+from **Format**.
+_Avoid_: type, format, category, class
+
+**Format**:
+The wire format of a **Dataset**'s files — `CSV`, `NetCDF`, `GRIB2`, `HDF5`.
+Public: it appears in `list_datasets()` and tells a caller whether they need the
+`foehn[grids]` extra. Several **Dataset kinds** can share one **Format**.
+_Avoid_: kind, type
+
+**Category**:
+MeteoSwiss's own A–E classification of its data (A ground-based, C climate,
+D radar, E forecast). Public, and theirs — foehn reports it but never routes on it.
+_Avoid_: kind, group, class
+
+### The seven dataset kinds
+
+**Standard CSV** (10 datasets):
+Per-station CSV assets split by **Time slice** and **Granularity**. The main path:
+`smn`, `nbcn`, `pollen`, and the rest of category A plus C1/C2.
+
+**Preamble CSV** (`climate_scenarios`):
+CSV carrying a `KEY;VALUE` metadata preamble before the real `DATE;<model>;…`
+header, on nominal 30-year dates rather than calendar dates.
+
+**Archive CSV** (`climate_scenarios_indoor`):
+A single ZIP of per-station CSVs rather than per-station STAC assets.
+_Avoid_: zip CSV — the archive-ness is what routes, not the compression.
+
+**Forecast CSV** (`forecast_local`):
+Point-forecast CSVs named by **Forecast run**, with no **Time slice** and no
+`reference_timestamp` column of their own.
+
+**NetCDF grid** (5 datasets):
+Static gridded climate analyses, normals and scenarios. Combines across files.
+
+**GRIB2 grid** (3 datasets):
+ICON-CH1/CH2 forecasts and KENDA analysis, on an unstructured `values` grid.
+One field per file.
+
+**Radar grid** (`radar_precip`, `radar_hail`):
+ODIM-H5 Cartesian composites, one per timestep.
+_Avoid_: HDF5 grid, GRIB2 collection — lumping radar with GRIB2 was the original
+routing mistake.
+
+### Assets
+
+**Item**:
+One STAC entry inside a **Collection**. What an item *is* varies by **Dataset
+kind**: a station for **Standard CSV**, a whole day of runs for **Forecast CSV**.
+
+**Asset**:
+One downloadable file, hanging off an **Item** or off the **Collection** itself.
+Collection-level assets carry metadata (parameters, stations, inventory);
+item-level assets carry the data.
+
+**Time slice**:
+Which span of a series an **Asset** holds: `historical` (start of record to the
+end of last year), `recent` (this year to yesterday), `now` (last ~24h). Some
+**Datasets** have none.
+_Avoid_: data type, period, range
+
+**Granularity**:
+The aggregation interval of an **Asset**: `t` (10-minute), `h`, `d`, `m`, `y`.
+MeteoSwiss's word, and foehn's. The public parameter is spelled `frequency` for
+backwards compatibility; prefer granularity everywhere else.
+_Avoid_: resolution, interval
+
+**Forecast run**:
+The `YYYYMMDDHHMM` issue time embedded in a forecast **Asset**'s filename — when
+the forecast was made. Sorts lexicographically, so the newest run is `max()`.
+_Avoid_: reference timestamp, forecast time
+
+**Reference timestamp**:
+The timestamp of a measurement or of a forecast step's interval, inside the file.
+Not the **Forecast run**.
+
+### Storage and transport
+
+**Bronze**:
+The local cache of raw downloaded files, at `data_dir/bronze/<dataset>/`. What
+`download()` writes and what the grid readers read from.
+_Avoid_: raw, landing (the Databricks ingest script's word for the same place)
+
+**Fetcher**:
+The module that owns every HTTP call foehn makes to MeteoSwiss: STAC listing and
+metadata, and file downloads. Retry policy, per-thread sessions, URL validation
+and pagination live behind it.
+_Avoid_: client, session, transport
+
+## Relationships
+
+- A **Dataset** maps to exactly one **Collection** and has exactly one **Dataset kind**.
+- A **Dataset kind** determines a **Format**; a **Format** does not determine a **Dataset kind**.
+- A **Collection** holds many **Items**; an **Item** holds many **Assets**.
+- A **Standard CSV** **Asset** is identified by its station, **Granularity** and **Time slice**.
+- A **Forecast CSV** **Asset** is identified by its **Forecast run**.
+- Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
+
+## Flagged ambiguities
+
+- "Collection" was used for both foehn's short key and the STAC id — including in
+  the names `GRIB2_COLLECTIONS`, `NETCDF_COLLECTIONS` and friends, which are keyed
+  by **Dataset**. Resolved: the short key is a **Dataset**; the STAC id is a
+  **Collection**. Those sets are superseded by **Dataset kind**.
+- `GRIB2_COLLECTIONS` contained the two **Radar grid** datasets, whose **Format**
+  is HDF5. Resolved: **Radar grid** is its own **Dataset kind**.
+- "Frequency" and "granularity" both refer to the aggregation interval. Resolved:
+  the concept is **Granularity**; `frequency` survives only as a public parameter name.
