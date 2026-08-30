@@ -466,6 +466,12 @@ CLIMATE_NORMALS_ZIP_URL = "https://data.geo.admin.ch/ch.meteoschweiz.klima/normw
 # CSV assets (ogd-{key}_{station}_{granularity}_{timeslice}.csv).
 TIME_SLICES = frozenset({"historical", "recent", "now"})
 
+# The granularity segment's vocabulary — the ``_t``/``_h``/``_d``/``_m``/``_y``
+# documented at the top of this module. Which of them a given dataset actually
+# has is ``COLLECTION_META[...]["frequencies"]``; this is the whole alphabet, and
+# the single source for it (the MCP layer used to carry its own copy).
+GRANULARITIES = frozenset({"t", "h", "d", "m", "y"})
+
 
 # MeteoSwiss chunks the high-frequency historical series by decade, so the slice
 # is not always the trailing segment: ``ogd-smn_ber_t_historical_2000-2009.csv``.

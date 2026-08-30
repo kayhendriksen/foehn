@@ -323,7 +323,10 @@ def test_load_prints_dataframe(capsys):
     fake_df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", ["foehn", "load", "smn"]):
         main()
-    mock_load.assert_called_once_with("smn")
+    mock_load.assert_called_once()
+    assert mock_load.call_args.args == ("smn",)
+    # Nothing was asked for, so every filter goes across as "no filter".
+    assert all(v is None for k, v in mock_load.call_args.kwargs.items() if k != "workers")
     out = capsys.readouterr().out
     assert "3 rows x 2 columns" in out
 
@@ -333,7 +336,11 @@ def test_load_with_filters():
     argv = ["foehn", "load", "smn", "--station", "BER", "--frequency", "d", "--time-slice", "recent", "-n", "5"]
     with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
         main()
-    mock_load.assert_called_once_with("smn", station=["BER"], frequency=["d"], time_slice=["recent"])
+    mock_load.assert_called_once()
+    assert mock_load.call_args.args == ("smn",)
+    assert mock_load.call_args.kwargs | {"station": ["BER"], "frequency": ["d"], "time_slice": ["recent"]} == (
+        mock_load.call_args.kwargs
+    )
 
 
 def test_load_with_post_filters():
@@ -365,17 +372,23 @@ def test_load_with_post_filters():
     ]
     with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
         main()
-    mock_load.assert_called_once_with(
-        "smn",
-        station=["BER"],
-        frequency=["d"],
-        year=[2025],
-        month=[6, 7],
-        date_from="2025-06-01",
-        date_to="2025-08-31",
-        columns=["temp", "precip"],
-        drop_null="temp",
-        sort="desc",
+    mock_load.assert_called_once()
+    assert mock_load.call_args.args == ("smn",)
+    forwarded = mock_load.call_args.kwargs
+    assert (
+        forwarded
+        | {
+            "station": ["BER"],
+            "frequency": ["d"],
+            "year": [2025],
+            "month": [6, 7],
+            "date_from": "2025-06-01",
+            "date_to": "2025-08-31",
+            "columns": ["temp", "precip"],
+            "drop_null": "temp",
+            "sort": "desc",
+        }
+        == forwarded
     )
 
 
@@ -385,7 +398,9 @@ def test_load_forwards_limit_and_workers():
     argv = ["foehn", "load", "smn", "--limit", "5", "--workers", "3"]
     with patch("foehn.api.load", return_value=fake_df) as mock_load, patch("sys.argv", argv):
         main()
-    mock_load.assert_called_once_with("smn", limit=5, workers=3)
+    mock_load.assert_called_once()
+    assert mock_load.call_args.kwargs["limit"] == 5
+    assert mock_load.call_args.kwargs["workers"] == 3
 
 
 # --- metadata subcommand ---

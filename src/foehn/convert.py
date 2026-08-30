@@ -6,10 +6,14 @@ import codecs
 import io
 import logging
 import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import polars as pl
+
+from foehn.collections import COLLECTIONS, NO_GRANULARITY_KINDS, kind
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +81,15 @@ _DTYPE_MAP: dict[str, type[pl.DataType]] = {
 }
 
 
-def _parse_metadata_types(content: bytes | str) -> dict[str, type[pl.DataType]]:
+def parse_metadata_types(content: bytes | str) -> dict[str, type[pl.DataType]]:
     """Build a parameter→Polars dtype mapping from metadata CSV content.
 
     Works with both raw bytes (in-memory) and string content.
     Returns an empty dict if the expected columns are missing.
+
+    Public because the in-memory load path crosses this seam for it: schema
+    inference from a collection's ``_meta_parameters.csv`` is one rule, and a
+    name-mangled import was hiding that it is part of this module's interface.
     """
     try:
         if isinstance(content, str):
@@ -103,11 +111,14 @@ def _parse_metadata_types(content: bytes | str) -> dict[str, type[pl.DataType]]:
     return type_map
 
 
-def _load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
+def load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
     """Build a parameter→Polars dtype mapping from a *_meta_parameters.csv file.
 
     Returns an empty dict if no metadata file is found or if the expected
     columns (``parameter_shortname``, ``parameter_datatype``) are missing.
+
+    The file-based counterpart to :func:`parse_metadata_types`, and public for
+    the same reason: the Databricks ingest script reads it across this seam.
     """
     # sorted(): glob order is filesystem-dependent, so an unsorted [0] picks
     # arbitrarily when a collection ships more than one metadata file.
@@ -117,7 +128,7 @@ def _load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
 
     meta_path = meta_files[0]
     try:
-        return _parse_metadata_types(meta_path.read_bytes())
+        return parse_metadata_types(meta_path.read_bytes())
     except Exception:
         return {}
 
@@ -241,6 +252,68 @@ def _write_parquet_atomic(
         raise
 
 
+@dataclass(frozen=True)
+class ConversionGroup:
+    """One Parquet output and the source files it is built from."""
+
+    out_path: Path
+    sources: list[Path]
+
+
+ConvertOne = Callable[[ConversionGroup], int]
+"""Build ``group.out_path`` from ``group.sources``; return source-level failures tolerated.
+
+A converter that skips an unreadable source file and writes the rest reports how
+many it skipped, so the caller's exit code still reflects them. Raising instead
+means the whole group failed.
+"""
+
+
+def _is_up_to_date(group: ConversionGroup) -> bool:
+    """True when the output exists and is at least as new as every source."""
+    if not group.out_path.exists():
+        return False
+    out_mtime = group.out_path.stat().st_mtime
+    return all(f.stat().st_mtime <= out_mtime for f in group.sources)
+
+
+def run_conversions(groups: Iterable[ConversionGroup], convert_one: ConvertOne, *, label: str) -> int:
+    """Run each group's conversion, skipping outputs that are already current.
+
+    The four converters below each used to carry their own copy of this: the
+    mtime up-to-date check, the converted/skipped/failed counters, the per-group
+    try/except and the summary line. What actually differs between them is how a
+    frame is built — which is ``convert_one``, and stays with each kind.
+
+    Returns:
+        Total failures: groups that raised, plus the source-level failures the
+        conversions themselves reported. Zero means everything succeeded, which
+        is what gates ``_last_run.json``.
+    """
+    groups = list(groups)
+    if not groups:
+        return 0
+
+    logger.info("Converting %s to Parquet:", label)
+    converted = skipped = failed = 0
+    for group in sorted(groups, key=lambda g: g.out_path.name):
+        if _is_up_to_date(group):
+            skipped += 1
+            continue
+        group.out_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            failed += convert_one(group)
+        except Exception as e:
+            failed += 1
+            logger.warning("  %s (%d files)... FAIL: %s", group.out_path.name, len(group.sources), e)
+            continue
+        if group.out_path.exists():
+            converted += 1
+
+    logger.info("  Done: %d converted, %d skipped (up-to-date), %d failed", converted, skipped, failed)
+    return failed
+
+
 def add_forecast_local_timestamp(frame):
     """Add a parsed reference_timestamp from forecast_local's compact Date column.
 
@@ -270,8 +343,6 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     must agree with the Parquet converter on where the boundaries are — these
     are upstream naming rules, and two copies of them drift.
     """
-    from foehn.collections import COLLECTIONS, NO_GRANULARITY_KINDS, kind
-
     csv_files = [f for f in sorted(csv_dir.glob("*.csv")) if "_meta_" not in f.name]
     groups: dict[tuple[str, ...], list[Path]] = {}
 
@@ -297,6 +368,63 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     return groups
 
 
+def _group_out_name(collection_key: str, group_key: tuple[str, ...]) -> str:
+    """Output name for one group: smn_d_recent.parquet, smn_d.parquet, or smn.parquet."""
+    return f"{collection_key}_{'_'.join(group_key)}.parquet" if group_key else f"{collection_key}.parquet"
+
+
+def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[pl.DataType]]) -> ConvertOne:
+    """Build the per-group converter for standard CSV collections.
+
+    Stays streaming the whole way: on dtype-drift errors (Int inferred from the
+    first N rows but a later row carries a decimal), parse the column name out of
+    the polars error, force it to Float64, and retry. RSS stays bounded — the
+    alternative of materialising every CSV blew up the driver on historical
+    groups. The retry has to wrap the write, not just the scan: ``scan_csv`` is
+    lazy, so the schema error only surfaces when ``sink_parquet`` pulls the rows.
+    """
+
+    def convert_one(group: ConversionGroup) -> int:
+        overrides: dict[str, type[pl.DataType]] = dict(metadata_types or {})
+        recovered: list[str] = []
+        while True:
+            try:
+                lazy_frames = [
+                    pl.scan_csv(
+                        f,
+                        separator=";",
+                        try_parse_dates=True,
+                        schema_overrides=overrides or None,
+                        infer_schema_length=10_000,
+                    )
+                    for f in group.sources
+                ]
+                combined = pl.concat(lazy_frames, how="diagonal_relaxed")
+                if collection_key == "forecast_local":
+                    combined = add_forecast_local_timestamp(combined)
+                _write_parquet_atomic(combined, group.out_path)
+                break
+            except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
+                m = _COL_RE.search(str(e))
+                if not m:
+                    raise
+                col = m.group(1)
+                # If we already forced this column to Float64 and it still
+                # fails, we can't recover by widening dtype further.
+                if overrides.get(col) == pl.Float64:
+                    raise
+                overrides[col] = pl.Float64
+                recovered.append(col)
+        if recovered:
+            fixed = ", ".join(f"{c}→float" for c in recovered)
+            logger.info("  %s (%d files)... OK (%s)", group.out_path.name, len(group.sources), fixed)
+        else:
+            logger.info("  %s (%d files)... OK", group.out_path.name, len(group.sources))
+        return 0
+
+    return convert_one
+
+
 def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert all CSVs in a collection's bronze folder to combined Parquet files.
 
@@ -315,82 +443,17 @@ def convert_to_parquet(collection_key: str, bronze_dir: Path, parquet_dir: Path)
     """
     csv_dir = bronze_dir / collection_key
     out_dir = parquet_dir / collection_key
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    groups = group_csv_files(csv_dir, collection_key)
+    groups = [
+        ConversionGroup(out_dir / _group_out_name(collection_key, group_key), files)
+        for group_key, files in group_csv_files(csv_dir, collection_key).items()
+    ]
     if not groups:
         return 0
 
     # Load parameter type info from metadata once for the whole collection.
-    metadata_types = _load_metadata_types(csv_dir)
-
-    logger.info("Converting %s to Parquet:", collection_key)
-    converted = 0
-    skipped = 0
-    failed = 0
-    for group_key, files in sorted(groups.items()):
-        # Output name: smn_d_recent.parquet, smn_d.parquet, or smn.parquet
-        if group_key:
-            out_name = f"{collection_key}_{'_'.join(group_key)}.parquet"
-        else:
-            out_name = f"{collection_key}.parquet"
-        parquet_path = out_dir / out_name
-
-        # Skip if parquet is already newer than all CSVs in the group.
-        if parquet_path.exists():
-            parquet_mtime = parquet_path.stat().st_mtime
-            if all(f.stat().st_mtime <= parquet_mtime for f in files):
-                skipped += 1
-                continue
-
-        # Stay streaming the whole way: on dtype-drift errors (Int inferred from
-        # the first N rows but a later row carries a decimal), parse the column
-        # name out of the polars error, force it to Float64, and retry.  RSS
-        # stays bounded — the alternative of materialising every CSV blew up
-        # the driver on historical groups.
-        overrides: dict[str, type[pl.DataType]] = dict(metadata_types or {})
-        recovered: list[str] = []
-        try:
-            while True:
-                try:
-                    lazy_frames = [
-                        pl.scan_csv(
-                            f,
-                            separator=";",
-                            try_parse_dates=True,
-                            schema_overrides=overrides or None,
-                            infer_schema_length=10_000,
-                        )
-                        for f in files
-                    ]
-                    combined = pl.concat(lazy_frames, how="diagonal_relaxed")
-                    if collection_key == "forecast_local":
-                        combined = add_forecast_local_timestamp(combined)
-                    _write_parquet_atomic(combined, parquet_path)
-                    break
-                except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
-                    m = _COL_RE.search(str(e))
-                    if not m:
-                        raise
-                    col = m.group(1)
-                    # If we already forced this column to Float64 and it still
-                    # fails, we can't recover by widening dtype further.
-                    if overrides.get(col) == pl.Float64:
-                        raise
-                    overrides[col] = pl.Float64
-                    recovered.append(col)
-            converted += 1
-            if recovered:
-                fixed = ", ".join(f"{c}→float" for c in recovered)
-                logger.info("  %s (%d files)... OK (%s)", out_name, len(files), fixed)
-            else:
-                logger.info("  %s (%d files)... OK", out_name, len(files))
-        except Exception as e:
-            failed += 1
-            logger.warning("  %s (%d files)... FAIL: %s", out_name, len(files), e)
-
-    logger.info("  Done: %d converted, %d skipped (up-to-date), %d failed", converted, skipped, failed)
-    return failed
+    metadata_types = load_metadata_types(csv_dir)
+    return run_conversions(groups, _convert_standard_group(collection_key, metadata_types), label=collection_key)
 
 
 _INDOOR_TIME_COLS = ["time.yy", "time.mm", "time.dd", "time.hh"]
@@ -434,51 +497,38 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
     {station}_{period}_{scenario}_{variant}, which become columns alongside a
     synthesised reference_timestamp. All files are concatenated into one Parquet.
     """
-    csv_dir = bronze_dir / "climate_scenarios_indoor"
-    out_dir = parquet_dir / "climate_scenarios_indoor"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    csv_files = sorted(csv_dir.glob("*.csv"))
+    csv_files = sorted((bronze_dir / "climate_scenarios_indoor").glob("*.csv"))
     if not csv_files:
         return 0
 
-    out_path = out_dir / "climate_scenarios_indoor.parquet"
-    if out_path.exists():
-        out_mtime = out_path.stat().st_mtime
-        if all(f.stat().st_mtime <= out_mtime for f in csv_files):
-            logger.info("Converting climate_scenarios_indoor to Parquet: up-to-date — skipping")
+    def convert_one(group: ConversionGroup) -> int:
+        frames: list[pl.LazyFrame] = []
+        skipped = 0
+        for f in group.sources:
+            parsed = parse_indoor_filename(f.stem)
+            if parsed is None:
+                # The archive ships a metadata CSV alongside the data; not a failure.
+                skipped += 1
+                logger.info("  Skipping non-data file: %s", f.name)
+                continue
+            station, period, scenario, variant = parsed
+            frames.append(
+                add_indoor_columns(
+                    pl.scan_csv(f, separator=",", infer_schema_length=10_000, truncate_ragged_lines=True),
+                    station,
+                    period,
+                    scenario,
+                    variant,
+                )
+            )
+        if not frames:
             return 0
-
-    logger.info("Converting climate_scenarios_indoor to Parquet (%d files)...", len(csv_files))
-    frames: list[pl.LazyFrame] = []
-    skipped = 0
-    for f in csv_files:
-        parsed = parse_indoor_filename(f.stem)
-        if parsed is None:
-            skipped += 1
-            logger.info("  Skipping non-data file: %s", f.name)
-            continue
-        station, period, scenario, variant = parsed
-        lf = add_indoor_columns(
-            pl.scan_csv(f, separator=",", infer_schema_length=10_000, truncate_ragged_lines=True),
-            station,
-            period,
-            scenario,
-            variant,
-        )
-        frames.append(lf)
-
-    if not frames:
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path)
+        logger.info("  Done: wrote %s (%d files, %d non-data skipped)", group.out_path.name, len(frames), skipped)
         return 0
 
-    try:
-        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), out_path)
-    except Exception as e:
-        logger.warning("  FAIL: %s", e)
-        return 1
-
-    logger.info("  Done: wrote %s (%d files, %d non-data skipped)", out_path.name, len(frames), skipped)
-    return 0
+    out_path = parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet"
+    return run_conversions([ConversionGroup(out_path, csv_files)], convert_one, label="climate_scenarios_indoor")
 
 
 _CS_HEADER_PREFIX = "DATE;"
@@ -578,42 +628,30 @@ def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
 
 def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert CH2025 climate-scenario CSVs (with metadata preamble) to one Parquet."""
-    csv_dir = bronze_dir / "climate_scenarios"
-    out_dir = parquet_dir / "climate_scenarios"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    csv_files = sorted(f for f in csv_dir.glob("*.csv") if "_meta_" not in f.name)
+    csv_files = sorted(f for f in (bronze_dir / "climate_scenarios").glob("*.csv") if "_meta_" not in f.name)
     if not csv_files:
         return 0
 
-    out_path = out_dir / "climate_scenarios.parquet"
-    if out_path.exists():
-        out_mtime = out_path.stat().st_mtime
-        if all(f.stat().st_mtime <= out_mtime for f in csv_files):
-            logger.info("Converting climate_scenarios to Parquet: up-to-date — skipping")
-            return 0
-
-    logger.info("Converting climate_scenarios to Parquet (%d files)...", len(csv_files))
-    frames: list[pl.LazyFrame] = []
-    failed = 0
-    for f in csv_files:
-        try:
-            frames.append(scan_climate_scenarios_csv(f))
-        except Exception as e:
-            failed += 1
-            logger.warning("  FAIL %s: %s", f.name, e)
-
-    if not frames:
+    def convert_one(group: ConversionGroup) -> int:
+        frames: list[pl.LazyFrame] = []
+        failed = 0
+        for f in group.sources:
+            try:
+                frames.append(scan_climate_scenarios_csv(f))
+            except Exception as e:
+                # One unreadable file must not cost the rest of the collection —
+                # skip it, write what parsed, and report it so the exit code
+                # still reflects it.
+                failed += 1
+                logger.warning("  FAIL %s: %s", f.name, e)
+        if not frames:
+            return failed
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path)
+        logger.info("  Done: wrote %s (%d files)", group.out_path.name, len(frames))
         return failed
 
-    try:
-        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), out_path)
-    except Exception as e:
-        logger.warning("  FAIL: %s", e)
-        return failed + 1
-
-    logger.info("  Done: wrote %s (%d files)", out_path.name, len(frames))
-    return failed
+    out_path = parquet_dir / "climate_scenarios" / "climate_scenarios.parquet"
+    return run_conversions([ConversionGroup(out_path, csv_files)], convert_one, label="climate_scenarios")
 
 
 def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
@@ -622,42 +660,25 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> i
     These files use tab separators, latin1 encoding, and have 8 header rows
     to skip before the actual data begins.
     """
-    txt_dir = bronze_dir / "climate_normals"
-    out_dir = parquet_dir / "climate_normals"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    txt_files = sorted(txt_dir.glob("*.txt"))
+    txt_files = sorted((bronze_dir / "climate_normals").glob("*.txt"))
     if not txt_files:
         return 0
 
-    logger.info("Converting climate_normals to Parquet:")
-    converted = 0
-    skipped = 0
-    failed = 0
-    total = len(txt_files)
-    for i, txt_path in enumerate(txt_files, 1):
-        parquet_path = out_dir / txt_path.with_suffix(".parquet").name
+    def convert_one(group: ConversionGroup) -> int:
+        source = group.sources[0]
+        df = pl.read_csv(
+            source,
+            separator="\t",
+            skip_rows=8,
+            encoding="latin1",
+            infer_schema_length=None,
+            try_parse_dates=True,
+            truncate_ragged_lines=True,
+        )
+        _write_parquet_atomic(df, group.out_path, compression="snappy")
+        logger.info("  %s... Converted", source.name)
+        return 0
 
-        if parquet_path.exists() and parquet_path.stat().st_mtime >= txt_path.stat().st_mtime:
-            skipped += 1
-            continue
-
-        try:
-            df = pl.read_csv(
-                txt_path,
-                separator="\t",
-                skip_rows=8,
-                encoding="latin1",
-                infer_schema_length=None,
-                try_parse_dates=True,
-                truncate_ragged_lines=True,
-            )
-            _write_parquet_atomic(df, parquet_path, compression="snappy")
-            converted += 1
-            logger.info("  [%d/%d] %s... Converted", i, total, txt_path.name)
-        except Exception as e:
-            failed += 1
-            logger.warning("  [%d/%d] %s... FAIL: %s", i, total, txt_path.name, e)
-
-    logger.info("  Done: %d converted, %d skipped (up-to-date), %d failed", converted, skipped, failed)
-    return failed
+    out_dir = parquet_dir / "climate_normals"
+    groups = [ConversionGroup(out_dir / txt.with_suffix(".parquet").name, [txt]) for txt in txt_files]
+    return run_conversions(groups, convert_one, label="climate_normals")

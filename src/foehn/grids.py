@@ -36,14 +36,15 @@ import contextlib
 import logging
 import re
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from foehn.assets import Asset, assets_of, collection_assets, other_extensions
 from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, is_grid, kind
-from foehn.fetch import DEFAULT_WORKERS, Fetcher, FetchError, default_fetcher
+from foehn.fetch import Fetcher, FetchError, default_fetcher
+from foehn.transfer import fetch_all
 
 logger = logging.getLogger(__name__)
 
@@ -89,42 +90,58 @@ def _require_radar_deps():
         ) from exc
 
 
-# Per-kind read configuration. NetCDF keeps engine=None so xarray auto-detects NetCDF-3 vs -4/HDF5;
-# GRIB2 forces cfgrib and disables its .idx sidecar files (indexpath=""); HDF5
-# radar uses a bespoke ODIM-composite reader (``reader="odim"``) instead of an
-# xarray engine.
-#
-# ``max_files`` caps how many matched files a single open may combine. NetCDF
-# collections combine cleanly via combine_by_coords, so there's no cap. GRIB2 and
-# HDF5 are capped at 1 for open_dataset: ICON forecasts are on an unstructured
-# grid that combine_by_coords can't stack, and radar is one Cartesian composite
-# per timestep (thousands per collection). (to_zarr(stack=...) lifts the cap to
-# build cubes.) ``match_example`` seeds the "narrow your match" guidance. The cap
-# is checked against the *remote* listing before downloading, so an over-broad
-# match is rejected even when one matching file already happens to be cached.
-_GRID_READERS: dict[DatasetKind, dict] = {
-    DatasetKind.NETCDF_GRID: {
-        "suffixes": (".nc",),
-        "engine": None,
-        "backend_kwargs": None,
-        "max_files": None,
-        "match_example": None,
-    },
-    DatasetKind.GRIB2_GRID: {
-        "suffixes": (".grib2", ".grib"),
-        "engine": "cfgrib",
-        "backend_kwargs": {"indexpath": ""},
-        "max_files": 1,
-        "match_example": "202605231500-0-t_2m-ctrl",
-    },
-    DatasetKind.RADAR_GRID: {
-        "suffixes": (".h5",),
-        "reader": "odim",
-        "engine": None,
-        "backend_kwargs": None,
-        "max_files": 1,
-        "match_example": "cpc2613000000",
-    },
+@dataclass(frozen=True)
+class GridReader:
+    """How one gridded :class:`DatasetKind` is read.
+
+    Typed rather than a bare dict, for the same reason :class:`registry.KindSpec`
+    is: callers used to index this table with string literals, and the radar row
+    carried a ``reader`` key the others lacked — so every read of it needed a
+    ``.get`` and a typo was a runtime KeyError.
+    """
+
+    suffixes: tuple[str, ...]
+    """Asset extensions this kind reads. Other payloads (GeoTIFF/ZIP copies) are ignored."""
+
+    reader: Literal["xarray", "odim"] = "xarray"
+    """``"odim"`` selects the bespoke ODIM-composite reader instead of an xarray engine."""
+
+    engine: str | None = None
+    """xarray backend. None lets xarray auto-detect NetCDF-3 vs NetCDF-4/HDF5."""
+
+    backend_kwargs: dict | None = None
+    """Extra backend options — GRIB2 disables cfgrib's .idx sidecar files."""
+
+    max_files: int | None = None
+    """How many matched files one ``open_dataset`` may combine.
+
+    None for NetCDF, which combines cleanly via combine_by_coords. GRIB2 and HDF5
+    are capped at 1: ICON forecasts are on an unstructured grid combine_by_coords
+    can't stack, and radar is one Cartesian composite per timestep (thousands per
+    collection). ``to_zarr(stack=...)`` lifts the cap to build cubes. The cap is
+    checked against the *remote* listing before downloading, so an over-broad
+    match is rejected even when one matching file already happens to be cached.
+    """
+
+    match_example: str | None = None
+    """Seeds the "narrow your match" guidance for the capped kinds."""
+
+
+_GRID_READERS: dict[DatasetKind, GridReader] = {
+    DatasetKind.NETCDF_GRID: GridReader(suffixes=(".nc",)),
+    DatasetKind.GRIB2_GRID: GridReader(
+        suffixes=(".grib2", ".grib"),
+        engine="cfgrib",
+        backend_kwargs={"indexpath": ""},
+        max_files=1,
+        match_example="202605231500-0-t_2m-ctrl",
+    ),
+    DatasetKind.RADAR_GRID: GridReader(
+        suffixes=(".h5",),
+        reader="odim",
+        max_files=1,
+        match_example="cpc2613000000",
+    ),
 }
 
 
@@ -185,6 +202,11 @@ def _raise_if_too_many(collection_key: str, match: str | None, names: list[str],
         f"match={match!r} matched {len(names)} files for {collection_key!r}, {detail}. "
         f"Matches include:\n{examples}{more}"
     )
+
+
+def _exists(_asset: Asset, filepath: Path) -> bool:
+    """A :data:`~foehn.transfer.SkipRule`: a grid file already on disk is never refetched."""
+    return filepath.exists()
 
 
 def _grid_assets(items: list[dict], suffixes: tuple[str, ...], match: str | None) -> tuple[list[Asset], set[str]]:
@@ -266,30 +288,18 @@ def _ensure_grid_files(
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
     _raise_if_too_many(collection_key, match, [a.name for a in matched], max_files)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    # Deduplicate by destination: a STAC item can list one asset under several
-    # keys, and two workers streaming into the same ``.part`` would corrupt it.
-    targets: dict[Path, str] = {}
-    for asset in matched:
-        filepath = out_dir / asset.name
-        paths.append(filepath)
-        if not filepath.exists() and filepath not in targets:
-            targets[filepath] = asset.href
-
-    if targets:
-        # Fetch concurrently, like the CSV path. Serial downloads made the network
-        # the dominant cost of building a cube: stack="auto" admits up to
-        # _HYPERCUBE_MAX_FILES files, each previously fetched one after another.
-        def _fetch(filepath: Path, href: str) -> None:
-            fetcher.stream(href, filepath)
-
-        with ThreadPoolExecutor(max_workers=min(DEFAULT_WORKERS, len(targets))) as pool:
-            futures = [pool.submit(_fetch, fp, href) for fp, href in targets.items()]
-            for fut in as_completed(futures):
-                fut.result()  # surface the first failure; a grid read can't proceed without its files
-
-    return sorted(set(paths))
+    # ``on_error="raise"`` rather than the download paths' count-and-continue: a
+    # grid read cannot proceed on a partial set, so the first failure is fatal.
+    # Destination de-duplication and the worker pool are the transfer module's.
+    fetch_all(
+        matched,
+        out_dir,
+        fetcher=fetcher,
+        skip=_exists,
+        on_error="raise",
+        label="grid file",
+    )
+    return sorted({out_dir / asset.name for asset in matched})
 
 
 # CF-compliant temporal base units that xarray/cftime can decode. Anything else
@@ -598,25 +608,25 @@ def open_dataset(
 
     # Single-file formats (GRIB2, radar) have thousands of files per collection,
     # so an unfiltered open would download the lot — require a narrowing match.
-    if reader["max_files"] == 1 and match is None:
+    if reader.max_files == 1 and match is None:
         raise ValueError(
             f"Dataset {dataset!r} is a {fmt} collection of many single-field files; opening it "
             "unfiltered would download them all. Narrow to one file with match=, e.g. "
-            f'foehn.open_dataset({dataset!r}, match="{reader["match_example"]}").'
+            f'foehn.open_dataset({dataset!r}, match="{reader.match_example}").'
         )
 
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     files = _ensure_grid_files(
-        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=reader["max_files"], fetcher=fetcher
+        dataset, bronze_dir, suffixes=reader.suffixes, match=match, max_files=reader.max_files, fetcher=fetcher
     )
 
-    if reader.get("reader") == "odim":
+    if reader.reader == "odim":
         ds = _open_odim_composite(xr, files[0])
     else:
-        engine = engine if engine is not None else reader["engine"]
+        engine = engine if engine is not None else reader.engine
         try:
-            ds = _open_grid(xr, files, engine, reader["backend_kwargs"])
+            ds = _open_grid(xr, files, engine, reader.backend_kwargs)
         except Exception as exc:
             if len(files) > 1:
                 raise ValueError(
@@ -691,14 +701,16 @@ def _write_zarr(ds, store: Path, mode: str, append_dim: str | None = None) -> No
             ds.to_zarr(store, mode=mode)
 
 
-def _to_zarr_stacked(dataset, dataset_kind, fmt, *, variables, match, data_dir, store, mode, fetcher) -> Path:
+def _to_zarr_stacked(dataset, *, variables, match, data_dir, store, mode, fetcher) -> Path:
     """Stack a matched set of radar composites into one ``(time, y, x)`` Zarr cube.
 
     Written incrementally — one timestep appended at a time along ``time`` — so
     peak memory stays at a single file no matter how many timesteps the match
     spans, and no dask is needed.
     """
+    dataset_kind = kind(dataset)
     if dataset_kind is not DatasetKind.RADAR_GRID:
+        fmt = COLLECTION_META[dataset]["format"]
         raise ValueError(
             f"stack='time' is only supported for radar (HDF5) collections; {dataset!r} is {fmt}. "
             "NetCDF multi-file matches already combine via match=; GRIB2 uses stack='auto'."
@@ -715,7 +727,7 @@ def _to_zarr_stacked(dataset, dataset_kind, fmt, *, variables, match, data_dir, 
 
     root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     # No single-file cap here: stacking deliberately wants the whole matched set.
-    files = _ensure_grid_files(dataset, root / "bronze", suffixes=reader["suffixes"], match=match, fetcher=fetcher)
+    files = _ensure_grid_files(dataset, root / "bronze", suffixes=reader.suffixes, match=match, fetcher=fetcher)
     store_path = _resolve_store(dataset, match, data_dir, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -742,7 +754,7 @@ def _to_zarr_stacked(dataset, dataset_kind, fmt, *, variables, match, data_dir, 
 _HYPERCUBE_MAX_FILES = 1000
 
 
-def _to_zarr_hypercube(dataset, dataset_kind, fmt, *, variables, match, data_dir, store, mode, fetcher) -> Path:
+def _to_zarr_hypercube(dataset, *, variables, match, data_dir, store, mode, fetcher) -> Path:
     """Combine matched GRIB2 files into one N-D cube over their varying axes.
 
     Each ICON/KENDA file is a single (variable, member, lead time, reference time)
@@ -752,7 +764,9 @@ def _to_zarr_hypercube(dataset, dataset_kind, fmt, *, variables, match, data_dir
     derived ``valid_time`` is dropped before combining (it conflicts on concat)
     and recomputed afterwards. The whole set is loaded into memory at once.
     """
+    dataset_kind = kind(dataset)
     if dataset_kind is not DatasetKind.GRIB2_GRID:
+        fmt = COLLECTION_META[dataset]["format"]
         raise ValueError(
             f"stack='auto' is only supported for GRIB2 collections; {dataset!r} is {fmt}. "
             "Radar uses stack='time'; NetCDF multi-file matches already combine via match=."
@@ -770,12 +784,12 @@ def _to_zarr_hypercube(dataset, dataset_kind, fmt, *, variables, match, data_dir
     root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = root / "bronze"
     files = _ensure_grid_files(
-        dataset, bronze_dir, suffixes=reader["suffixes"], match=match, max_files=_HYPERCUBE_MAX_FILES, fetcher=fetcher
+        dataset, bronze_dir, suffixes=reader.suffixes, match=match, max_files=_HYPERCUBE_MAX_FILES, fetcher=fetcher
     )
     store_path = _resolve_store(dataset, match, data_dir, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
-    datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs=reader["backend_kwargs"]) for f in sorted(files)]
+    datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs=reader.backend_kwargs) for f in sorted(files)]
     # Promote whichever independent axes actually differ across the matched files.
     varying = [
         coord
@@ -868,7 +882,6 @@ def to_zarr(
     """
     _validate_grid_dataset(dataset)
     dataset_kind = kind(dataset)
-    fmt = COLLECTION_META[dataset]["format"]
 
     if stack is not None:
         if stack not in ("auto", "time"):
@@ -885,9 +898,9 @@ def to_zarr(
         }
         # "auto" routes to each format's best cube builder; "time" is the explicit radar path.
         if stack == "time" or dataset_kind is DatasetKind.RADAR_GRID:
-            return _to_zarr_stacked(dataset, dataset_kind, fmt, **kwargs)  # radar: incremental (time, y, x)
+            return _to_zarr_stacked(dataset, **kwargs)  # radar: incremental (time, y, x)
         if dataset_kind is DatasetKind.GRIB2_GRID:
-            return _to_zarr_hypercube(dataset, dataset_kind, fmt, **kwargs)  # forecasts: N-D combine_by_coords
+            return _to_zarr_hypercube(dataset, **kwargs)  # forecasts: N-D combine_by_coords
         # NetCDF + stack="auto": open_dataset already combines a multi-file match,
         # so just fall through to the normal single-write path below.
 

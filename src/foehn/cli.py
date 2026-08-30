@@ -21,7 +21,7 @@ from foehn.collections import COLLECTIONS
 from foehn.convert import (
     convert_climate_normals_to_parquet,
 )
-from foehn.fetch import default_fetcher
+from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 
 
 def _resolve_data_dir(args_data_dir: Path | None) -> Path:
@@ -273,33 +273,24 @@ def cmd_mcp(args: argparse.Namespace) -> None:
 def cmd_load(args: argparse.Namespace) -> None:
     from foehn.api import load
 
-    kwargs: dict = {}
-    if args.station:
-        kwargs["station"] = args.station
-    if args.frequency:
-        kwargs["frequency"] = args.frequency
-    if args.time_slice:
-        kwargs["time_slice"] = args.time_slice
-    if args.year:
-        kwargs["year"] = args.year
-    if args.month:
-        kwargs["month"] = args.month
-    if args.date_from:
-        kwargs["date_from"] = args.date_from
-    if args.date_to:
-        kwargs["date_to"] = args.date_to
-    if args.columns:
-        kwargs["columns"] = args.columns
-    if args.drop_null:
-        kwargs["drop_null"] = args.drop_null
-    if args.sort:
-        kwargs["sort"] = args.sort
-    if args.limit is not None:
-        kwargs["limit"] = args.limit
-    if args.workers is not None:
-        kwargs["workers"] = args.workers
-
-    df = load(args.dataset, **kwargs)
+    # argparse leaves every unset option as None, which is what load() already
+    # treats as "no filter" — so the options go straight across. ``workers`` is
+    # the one exception: its default is a count, not None.
+    df = load(
+        args.dataset,
+        station=args.station,
+        frequency=args.frequency,
+        time_slice=args.time_slice,
+        year=args.year,
+        month=args.month,
+        date_from=args.date_from,
+        date_to=args.date_to,
+        columns=args.columns,
+        drop_null=args.drop_null,
+        sort=args.sort,
+        limit=args.limit,
+        workers=args.workers if args.workers is not None else DEFAULT_WORKERS,
+    )
 
     n = args.n or 20
     print(df.head(n))

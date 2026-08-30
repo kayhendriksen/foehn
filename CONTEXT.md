@@ -107,8 +107,32 @@ _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 **Fetcher**:
 The module that owns every HTTP call foehn makes to MeteoSwiss: STAC listing and
 metadata, and file downloads. Retry policy, per-thread sessions, URL validation
-and pagination live behind it.
+and pagination live behind it. One call.
 _Avoid_: client, session, transport
+
+**Transfer**:
+The module that owns turning a set of **Assets** into files: the worker pool,
+destination de-duplication, per-asset failure isolation, ETag bookkeeping,
+atomic writes and the counts in a **Download result**. Many calls, where the
+**Fetcher** is one. Every download path goes through it.
+_Avoid_: downloader, batch, pool
+
+**Download result**:
+What a download reports: `total_assets`, `downloaded`, `skipped`, `failed` and
+the new filenames. The first is every **Asset** the call was given, and the
+other three sum to it.
+
+**Reader**:
+How one **Dataset kind** becomes a Polars DataFrame — one per tabular kind,
+selected from the registry exactly as its download and convert paths are.
+_Avoid_: loader, parser (parsing is one step inside a reader)
+
+**Filters**:
+One load query, normalised: stations and granularities lowercased, scalars
+widened to tuples, an empty list read as "no filter". The public `load()`
+keywords are packed into one of these at the seam, so nothing below restates
+the eleven arguments.
+_Avoid_: query, params, options
 
 ## Relationships
 
@@ -118,6 +142,8 @@ _Avoid_: client, session, transport
 - A **Standard CSV** **Asset** is identified by its station, **Granularity** and **Time slice**.
 - A **Forecast CSV** **Asset** is identified by its **Forecast run**.
 - Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
+- Every **Asset** written to **Bronze** goes through **Transfer**, which calls the **Fetcher**.
+- A **Dataset kind** has one download path, one convert path and (when tabular) one **Reader**.
 
 ## Flagged ambiguities
 
@@ -129,3 +155,7 @@ _Avoid_: client, session, transport
   is HDF5. Resolved: **Radar grid** is its own **Dataset kind**.
 - "Frequency" and "granularity" both refer to the aggregation interval. Resolved:
   the concept is **Granularity**; `frequency` survives only as a public parameter name.
+- The valid **Granularity** and **Time slice** tokens were listed twice — once in
+  `collections`, once again in the MCP layer, which could only agree or drift.
+  Resolved: `collections.GRANULARITIES` and `collections.TIME_SLICES` are the
+  vocabulary, `load()` enforces it, and the MCP tools restate nothing.

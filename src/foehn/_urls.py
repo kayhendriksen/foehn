@@ -25,7 +25,7 @@ def validate_download_href(href: str) -> str:
     return _validate_https_url(href, DOWNLOAD_DOMAINS, "download")
 
 
-def clean_href(href: str) -> str:
+def _clean_href(href: str) -> str:
     """Return *href* without its query string.
 
     STAC asset hrefs may carry a query (``?token=...``), so every suffix or
@@ -37,4 +37,4 @@ def clean_href(href: str) -> str:
 
 def asset_filename(href: str) -> str:
     """Return just the filename of an asset href, ignoring any query string."""
-    return clean_href(href).rsplit("/", 1)[-1]
+    return _clean_href(href).rsplit("/", 1)[-1]

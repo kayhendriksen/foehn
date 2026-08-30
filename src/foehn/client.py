@@ -5,79 +5,29 @@ from __future__ import annotations
 import json
 import logging
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from foehn.assets import assets_of, collection_assets, latest_run_of, select
+from foehn.assets import Asset, assets_of, collection_assets, latest_run_of, select
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
     COLLECTIONS,
     DatasetKind,
     kind,
 )
-from foehn.convert import utf8_meteoswiss_csv
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.transfer import (
+    DownloadResult,
+    atomic_write_text,
+    csv_to_disk,
+    fetch_all,
+    stream_to_disk,
+)
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class DownloadResult:
-    """Summary of a download call. Returned by all download_* functions.
-
-    Callers use this to decide whether to run expensive downstream work
-    (e.g. Spark MERGE INTO) without scanning the output directory.
-
-    ``total_assets`` is per-producer: ``download_collection`` counts the assets
-    left after its time-slice filter, while ``download_grib2``/``download_netcdf``
-    count every matching asset in the listing. ``foehn.download`` sums results
-    across the metadata and data passes, so treat the total as a scale hint
-    rather than a figure comparable between dataset types.
-    """
-
-    total_assets: int = 0
-    downloaded: int = 0
-    skipped: int = 0
-    failed: int = 0
-    filenames: list[str] = field(default_factory=list)
-
-
-def _dedupe_by_destination(pairs: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
-    """Keep one (href, filepath) pair per destination path.
-
-    Two hrefs resolving to the same local filename would have workers streaming
-    into the same ``.part`` file at once and corrupting it. A collision is an
-    upstream naming quirk we can't resolve here, so keep the first and say so
-    rather than dropping one silently.
-    """
-    seen: dict[Path, str] = {}
-    for href, filepath in pairs:
-        if filepath in seen:
-            logger.warning("  Duplicate destination %s — skipping %s", filepath.name, href)
-            continue
-        seen[filepath] = href
-    return [(href, filepath) for filepath, href in seen.items()]
-
-
 # --- State files (ETags + last-run timestamp) ---
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text via a sibling temp file + Path.replace so readers never see a torn write."""
-    _atomic_write_bytes(path, text.encode("utf-8"))
-
-
-def _atomic_write_bytes(path: Path, data: bytes | memoryview) -> None:
-    """Write bytes via a sibling temp file + Path.replace so readers never see a torn write."""
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_bytes(data)
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
 
 
 def load_etags(data_dir: Path) -> dict:
@@ -93,7 +43,7 @@ def load_etags(data_dir: Path) -> dict:
 def save_etags(data_dir: Path, etags: dict):
     path = data_dir / "_etags.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, json.dumps(etags, indent=2))
+    atomic_write_text(path, json.dumps(etags, indent=2))
 
 
 def load_last_run(data_dir: Path) -> str | None:
@@ -112,34 +62,10 @@ def load_last_run(data_dir: Path) -> str | None:
 def save_last_run(data_dir: Path):
     path = data_dir / "_last_run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
+    atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
 
 
 # --- CSV downloads ---
-
-
-def _download_csv(
-    fetcher: Fetcher,
-    href: str,
-    filepath: Path,
-    old_etag: str | None,
-) -> tuple[str, str, str, str | None]:
-    """Fetch a single CSV, re-encode to UTF-8, and write it to disk.
-
-    Returns (status, href, filename, new_etag) where status is "downloaded" or "skipped".
-    Only sends the stored ETag when the local file is still there — otherwise a
-    304 would report "skipped" over a file that no longer exists.
-    """
-    filename = filepath.name
-    etag = old_etag if old_etag and filepath.exists() else None
-    fetched = fetcher.get(href, etag=etag, timeout=60)
-    if fetched.not_modified:
-        return ("skipped", href, filename, None)
-    # MeteoSwiss CSVs are usually UTF-8 but some are Windows-1252; normalise to UTF-8.
-    # Bytes in, bytes out — decoding to str here only to re-encode on write would
-    # hold three copies of a multi-hundred-MB CSV at once, times ``workers``.
-    _atomic_write_bytes(filepath, utf8_meteoswiss_csv(fetched.body))
-    return ("downloaded", href, filename, fetched.etag)
 
 
 def download_collection(
@@ -174,7 +100,6 @@ def download_collection(
 
     collection_id = COLLECTIONS[collection_key]
     out_dir = output_dir / collection_key
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     etags = load_etags(state_dir)
 
@@ -219,49 +144,23 @@ def download_collection(
         available = len({a.forecast_run for a in every_csv if a.forecast_run is not None})
         logger.info("  Latest forecast run: %s (of %d available)", run, available)
 
-    logger.info("  %d CSV files to process", len(csv_assets))
-
-    def _do_csv(href: str, filepath: Path, etag: str | None) -> tuple[str, str, str, str | None]:
-        return _download_csv(fetcher, href, filepath, etag)
-
-    total = len(csv_assets)
-    downloaded = 0
-    skipped = 0
-    failed = 0
-    filenames: list[str] = []
-    fetch_targets = _dedupe_by_destination([(a.href, out_dir / a.name) for a in csv_assets])
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_href = {
-            pool.submit(_do_csv, href, filepath, etags.get(href)): href for href, filepath in fetch_targets
-        }
-        for i, fut in enumerate(as_completed(future_to_href), 1):
-            # Isolate per-asset failures: one transient 404/timeout must not abort
-            # the batch (and discard the ETags collected from the other assets).
-            try:
-                status, href, filename, new_etag = fut.result()
-            except Exception as exc:
-                failed += 1
-                logger.warning("  [%d/%d] FAILED: %s — %s", i, total, future_to_href[fut], exc)
-                continue
-            if status == "skipped":
-                skipped += 1
-                continue
-            if new_etag:
-                etags[href] = new_etag
-            else:
-                # Server returned 200 without an ETag. Keeping the old one would
-                # re-send it as If-None-Match forever, so this asset would
-                # re-download every run and never once be skipped.
-                etags.pop(href, None)
-            downloaded += 1
-            filenames.append(filename)
-            logger.info("  [%d/%d] Downloaded: %s", i, total, filename)
+    # The conditional-GET writer decides "unchanged" from the server's 304, so
+    # there is no local skip rule here — the ETag store is the skip rule.
+    result = fetch_all(
+        csv_assets,
+        out_dir,
+        fetcher=fetcher,
+        workers=workers,
+        write=csv_to_disk,
+        etags=etags,
+        label="CSV",
+    )
 
     # Prune ETags for assets that no longer exist upstream, so _etags.json
     # doesn't grow forever (e.g. forecast runs get fresh filenames each cycle).
     # Only on a clean full listing: with ``since`` the item list is partial, and
     # after failures the universe may be incomplete.
-    if since is None and failed == 0:
+    if since is None and result.failed == 0:
         prefix = f"/{collection_id}/"
         listed = {a.href for a in every_csv}
         stale = [k for k in etags if prefix in k and k not in listed]
@@ -271,15 +170,7 @@ def download_collection(
             logger.info("  Pruned %d stale ETag entries", len(stale))
 
     save_etags(state_dir, etags)
-    if skipped:
-        logger.info("  Skipped %d unchanged files", skipped)
-    if failed:
-        logger.warning("  %d file(s) failed to download", failed)
-    logger.info("  Done — %d files downloaded", downloaded)
-
-    return DownloadResult(
-        total_assets=total, downloaded=downloaded, skipped=skipped, failed=failed, filenames=filenames
-    )
+    return result
 
 
 # --- Metadata downloads ---
@@ -289,47 +180,22 @@ def download_metadata(
     collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS, *, fetcher: Fetcher
 ) -> DownloadResult:
     """Download collection-level metadata files (stations, parameters, inventory)."""
-    collection_id = COLLECTIONS[collection_key]
-    out_dir = output_dir / collection_key
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    coll = fetcher.collection(collection_id)
-    targets = _dedupe_by_destination([(a.href, out_dir / a.name) for a in collection_assets(coll, suffixes=(".csv",))])
-    if not targets:
-        return DownloadResult()
-
-    def _do_csv(href: str, filepath: Path) -> tuple[str, str, str, str | None]:
-        return _download_csv(fetcher, href, filepath, None)
-
-    downloaded = 0
-    failed = 0
-    filenames: list[str] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_href = {pool.submit(_do_csv, href, filepath): href for href, filepath in targets}
-        for fut in as_completed(future_to_href):
-            try:
-                filename = fut.result()[2]
-            except Exception as exc:
-                failed += 1
-                logger.warning("  Metadata FAILED: %s — %s", future_to_href[fut], exc)
-                continue
-            downloaded += 1
-            filenames.append(filename)
-            logger.info("  Metadata: %s", filename)
-
-    if downloaded:
-        logger.info("  %d metadata files downloaded", downloaded)
-    if failed:
-        logger.warning("  %d metadata file(s) failed to download", failed)
-
-    return DownloadResult(total_assets=len(targets), downloaded=downloaded, failed=failed, filenames=filenames)
+    coll = fetcher.collection(COLLECTIONS[collection_key])
+    return fetch_all(
+        collection_assets(coll, suffixes=(".csv",)),
+        output_dir / collection_key,
+        fetcher=fetcher,
+        workers=workers,
+        write=csv_to_disk,
+        label="metadata file",
+    )
 
 
 # --- GRIB2 / HDF5 downloads ---
 
 
-def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
-    """Decide whether to (re)download a binary asset.
+def _already_current(asset: Asset, filepath: Path) -> bool:
+    """A :data:`~foehn.transfer.SkipRule`: is the local copy of *asset* up to date?
 
     Handles MeteoSwiss's in-place overwrites — e.g. CombiPrecip reanalysis
     (CPCH) replaces the original CPC hourly file with the same filename
@@ -338,15 +204,20 @@ def _needs_redownload(filepath: Path, remote_updated: str) -> bool:
     picks up those server-side updates.
     """
     if not filepath.exists():
-        return True
-    if not remote_updated:
         return False
+    if not asset.updated:
+        return True
     try:
-        remote_dt = datetime.fromisoformat(remote_updated)
+        remote_dt = datetime.fromisoformat(asset.updated)
         local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
     except (ValueError, OSError):
-        return False
-    return remote_dt > local_dt
+        return True
+    return remote_dt <= local_dt
+
+
+def _exists(_asset: Asset, filepath: Path) -> bool:
+    """A :data:`~foehn.transfer.SkipRule` for static assets: fetch each one once."""
+    return filepath.exists()
 
 
 def download_grib2(
@@ -359,12 +230,10 @@ def download_grib2(
 ) -> DownloadResult:
     """Download GRIB2/HDF5 binary files (latest page only)."""
     collection_id = COLLECTIONS[collection_key]
-    out_dir = output_dir / collection_key
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("%s", "=" * 60)
     logger.info("GRIB2 Collection: %s", collection_id)
-    logger.info("Output dir: %s", out_dir)
+    logger.info("Output dir: %s", output_dir / collection_key)
     logger.info("%s", "=" * 60)
 
     # Only the newest page — forecast/radar data is ephemeral and these
@@ -379,44 +248,14 @@ def download_grib2(
             logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
-    binary_assets = assets_of(items, suffixes=(".grib2", ".h5", ".hdf5"))
-    logger.info("  %d binary files to download", len(binary_assets))
-
-    to_fetch = _dedupe_by_destination(
-        [(a.href, out_dir / a.name) for a in binary_assets if _needs_redownload(out_dir / a.name, a.updated)]
-    )
-
-    def _do_binary(href: str, filepath: Path) -> str:
-        fetcher.stream(href, filepath)
-        return filepath.name
-
-    total = len(to_fetch)
-    downloaded = 0
-    failed = 0
-    filenames: list[str] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_href = {pool.submit(_do_binary, href, filepath): href for href, filepath in to_fetch}
-        for i, fut in enumerate(as_completed(future_to_href), 1):
-            try:
-                filename = fut.result()
-            except Exception as exc:
-                failed += 1
-                logger.warning("  [%d/%d] FAILED: %s — %s", i, total, future_to_href[fut], exc)
-                continue
-            downloaded += 1
-            filenames.append(filename)
-            logger.info("  [%d/%d] Downloaded: %s", i, total, filename)
-
-    if failed:
-        logger.warning("  %d binary file(s) failed to download", failed)
-    logger.info("  Done — %d binary files downloaded", downloaded)
-
-    return DownloadResult(
-        total_assets=len(binary_assets),
-        downloaded=downloaded,
-        skipped=len(binary_assets) - total,
-        failed=failed,
-        filenames=filenames,
+    return fetch_all(
+        assets_of(items, suffixes=(".grib2", ".h5", ".hdf5")),
+        output_dir / collection_key,
+        fetcher=fetcher,
+        workers=workers,
+        write=stream_to_disk,
+        skip=_already_current,
+        label="binary file",
     )
 
 
@@ -440,12 +279,10 @@ def download_netcdf(
         workers: Number of concurrent HTTP downloads.
     """
     collection_id = COLLECTIONS[collection_key]
-    out_dir = output_dir / collection_key
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("%s", "=" * 60)
     logger.info("NetCDF Collection: %s", collection_id)
-    logger.info("Output dir: %s", out_dir)
+    logger.info("Output dir: %s", output_dir / collection_key)
     logger.info("%s", "=" * 60)
 
     items = fetcher.items(collection_id)
@@ -458,42 +295,17 @@ def download_netcdf(
             logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
-    spatial = assets_of(items, suffixes=(".nc", ".tif", ".zip"))
-    total_assets = len(spatial)
-    targets = _dedupe_by_destination([(a.href, out_dir / a.name) for a in spatial if not (out_dir / a.name).exists()])
-
-    def _do_binary(href: str, filepath: Path) -> str:
-        fetcher.stream(href, filepath)
-        return filepath.name
-
-    downloaded = 0
-    failed = 0
-    filenames: list[str] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_href = {pool.submit(_do_binary, href, filepath): href for href, filepath in targets}
-        for fut in as_completed(future_to_href):
-            try:
-                filename = fut.result()
-            except Exception as exc:
-                failed += 1
-                logger.warning("  FAILED: %s — %s", future_to_href[fut], exc)
-                continue
-            downloaded += 1
-            filenames.append(filename)
-            logger.info("  Downloaded: %s", filename)
-
-    if failed:
-        logger.warning("  %d file(s) failed to download", failed)
-    logger.info("  Done — %d files downloaded", downloaded)
-
-    # ``skipped`` is the count of pre-existing files left untouched (total assets
-    # minus the ones we queued); failures are tracked separately in ``failed``.
-    return DownloadResult(
-        total_assets=total_assets,
-        downloaded=downloaded,
-        skipped=total_assets - len(targets),
-        failed=failed,
-        filenames=filenames,
+    # These are static: an existing file is never restated upstream, so a plain
+    # existence check is enough (unlike the ephemeral GRIB2/radar collections,
+    # which MeteoSwiss overwrites in place).
+    return fetch_all(
+        assets_of(items, suffixes=(".nc", ".tif", ".zip")),
+        output_dir / collection_key,
+        fetcher=fetcher,
+        workers=workers,
+        write=stream_to_disk,
+        skip=_exists,
+        label="file",
     )
 
 
@@ -507,8 +319,13 @@ def download_netcdf(
 _MAX_ZIP_EXTRACT_BYTES = 10 * 1024**3  # 10 GiB
 
 
-def _check_zip_size(zf: zipfile.ZipFile, source: str) -> None:
-    """Raise ValueError if the archive declares more decompressed bytes than the cap."""
+def check_zip_size(zf: zipfile.ZipFile, source: str) -> None:
+    """Raise ValueError if the archive declares more decompressed bytes than the cap.
+
+    Public because the archive *load* path reads its ZIP in memory rather than
+    through :func:`_safe_extract_zip`, and has to apply the same cap. One rule,
+    one place — the reader crossing this seam is part of the interface.
+    """
     total = sum(m.file_size for m in zf.infolist())
     if total > _MAX_ZIP_EXTRACT_BYTES:
         raise ValueError(
@@ -520,7 +337,7 @@ def _check_zip_size(zf: zipfile.ZipFile, source: str) -> None:
 def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
     """Extract a ZIP after validating total size and member paths. Returns member count."""
     with zipfile.ZipFile(zip_path, "r") as zf:
-        _check_zip_size(zf, zip_path.name)
+        check_zip_size(zf, zip_path.name)
         resolved_out_dir = out_dir.resolve()
         for member in zf.infolist():
             target = (resolved_out_dir / member.filename).resolve()

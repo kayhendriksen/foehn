@@ -24,8 +24,12 @@ logger = logging.getLogger(__name__)
 
 # Datasets that can be loaded as tabular data (CSV-backed).
 _LOADABLE_DATASETS = sorted(registry.tabular_datasets())
-_VALID_FREQUENCIES = {"t", "h", "d", "m", "y"}
-_VALID_TIME_SLICES = {"historical", "recent", "now"}
+
+# Categories are this layer's own: ``list_datasets`` filters the catalogue here
+# rather than in foehn, so nothing below validates the value. The dataset,
+# frequency, time-slice and sort vocabularies are *not* here — they belong to
+# ``foehn.load``'s contract, and a second copy of them at this seam could only
+# ever agree with it or drift from it.
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
 
 # The tabular query tools are read-only against the MeteoSwiss API (describe_grid
@@ -236,18 +240,10 @@ def load_data(
         limit: Maximum rows to return (default 50, max 500). Use filters to stay
             within limits on large datasets.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-    if not registry.spec(dataset).tabular:
-        fmt = COLLECTION_META[dataset]["format"]
-        raise ValueError(f"Dataset {dataset!r} is {fmt} (binary/grid) and cannot be loaded as tabular data.")
-    if frequency and frequency.lower() not in _VALID_FREQUENCIES:
-        raise ValueError(f"Invalid frequency {frequency!r}. Valid options: t, h, d, m, y.")
-    if time_slice and time_slice.lower() not in _VALID_TIME_SLICES:
-        raise ValueError(f"Invalid time_slice {time_slice!r}. Valid options: historical, recent, now.")
-    if sort and sort not in ("asc", "desc"):
-        raise ValueError(f"Invalid sort {sort!r}. Valid options: asc, desc.")
-
+    # Unknown dataset, grid datasets, and the frequency/time_slice/sort
+    # vocabularies are all foehn.load's contract — it raises on each of them, so
+    # restating them here could only drift. The row cap is genuinely this
+    # layer's: it bounds what goes back to a model's context window.
     limit = min(max(1, limit), 500)
 
     df = foehn.load(
@@ -306,16 +302,6 @@ def describe_data(
         date_to: End date (inclusive), ISO format "YYYY-MM-DD".
         drop_null: Only count rows where this column is not null.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-    if not registry.spec(dataset).tabular:
-        fmt = COLLECTION_META[dataset]["format"]
-        raise ValueError(f"Dataset {dataset!r} is {fmt} (binary/grid) and cannot be described.")
-    if frequency and frequency.lower() not in _VALID_FREQUENCIES:
-        raise ValueError(f"Invalid frequency {frequency!r}. Valid options: t, h, d, m, y.")
-    if time_slice and time_slice.lower() not in _VALID_TIME_SLICES:
-        raise ValueError(f"Invalid time_slice {time_slice!r}. Valid options: historical, recent, now.")
-
     df = foehn.load(
         dataset,
         station=station,
@@ -395,9 +381,10 @@ def describe_grid(
             collections (e.g. match="rhiresd" for daily precipitation).
         variables: Restrict the summary to these data variable(s).
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-    if dataset not in _INSPECTABLE_GRIDS:
+    # open_dataset rejects an unknown dataset itself. This one is restated on
+    # purpose: its message names the MCP tools rather than the Python functions,
+    # which is the guidance an LLM caller can act on.
+    if dataset in COLLECTIONS and dataset not in _INSPECTABLE_GRIDS:
         raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
     # open_dataset enforces the single-file match= requirement for GRIB2/radar.
 
@@ -442,9 +429,6 @@ def get_parameters(dataset: str) -> list[Parameter]:
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-
     return [Parameter(**row) for row in foehn.parameters(dataset).to_dicts()]
 
 
@@ -459,9 +443,6 @@ def get_stations(dataset: str) -> list[Station]:
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-
     return [Station(**row) for row in foehn.stations(dataset).to_dicts()]
 
 
@@ -475,9 +456,6 @@ def get_inventory(dataset: str) -> list[InventoryEntry]:
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-
     return [InventoryEntry(**row) for row in foehn.inventory(dataset).to_dicts()]
 
 

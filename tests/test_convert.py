@@ -7,8 +7,6 @@ import polars as pl
 import pytest
 
 from foehn.convert import (
-    _load_metadata_types,
-    _parse_metadata_types,
     add_forecast_local_timestamp,
     convert_climate_normals_to_parquet,
     convert_climate_scenarios_indoor_to_parquet,
@@ -16,8 +14,10 @@ from foehn.convert import (
     convert_to_parquet,
     decode_meteoswiss_csv,
     group_csv_files,
+    load_metadata_types,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
+    parse_metadata_types,
     scan_climate_scenarios_csv,
 )
 
@@ -200,12 +200,12 @@ def test_convert_to_parquet_no_csv_is_noop(tmp_path):
     assert not (parquet_dir / "smn").exists() or not list((parquet_dir / "smn").iterdir())
 
 
-# --- _load_metadata_types ---
+# --- load_metadata_types ---
 
 
 def test_load_metadata_types(smn_bronze_dir):
     """Metadata file should produce a mapping of parameter names to Polars dtypes."""
-    types = _load_metadata_types(smn_bronze_dir / "smn")
+    types = load_metadata_types(smn_bronze_dir / "smn")
     assert types["tre200d0"] == pl.Float64
     assert types["rre150d0"] == pl.Float64
     assert types["ure200d0"] == pl.Int64
@@ -215,7 +215,7 @@ def test_load_metadata_types(smn_bronze_dir):
 
 def test_load_metadata_types_no_file(tmp_path):
     """Returns empty dict when no metadata file exists."""
-    assert _load_metadata_types(tmp_path) == {}
+    assert load_metadata_types(tmp_path) == {}
 
 
 def test_convert_applies_metadata_types(smn_bronze_dir, tmp_path):
@@ -259,17 +259,17 @@ def test_convert_climate_normals_readable(climate_normals_bronze_dir, tmp_path):
     assert len(df) == 2
 
 
-# --- _parse_metadata_types edge cases ---
+# --- parse_metadata_types edge cases ---
 
 
 def test_parse_metadata_types_invalid_content():
     """Unparseable content returns empty dict."""
-    assert _parse_metadata_types(b"not;valid;csv\x00\xff") == {}
+    assert parse_metadata_types(b"not;valid;csv\x00\xff") == {}
 
 
 def test_parse_metadata_types_missing_columns():
     """CSV without expected columns returns empty dict."""
-    assert _parse_metadata_types(b"col_a;col_b\nfoo;bar\n") == {}
+    assert parse_metadata_types(b"col_a;col_b\nfoo;bar\n") == {}
 
 
 # --- parse_csv_bytes edge cases ---
