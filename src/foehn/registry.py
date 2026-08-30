@@ -21,10 +21,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from foehn.client import (
     DownloadResult,
-    already_current,
     download_indoor_zip,
     download_normals_zip,
-    exists,
     stac_download,
 )
 from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, kind
@@ -48,7 +46,7 @@ from foehn.grids import (
     require_radar,
     select_variables,
 )
-from foehn.transfer import csv_to_disk
+from foehn.transfer import already_current, csv_to_disk, exists
 
 if TYPE_CHECKING:
     import polars as pl

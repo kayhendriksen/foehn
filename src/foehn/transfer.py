@@ -25,12 +25,13 @@ import logging
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from foehn.assets import Asset
-from foehn.convert import utf8_meteoswiss_csv
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.meteocsv import utf8_meteoswiss_csv
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,37 @@ Writer = Callable[[Fetcher, Asset, Path, str | None], WriteResult]
 
 SkipRule = Callable[[Asset, Path], bool]
 """``(asset, destination) -> skip it?``. Runs on the main thread, before anything is queued."""
+
+
+def exists(_asset: Asset, filepath: Path) -> bool:
+    """A :data:`SkipRule` for static assets: fetch each one once.
+
+    Lives here rather than with either caller: it was defined identically in the
+    download paths and in the gridded read path, which is one rule and two places
+    for it to change.
+    """
+    return filepath.exists()
+
+
+def already_current(asset: Asset, filepath: Path) -> bool:
+    """A :data:`SkipRule`: is the local copy of *asset* up to date?
+
+    Handles MeteoSwiss's in-place overwrites — e.g. CombiPrecip reanalysis
+    (CPCH) replaces the original CPC hourly file with the same filename
+    ~8 days later. A plain :func:`exists` check would leave the stale version
+    on disk; comparing the STAC "updated" timestamp against local mtime
+    picks up those server-side updates.
+    """
+    if not filepath.exists():
+        return False
+    if not asset.updated:
+        return True
+    try:
+        remote_dt = datetime.fromisoformat(asset.updated)
+        local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
+    except (ValueError, OSError):
+        return True
+    return remote_dt <= local_dt
 
 
 def stream_to_disk(fetcher: Fetcher, asset: Asset, path: Path, etag: str | None) -> WriteResult:
@@ -271,9 +303,11 @@ __all__ = [
     "SkipRule",
     "WriteResult",
     "Writer",
+    "already_current",
     "atomic_write_bytes",
     "atomic_write_text",
     "csv_to_disk",
+    "exists",
     "fetch_all",
     "stream_to_disk",
 ]

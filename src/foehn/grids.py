@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING, Protocol
 from foehn.assets import Asset, assets_of, collection_assets, other_extensions
 from foehn.collections import COLLECTION_META, COLLECTIONS
 from foehn.fetch import Fetcher, FetchError
-from foehn.transfer import fetch_all
+from foehn.transfer import exists, fetch_all
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -283,11 +283,6 @@ def _raise_if_too_many(dataset: str, match: str | None, names: list[str], max_fi
     )
 
 
-def _exists(_asset: Asset, filepath: Path) -> bool:
-    """A :data:`~foehn.transfer.SkipRule`: a grid file already on disk is never refetched."""
-    return filepath.exists()
-
-
 def _grid_assets(items: list[dict], suffixes: tuple[str, ...], match: str | None) -> tuple[list[Asset], set[str]]:
     """Pick the grid assets out of a STAC listing.
 
@@ -375,7 +370,7 @@ def ensure_grid_files(
         matched,
         out_dir,
         fetcher=fetcher,
-        skip=_exists,
+        skip=exists,
         on_error="raise",
         label="grid file",
     )

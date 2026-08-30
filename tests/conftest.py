@@ -9,6 +9,20 @@ from tests.fakes import InMemoryFetcher
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+# A CH2025 climate-scenario CSV: the KEY;VALUE preamble, then the real DATE;
+# header on nominal 30-year dates. Shared because three test modules parse one —
+# the conventions, the convert stage, and the public load path.
+CLIMATE_SCENARIOS_CSV = (
+    "TITLE;Climate CH2025\n"
+    "VARIABLE;Daily precipitation sum\n"
+    "STATION_ABBR;ABE\n"
+    "GWL;GWL1.5\n"
+    "\n"
+    "DATE;MODEL_A;MODEL_B\n"
+    "0001-01-01;0;24.2\n"
+    "0001-01-02;1.5;0\n"
+)
+
 
 @pytest.fixture
 def fetcher(monkeypatch):
