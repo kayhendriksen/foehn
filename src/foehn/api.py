@@ -296,6 +296,7 @@ def _apply_time_filters(
 
 def _apply_post_filters(
     df: pl.DataFrame,
+    dataset: str,
     *,
     year: int | list[int] | None = None,
     month: int | list[int] | None = None,
@@ -305,19 +306,24 @@ def _apply_post_filters(
     sort: str | None = None,
     columns: list[str] | None = None,
     limit: int | None = None,
-    keep_cols: tuple[str, ...] = ("station_abbr", "reference_timestamp"),
 ) -> pl.DataFrame:
-    """Apply the shared in-memory row/column filters used by load() variants."""
-    ts = "reference_timestamp"
+    """Apply the shared in-memory row/column filters used by load() variants.
+
+    Which columns an explicit ``columns=`` selection always keeps is a property of
+    the dataset's kind, so it is read from the registry rather than passed in —
+    callers were previously stating their own schema across this seam, and only
+    one of the three got it right for its kind.
+    """
+    spec = registry.spec(dataset)
     df = _apply_time_filters(df, year=year, month=month, date_from=date_from, date_to=date_to)
     if drop_null:
         _require_columns(df, [drop_null], "drop_null")
         df = df.filter(pl.col(drop_null).is_not_null())
     if sort in ("asc", "desc"):
-        df = df.sort(ts, descending=(sort == "desc"))
+        df = df.sort(spec.sort_column, descending=(sort == "desc"))
     if columns:
         _require_columns(df, columns, "columns")
-        keep = [c for c in keep_cols if c in df.columns]
+        keep = [c for c in spec.key_columns if c in df.columns]
         keep += [c for c in columns if c not in keep]
         df = df.select(keep)
     if limit is not None:
@@ -391,6 +397,7 @@ def _load_indoor(
     df = pl.concat(frames, how="diagonal_relaxed")
     return _apply_post_filters(
         df,
+        dataset,
         year=year,
         month=month,
         date_from=date_from,
@@ -399,7 +406,6 @@ def _load_indoor(
         sort=sort,
         columns=columns,
         limit=limit,
-        keep_cols=("station_abbr", "reference_timestamp", "period", "scenario", "variant"),
     )
 
 
@@ -453,20 +459,10 @@ def _load_climate_scenarios(
             frames = list(pool.map(_fetch, hrefs))
 
     df = pl.concat(frames, how="diagonal_relaxed")
-
-    if drop_null:
-        _require_columns(df, [drop_null], "drop_null")
-        df = df.filter(pl.col(drop_null).is_not_null())
-    if sort in ("asc", "desc"):
-        df = df.sort("date", descending=(sort == "desc"))
-    if columns:
-        _require_columns(df, columns, "columns")
-        keep = [c for c in ("station_abbr", "variable", "gwl", "date") if c in df.columns]
-        keep += [c for c in columns if c not in keep]
-        df = df.select(keep)
-    if limit is not None:
-        df = df.head(limit)
-    return df
+    # The calendar filters are rejected for this kind before we get here, so the
+    # shared pass's time filtering is a no-op and only the column/sort/limit half
+    # applies — which is why this can use it rather than repeating it.
+    return _apply_post_filters(df, dataset, drop_null=drop_null, sort=sort, columns=columns, limit=limit)
 
 
 def load(
@@ -586,9 +582,11 @@ def load(
     elif isinstance(time_slice, str):
         time_slice = [time_slice]
 
-    # Normalise station filter to a set of lowercase abbreviations.
+    # Normalise station filter to a set of lowercase abbreviations. An empty list
+    # means "no filter", not "match nothing" — the latter is never what a caller
+    # wants, and the MCP layer used to strip empty lists on load()'s behalf.
     station_filter: set[str] | None = None
-    if station is not None:
+    if station:
         if isinstance(station, str):
             station_filter = {station.lower()}
         else:
@@ -596,7 +594,7 @@ def load(
 
     # Normalise frequency filter to a set (e.g. {"d", "h"}).
     freq_filter: set[str] | None = None
-    if frequency is not None:
+    if frequency:
         if isinstance(frequency, str):
             freq_filter = {frequency.lower()}
         else:
@@ -707,6 +705,7 @@ def load(
 
     return _apply_post_filters(
         df,
+        dataset,
         year=year,
         month=month,
         date_from=date_from,
