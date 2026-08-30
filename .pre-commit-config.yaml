@@ -32,7 +32,7 @@ repos:
   # workflow whose `env:` block had lost its key and been silently reparented
   # under `concurrency:`, which GitHub then refused to run at all.
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.7
+    rev: v1.7.12
     hooks:
       - id: actionlint
 
