@@ -11,6 +11,7 @@ import pytest
 from foehn import registry
 from foehn.collections import COLLECTIONS, KIND_OF, DatasetKind
 from foehn.convert import convert_indoor_to_parquet, convert_preamble_to_parquet, convert_to_parquet
+from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher, stac_collection, stac_item
 
 
@@ -166,7 +167,7 @@ def _fetcher(items=(), collection=None, body=b"a;b\n1;2\n"):
 def test_download_uses_each_kinds_own_listing_configuration(dataset, href, written, tmp_path):
     """One engine, configured per row — asserted on what lands, not on who was called."""
     fake = _fetcher([stac_item("i1", href)])
-    result = registry.download(dataset, tmp_path / "bronze", fetcher=fake)
+    result = registry.download(dataset, Workspace(tmp_path), fetcher=fake)
 
     assert (tmp_path / "bronze" / dataset / written).exists()
     assert result.filenames == [written]
@@ -182,7 +183,7 @@ def test_download_uses_each_kinds_own_listing_configuration(dataset, href, writt
 def test_each_binary_kind_downloads_only_its_own_format(dataset, ignored, tmp_path):
     """Radar and GRIB2 shared one suffix list while they shared one handler."""
     fake = _fetcher([stac_item("i1", ignored)])
-    result = registry.download(dataset, tmp_path / "bronze", fetcher=fake)
+    result = registry.download(dataset, Workspace(tmp_path), fetcher=fake)
 
     assert result.downloaded == 0
     assert fake.streams == []
@@ -194,7 +195,7 @@ def test_the_csv_kinds_fetch_collection_metadata_in_the_same_pass(tmp_path):
     data = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     fake = _fetcher([stac_item("i1", data)], collection=stac_collection("ch.meteoschweiz.ogd-smn", meta))
 
-    result = registry.download("smn", tmp_path / "bronze", fetcher=fake)
+    result = registry.download("smn", Workspace(tmp_path), fetcher=fake)
 
     assert result.total_assets == 2
     assert result.downloaded == 2
@@ -204,7 +205,7 @@ def test_the_csv_kinds_fetch_collection_metadata_in_the_same_pass(tmp_path):
 def test_the_grid_kinds_fetch_no_collection_metadata(tmp_path):
     """Only the CSV kinds ship parameter/station/inventory files."""
     fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/grid.nc")])
-    registry.download("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
     assert fake.collection_calls == []
 
 
@@ -216,7 +217,7 @@ def test_download_defaults_to_the_recent_slice(tmp_path):
             stac_item("i2", f"{base}/ogd-smn_tst_d_historical.csv"),
         ]
     )
-    result = registry.download("smn", tmp_path / "bronze", fetcher=fake)
+    result = registry.download("smn", Workspace(tmp_path), fetcher=fake)
     assert result.filenames == ["ogd-smn_tst_d_recent.csv"]
 
 
@@ -229,18 +230,18 @@ def test_only_the_forecast_kind_narrows_to_the_newest_run(tmp_path):
             stac_item("d2", f"{base}/vnut12.lssw.202607211200.dkl010h0.csv"),
         ]
     )
-    result = registry.download("forecast_local", tmp_path / "bronze", fetcher=fake)
+    result = registry.download("forecast_local", Workspace(tmp_path), fetcher=fake)
     assert result.filenames == ["vnut12.lssw.202607211200.dkl010h0.csv"]
 
 
 def test_only_the_ephemeral_kinds_stop_at_the_first_page(tmp_path):
     """Forecast and radar hold thousands of items; walking them all is pure cost."""
     fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/f.grib2")])
-    registry.download("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake)
+    registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
     assert [max_items for *_, max_items in fake.listings] == [100]
 
     fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/grid.nc")])
-    registry.download("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
     assert [max_items for *_, max_items in fake.listings] == [None]
 
 
@@ -262,7 +263,7 @@ def test_convert_reaches_the_right_converter(dataset, converter):
 @pytest.mark.parametrize("dataset", ["surface_derived_grid", "forecast_icon_ch1", "radar_precip"])
 def test_convert_is_a_no_op_for_grids(dataset, tmp_path):
     """Callers used to `continue` past these; now there is nothing to skip."""
-    assert registry.convert(dataset, tmp_path / "bronze", tmp_path / "parquet") == 0
+    assert registry.convert(dataset, Workspace(tmp_path)) == 0
 
 
 def test_convert_passes_the_directories_through(tmp_path):
@@ -271,7 +272,7 @@ def test_convert_passes_the_directories_through(tmp_path):
     bronze.mkdir(parents=True)
     (bronze / "ogd-smn_tst_d_recent.csv").write_text("station_abbr;value\nTST;1.0\n", encoding="utf-8")
 
-    failures = registry.convert("smn", tmp_path / "bronze", tmp_path / "parquet")
+    failures = registry.convert("smn", Workspace(tmp_path))
 
     assert failures == 0
     assert (tmp_path / "parquet" / "smn" / "smn_d_recent.parquet").exists()

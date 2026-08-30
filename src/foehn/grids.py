@@ -55,6 +55,7 @@ from foehn.assets import Asset, assets_of, collection_assets, other_extensions
 from foehn.collections import COLLECTION_META, COLLECTIONS
 from foehn.fetch import Fetcher, FetchError
 from foehn.transfer import fetch_all
+from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ class OpenAdapter(Protocol):
         files: list[Path],
         *,
         dataset: str,
-        bronze_dir: Path,
+        workspace: Workspace,
         fetcher: Fetcher,
     ) -> xr.Dataset: ...
 
@@ -156,7 +157,7 @@ class CubeAdapter(Protocol):
         store: Path,
         *,
         dataset: str,
-        bronze_dir: Path,
+        workspace: Workspace,
         fetcher: Fetcher,
         variables: str | list[str] | None,
         mode: str,
@@ -264,7 +265,7 @@ def _run_datetime_filter(match: str | None) -> str | None:
     return run.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _raise_if_too_many(collection_key: str, match: str | None, names: list[str], max_files: int | None) -> None:
+def _raise_if_too_many(dataset: str, match: str | None, names: list[str], max_files: int | None) -> None:
     """Refuse a match that resolves to more files than the caller can handle at once."""
     if max_files is None or len(names) <= max_files:
         return
@@ -278,8 +279,7 @@ def _raise_if_too_many(collection_key: str, match: str | None, names: list[str],
             "at once). Narrow match= to a smaller set"
         )
     raise ValueError(
-        f"match={match!r} matched {len(names)} files for {collection_key!r}, {detail}. "
-        f"Matches include:\n{examples}{more}"
+        f"match={match!r} matched {len(names)} files for {dataset!r}, {detail}. Matches include:\n{examples}{more}"
     )
 
 
@@ -300,8 +300,8 @@ def _grid_assets(items: list[dict], suffixes: tuple[str, ...], match: str | None
 
 
 def ensure_grid_files(
-    collection_key: str,
-    bronze_dir: Path,
+    dataset: str,
+    workspace: Workspace,
     *,
     suffixes: tuple[str, ...] = (".nc",),
     match: str | None = None,
@@ -325,11 +325,11 @@ def ensure_grid_files(
     unreachable, it falls back to the cache (with a warning), still enforcing the
     per-format file cap on whatever is cached.
     """
-    out_dir = bronze_dir / collection_key
+    out_dir = workspace.bronze(dataset)
     local = sorted(f for s in suffixes for f in out_dir.glob(f"*{s}"))
 
     sfx = "/".join(suffixes)
-    collection_id = COLLECTIONS[collection_key]
+    collection_id = COLLECTIONS[dataset]
     datetime_filter = _run_datetime_filter(match) if run_datetime else None
     try:
         items = fetcher.items(collection_id, cache=True, datetime_filter=datetime_filter)
@@ -338,9 +338,9 @@ def ensure_grid_files(
         if cached:
             # Offline: can't check the collection, but still enforce the cap on
             # what's cached so an over-broad match can't slip through silently.
-            _raise_if_too_many(collection_key, match, [f.name for f in cached], max_files)
+            _raise_if_too_many(dataset, match, [f.name for f in cached], max_files)
             warnings.warn(
-                f"Could not reach the STAC API to verify the {collection_key!r} cache "
+                f"Could not reach the STAC API to verify the {dataset!r} cache "
                 f"({type(exc).__name__}); using {len(cached)} locally cached file(s) without "
                 "checking the collection for a complete/unique match.",
                 stacklevel=2,
@@ -360,13 +360,13 @@ def ensure_grid_files(
 
     if not matched:
         if match is not None:
-            raise ValueError(f"No {sfx} assets matching {match!r} found for {collection_key!r}.")
+            raise ValueError(f"No {sfx} assets matching {match!r} found for {dataset!r}.")
         found = ", ".join(sorted(other_exts)) or "none"
-        raise ValueError(f"No {sfx} assets found for {collection_key!r} (available asset types: {found}).")
+        raise ValueError(f"No {sfx} assets found for {dataset!r} (available asset types: {found}).")
 
     # Enforce the per-format file cap before downloading so an over-broad match
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
-    _raise_if_too_many(collection_key, match, [a.name for a in matched], max_files)
+    _raise_if_too_many(dataset, match, [a.name for a in matched], max_files)
 
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
     # grid read cannot proceed on a partial set, so the first failure is fatal.
@@ -572,24 +572,25 @@ def _open_odim_composite(xr, path: Path):
 
 
 # Parsed ICON/KENDA cell lat/lon — the constants GRIB is ~11 MB and the same grid
-# for every field in a collection, so parse it once. Keyed by (collection, bronze
-# dir): the constants file is resolved *under* bronze_dir, so keying on the
-# collection alone hands a second data_dir the first one's coordinates.
+# for every field in a collection, so parse it once. Keyed by (dataset,
+# workspace root): the constants file is resolved inside the workspace, so
+# keying on the dataset alone hands a second workspace the first one's
+# coordinates.
 _ICON_COORDS_CACHE: dict[tuple[str, str], tuple] = {}
 
 
-def _ensure_constants_file(collection_key: str, bronze_dir: Path, *, fetcher: Fetcher) -> Path | None:
+def _ensure_constants_file(dataset: str, workspace: Workspace, *, fetcher: Fetcher) -> Path | None:
     """Locate (or download) a GRIB2 collection's horizontal-constants file.
 
     Returns the local path, or None if the collection exposes no such asset.
     The constants file is a collection-level STAC asset (not a per-item one).
     """
-    out_dir = bronze_dir / collection_key
+    out_dir = workspace.bronze(dataset)
     cached = sorted(out_dir.glob("horizontal_constants*.grib2"))
     if cached:
         return cached[0]
 
-    meta = fetcher.collection(COLLECTIONS[collection_key])
+    meta = fetcher.collection(COLLECTIONS[dataset])
     constants = collection_assets(meta, key_contains="horizontal_constants")
     if not constants:
         return None
@@ -602,20 +603,20 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path, *, fetcher: Fe
     return path
 
 
-def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path, *, fetcher: Fetcher):
+def _icon_unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher):
     """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
 
     Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
     the same ``values`` dimension as the forecast fields). Cached per collection.
     """
-    cache_key = (collection_key, str(bronze_dir))
+    cache_key = (dataset, str(workspace.root))
     if cache_key in _ICON_COORDS_CACHE:
         return _ICON_COORDS_CACHE[cache_key]
 
     import cfgrib
 
     lat = lon = None
-    path = _ensure_constants_file(collection_key, bronze_dir, fetcher=fetcher)
+    path = _ensure_constants_file(dataset, workspace, fetcher=fetcher)
     if path is not None:
         for ds in cfgrib.open_datasets(path, backend_kwargs={"indexpath": ""}):
             if "tlat" in ds.variables:
@@ -630,7 +631,7 @@ def _icon_unstructured_lonlat(collection_key: str, bronze_dir: Path, *, fetcher:
     return lat, lon
 
 
-def _attach_icon_lonlat(ds, dataset: str, bronze_dir: Path, *, fetcher: Fetcher, what: str):
+def _attach_icon_lonlat(ds, dataset: str, workspace: Workspace, *, fetcher: Fetcher, what: str):
     """Attach ICON cell lat/lon to an unstructured Dataset, best-effort.
 
     ICON/KENDA are on an unstructured grid (1-D ``values``, no lat/lon in the
@@ -641,7 +642,7 @@ def _attach_icon_lonlat(ds, dataset: str, bronze_dir: Path, *, fetcher: Fetcher,
     if "values" not in ds.dims or "lat" in ds.coords:
         return ds
     try:
-        lat, lon = _icon_unstructured_lonlat(dataset, bronze_dir, fetcher=fetcher)
+        lat, lon = _icon_unstructured_lonlat(dataset, workspace, fetcher=fetcher)
         if lat is not None and lon is not None and lat.size == ds.sizes["values"]:
             return ds.assign_coords(
                 lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
@@ -675,14 +676,14 @@ def open_netcdf(files: list[Path], *, dataset: str, **_: object) -> xr.Dataset:
         raise
 
 
-def open_grib2(files: list[Path], *, dataset: str, bronze_dir: Path, fetcher: Fetcher, **_: object) -> xr.Dataset:
+def open_grib2(files: list[Path], *, dataset: str, workspace: Workspace, fetcher: Fetcher, **_: object) -> xr.Dataset:
     """Open one GRIB2 field via cfgrib, geo-referenced onto the ICON cell grid."""
     xr = _require_xarray()
     ds = _open_grid(xr, files, engine="cfgrib", backend_kwargs={"indexpath": ""})
     return _attach_icon_lonlat(
         ds,
         dataset,
-        bronze_dir,
+        workspace,
         fetcher=fetcher,
         what="returning the unstructured grid without coordinates.",
     )
@@ -740,7 +741,7 @@ def cube_grib2(
     store: Path,
     *,
     dataset: str,
-    bronze_dir: Path,
+    workspace: Workspace,
     fetcher: Fetcher,
     variables: str | list[str] | None = None,
     mode: str = "w",
@@ -777,7 +778,7 @@ def cube_grib2(
     cube = _attach_icon_lonlat(
         cube,
         dataset,
-        bronze_dir,
+        workspace,
         fetcher=fetcher,
         what="the cube is on the bare unstructured grid.",
     )

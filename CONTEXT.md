@@ -109,8 +109,16 @@ Not the **Forecast run**.
 
 ### Storage and transport
 
+**Workspace**:
+One data directory and every path foehn derives from it — **Bronze**, Parquet,
+Zarr, the ETag store and the last-run cursor. Resolved once, by one rule: the
+caller's `data_dir`, else `$FOEHN_DATA_DIR`, else `./data/meteoswiss`. The
+public functions still take `data_dir=`; everything inside foehn takes the
+**Workspace**, so no module derives one path from another.
+_Avoid_: data dir (that is the argument, not the concept), root, storage
+
 **Bronze**:
-The local cache of raw downloaded files, at `data_dir/bronze/<dataset>/`. What
+The local cache of raw downloaded files, at `<workspace>/bronze/<dataset>/`. What
 `download()` writes and what the grid readers read from.
 _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 
@@ -161,6 +169,7 @@ _Avoid_: query, params, options
 - A **Forecast CSV** **Asset** is identified by its **Forecast run**.
 - Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
 - Every **Asset** written to **Bronze** goes through **Transfer**, which calls the **Fetcher**.
+- Every path foehn reads or writes comes from a **Workspace**.
 - A **Dataset kind** has one download path and one convert path, and at most one
   of a **Reader** (tabular) or a **Grid reader** (gridded) — never both, and
   neither for **Direct ZIP**.
@@ -184,6 +193,11 @@ _Avoid_: query, params, options
   it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
   it is a **Direct ZIP** **Dataset** like any other. What "download everything"
   means is now *not gridded* rather than *tabular*, which is what it always meant.
+- The default data directory was written at seven call sites and only the CLI
+  read `$FOEHN_DATA_DIR`, so the same environment sent `foehn download` and
+  `foehn.download()` to different places; the ETag store was placed at whatever
+  `output_dir.parent` a caller passed. Resolved: **Workspace** owns the layout
+  and the resolution rule.
 - Which **Dataset kinds** are gridded was stated twice — as `collections.GRID_KINDS`
   beside the kind enum, and again as the keys of the grid path's own reader table.
   Resolved: a kind is gridded iff its registry row carries a **Grid reader**;

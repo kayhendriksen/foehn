@@ -20,6 +20,7 @@ from foehn.transfer import (
     fetch_all,
     stream_to_disk,
 )
+from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,8 @@ logger = logging.getLogger(__name__)
 # --- State files (ETags + last-run timestamp) ---
 
 
-def load_etags(data_dir: Path) -> dict:
-    path = data_dir / "_etags.json"
+def load_etags(workspace: Workspace) -> dict:
+    path = workspace.etags
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -37,15 +38,15 @@ def load_etags(data_dir: Path) -> dict:
     return {}
 
 
-def save_etags(data_dir: Path, etags: dict):
-    path = data_dir / "_etags.json"
+def save_etags(workspace: Workspace, etags: dict):
+    path = workspace.etags
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(etags, indent=2))
 
 
-def load_last_run(data_dir: Path) -> str | None:
+def load_last_run(workspace: Workspace) -> str | None:
     """Return ISO timestamp of last successful run, or None."""
-    path = data_dir / "_last_run.json"
+    path = workspace.last_run
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -56,8 +57,8 @@ def load_last_run(data_dir: Path) -> str | None:
     return None
 
 
-def save_last_run(data_dir: Path):
-    path = data_dir / "_last_run.json"
+def save_last_run(workspace: Workspace):
+    path = workspace.last_run
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
 
@@ -146,7 +147,7 @@ def stac_download(
 
     def download(
         dataset: str,
-        bronze_dir: Path,
+        workspace: Workspace,
         *,
         time_slice: list[str],
         since: str | None = None,
@@ -156,10 +157,10 @@ def stac_download(
     ) -> DownloadResult:
         result = DownloadResult()
         if with_metadata:
-            result = download_metadata(dataset, bronze_dir, workers=workers, fetcher=fetcher)
+            result = download_metadata(dataset, workspace, workers=workers, fetcher=fetcher)
 
         collection_id = COLLECTIONS[dataset]
-        out_dir = bronze_dir / dataset
+        out_dir = workspace.bronze(dataset)
         _banner(f"{title}: {collection_id}", out_dir)
 
         items = fetcher.items(collection_id, max_items=max_items)
@@ -184,7 +185,7 @@ def stac_download(
 
         # The conditional-GET writer decides "unchanged" from the server's 304,
         # so the ETag store is this kind's skip rule.
-        store = load_etags(bronze_dir.parent) if etags else None
+        store = load_etags(workspace) if etags else None
         fetched = fetch_all(
             wanted,
             out_dir,
@@ -201,7 +202,7 @@ def stac_download(
             # partial, and after failures the universe may be incomplete.
             if since is None and fetched.failed == 0:
                 _prune_stale_etags(store, collection_id, {a.href for a in every})
-            save_etags(bronze_dir.parent, store)
+            save_etags(workspace, store)
 
         return result + fetched
 
@@ -212,13 +213,13 @@ def stac_download(
 
 
 def download_metadata(
-    collection_key: str, output_dir: Path, workers: int = DEFAULT_WORKERS, *, fetcher: Fetcher
+    dataset: str, workspace: Workspace, workers: int = DEFAULT_WORKERS, *, fetcher: Fetcher
 ) -> DownloadResult:
     """Download collection-level metadata files (stations, parameters, inventory)."""
-    coll = fetcher.collection(COLLECTIONS[collection_key])
+    coll = fetcher.collection(COLLECTIONS[dataset])
     return fetch_all(
         collection_assets(coll, suffixes=(".csv",)),
-        output_dir / collection_key,
+        workspace.bronze(dataset),
         fetcher=fetcher,
         workers=workers,
         write=csv_to_disk,
@@ -300,7 +301,7 @@ def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
 
 
 def download_normals_zip(
-    dataset: str, bronze_dir: Path, *, force: bool = False, fetcher: Fetcher, **_: object
+    dataset: str, workspace: Workspace, *, force: bool = False, fetcher: Fetcher, **_: object
 ) -> DownloadResult:
     """Download the C6 climate normals ZIP and extract it.
 
@@ -309,7 +310,7 @@ def download_normals_zip(
     which is why it used to be a special case in the CLI, in the to-parquet
     command and in the Databricks ingest script instead of a row.
     """
-    out_dir = bronze_dir / dataset
+    out_dir = workspace.bronze(dataset)
     out_dir.mkdir(parents=True, exist_ok=True)
     filepath = out_dir / "normwerte.zip"
 
@@ -334,7 +335,7 @@ def download_normals_zip(
 
 
 def download_indoor_zip(
-    dataset: str, bronze_dir: Path, *, force: bool = False, fetcher: Fetcher, **_: object
+    dataset: str, workspace: Workspace, *, force: bool = False, fetcher: Fetcher, **_: object
 ) -> DownloadResult:
     """Download and extract the indoor climate scenarios ZIP.
 
@@ -344,7 +345,7 @@ def download_indoor_zip(
     which is a property of the output directory rather than of one asset.
     """
     collection_id = COLLECTIONS[dataset]
-    out_dir = bronze_dir / dataset
+    out_dir = workspace.bronze(dataset)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not force and any(out_dir.glob("*.csv")):

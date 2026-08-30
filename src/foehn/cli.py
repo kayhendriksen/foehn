@@ -15,13 +15,7 @@ from foehn.api import inventory, list_datasets, parameters, stations
 from foehn.client import load_last_run, save_last_run
 from foehn.collections import COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
-
-
-def _resolve_data_dir(args_data_dir: Path | None) -> Path:
-    if args_data_dir is not None:
-        return args_data_dir
-    env_dir = os.environ.get("FOEHN_DATA_DIR")
-    return Path(env_dir) if env_dir else Path.cwd() / "data" / "meteoswiss"
+from foehn.workspace import Workspace
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -96,10 +90,8 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_download(args: argparse.Namespace) -> None:
-    data_dir = _resolve_data_dir(args.data_dir)
-    bronze_dir = data_dir / "bronze"
-    parquet_dir = data_dir / "parquet"
-    bronze_dir.mkdir(parents=True, exist_ok=True)
+    workspace = Workspace.resolve(args.data_dir)
+    workspace.bronze().mkdir(parents=True, exist_ok=True)
 
     full_refresh = args.full_refresh or os.environ.get("FOEHN_FULL_REFRESH", "").lower() in ("1", "true", "yes")
 
@@ -111,7 +103,7 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     since = None
     if not full_refresh:
-        since = load_last_run(data_dir)
+        since = load_last_run(workspace)
 
     if since:
         print(f"Incremental update (last run: {since})", flush=True)
@@ -128,7 +120,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     for ds in datasets:
         download_failures += registry.download(
             ds,
-            bronze_dir,
+            workspace,
             time_slice=time_slices,
             since=since,
             workers=workers,
@@ -136,10 +128,10 @@ def cmd_download(args: argparse.Namespace) -> None:
             fetcher=fetcher,
         ).failed
         if not args.no_parquet:
-            failures += registry.convert(ds, bronze_dir, parquet_dir)
+            failures += registry.convert(ds, workspace)
 
     if failures == download_failures == 0:
-        save_last_run(data_dir)
+        save_last_run(workspace)
     else:
         # Don't advance the incremental cursor if anything failed — otherwise the
         # next run filters out the still-broken items as "already seen". A failed
@@ -155,26 +147,22 @@ def cmd_download(args: argparse.Namespace) -> None:
             flush=True,
         )
 
-    print(f"\nBronze data saved to:   {bronze_dir}")
+    print(f"\nBronze data saved to:   {workspace.bronze()}")
     if not args.no_parquet:
-        print(f"Parquet files saved to: {parquet_dir}")
+        print(f"Parquet files saved to: {workspace.parquet()}")
 
     if failures or download_failures:
         sys.exit(1)
 
 
 def cmd_to_parquet(args: argparse.Namespace) -> None:
-    data_dir = _resolve_data_dir(args.data_dir)
-    bronze_dir = data_dir / "bronze"
-    parquet_dir = data_dir / "parquet"
-
-    datasets = _resolve_datasets(args.datasets)
+    workspace = Workspace.resolve(args.data_dir)
 
     failures = 0
-    for ds in datasets:
-        failures += registry.convert(ds, bronze_dir, parquet_dir)
+    for ds in _resolve_datasets(args.datasets):
+        failures += registry.convert(ds, workspace)
 
-    print(f"Parquet files saved to: {parquet_dir}")
+    print(f"Parquet files saved to: {workspace.parquet()}")
 
     if failures:
         sys.exit(1)
@@ -229,7 +217,7 @@ def cmd_open(args: argparse.Namespace) -> None:
         args.dataset,
         variables=args.variables,
         match=args.match,
-        data_dir=_resolve_data_dir(args.data_dir),
+        data_dir=Workspace.resolve(args.data_dir).root,
     )
     print(ds)
 
@@ -241,7 +229,7 @@ def cmd_to_zarr(args: argparse.Namespace) -> None:
         args.dataset,
         variables=args.variables,
         match=args.match,
-        data_dir=_resolve_data_dir(args.data_dir),
+        data_dir=Workspace.resolve(args.data_dir).root,
         store=args.out,
         stack=args.stack,
     )

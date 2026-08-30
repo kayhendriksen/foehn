@@ -114,6 +114,8 @@ foehn.download("smn", time_slice=["historical", "recent"])
 ```
 
 CSVs and metadata files are written to `<data_dir>/bronze/<collection>/`.
+Omit `data_dir` and foehn uses `$FOEHN_DATA_DIR`, falling back to
+`./data/meteoswiss` — the same rule the CLI follows.
 
 ---
 

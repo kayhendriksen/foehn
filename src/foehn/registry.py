@@ -61,6 +61,7 @@ from foehn.readers import (
     read_preamble,
     read_standard,
 )
+from foehn.workspace import Workspace
 
 
 class DownloadAdapter(Protocol):
@@ -76,7 +77,7 @@ class DownloadAdapter(Protocol):
     def __call__(
         self,
         dataset: str,
-        bronze_dir: Path,
+        workspace: Workspace,
         *,
         time_slice: list[str],
         since: str | None,
@@ -86,7 +87,7 @@ class DownloadAdapter(Protocol):
     ) -> DownloadResult: ...
 
 
-ConvertAdapter = Callable[[str, Path, Path], int]
+ConvertAdapter = Callable[[str, Workspace], int]
 
 
 # The CSV kinds share one listing configuration; only whether the assets are
@@ -300,7 +301,7 @@ def spec(dataset: str) -> KindSpec:
 
 def download(
     dataset: str,
-    bronze_dir: Path,
+    workspace: Workspace,
     *,
     time_slice: list[str] | None = None,
     since: str | None = None,
@@ -311,7 +312,7 @@ def download(
     """Download *dataset* by whichever path its kind uses."""
     return spec(dataset).download(
         dataset,
-        bronze_dir,
+        workspace,
         time_slice=time_slice or ["recent"],
         since=since,
         workers=workers,
@@ -368,7 +369,7 @@ def open_grid(
     *,
     match: str | None = None,
     variables: str | list[str] | None = None,
-    bronze_dir: Path,
+    workspace: Workspace,
     fetcher: Fetcher,
 ) -> xr.Dataset:
     """Open *dataset* as an xarray Dataset, by whichever grid reader its kind uses.
@@ -388,14 +389,14 @@ def open_grid(
     reader.require()
     files = ensure_grid_files(
         dataset,
-        bronze_dir,
+        workspace,
         suffixes=reader.suffixes,
         match=match,
         max_files=reader.max_files,
         run_datetime=reader.run_datetime,
         fetcher=fetcher,
     )
-    return select_variables(reader.open(files, dataset=dataset, bronze_dir=bronze_dir, fetcher=fetcher), variables)
+    return select_variables(reader.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher), variables)
 
 
 def write_cube(
@@ -405,7 +406,7 @@ def write_cube(
     match: str | None = None,
     variables: str | list[str] | None = None,
     mode: str = "w",
-    bronze_dir: Path,
+    workspace: Workspace,
     fetcher: Fetcher,
 ) -> None:
     """Assemble *dataset*'s matched files into one Zarr store at *store*.
@@ -424,7 +425,7 @@ def write_cube(
     reader.require()
     files = ensure_grid_files(
         dataset,
-        bronze_dir,
+        workspace,
         suffixes=reader.suffixes,
         match=match,
         max_files=reader.cube_max_files,
@@ -435,17 +436,17 @@ def write_cube(
         files,
         store,
         dataset=dataset,
-        bronze_dir=bronze_dir,
+        workspace=workspace,
         fetcher=fetcher,
         variables=variables,
         mode=mode,
     )
 
 
-def convert(dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
+def convert(dataset: str, workspace: Workspace) -> int:
     """Convert *dataset* to Parquet, or return 0 for a kind that has no Parquet path."""
     converter = spec(dataset).convert
-    return 0 if converter is None else converter(dataset, bronze_dir, parquet_dir)
+    return 0 if converter is None else converter(dataset, workspace)
 
 
 def tabular_datasets() -> list[str]:

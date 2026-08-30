@@ -25,6 +25,7 @@ from foehn.convert import (
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import sanitize_noncf_time_units, write_zarr
 from foehn.readers import Filters, apply_time_filters
+from foehn.workspace import Workspace
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -86,9 +87,8 @@ def download(
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    bronze_dir = data_dir / "bronze"
-    bronze_dir.mkdir(parents=True, exist_ok=True)
+    workspace = Workspace.resolve(data_dir)
+    workspace.bronze().mkdir(parents=True, exist_ok=True)
     fetcher = default_fetcher()
 
     # Each kind knows its own download path, including the grid kinds, which have
@@ -96,7 +96,7 @@ def download(
     # the CLI's --grids behaviour (and open_dataset/to_zarr).
     return registry.download(
         dataset,
-        bronze_dir,
+        workspace,
         time_slice=time_slice,
         since=since,
         workers=workers,
@@ -124,10 +124,7 @@ def to_parquet(
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    bronze_dir = data_dir / "bronze"
-    parquet_dir = data_dir / "parquet"
-    failures = registry.convert(dataset, bronze_dir, parquet_dir)
+    failures = registry.convert(dataset, Workspace.resolve(data_dir))
     if failures:
         raise RuntimeError(
             f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
@@ -389,13 +386,11 @@ def _store_slug(match: str) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
 
 
-def _resolve_store(dataset: str, match: str | None, data_dir, store) -> Path:
-    """Resolve the .zarr output path: explicit ``store`` wins, else data_dir/zarr/<name>."""
+def _resolve_store(dataset: str, match: str | None, workspace: Workspace, store) -> Path:
+    """Resolve the .zarr output path: explicit ``store`` wins, else the workspace's."""
     if store is not None:
         return Path(store)
-    root = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    name = dataset if match is None else f"{dataset}__{_store_slug(match)}"
-    return root / "zarr" / f"{name}.zarr"
+    return workspace.zarr(dataset if match is None else f"{dataset}__{_store_slug(match)}")
 
 
 def open_dataset(
@@ -473,12 +468,11 @@ def open_dataset(
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     return registry.open_grid(
         dataset,
         match=match,
         variables=variables,
-        bronze_dir=data_dir / "bronze",
+        workspace=Workspace.resolve(data_dir),
         fetcher=default_fetcher(),
     )
 
@@ -539,8 +533,8 @@ def to_zarr(
     if stack and rechunk:
         raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
 
-    data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
-    store_path = _resolve_store(dataset, match, data_dir, store)
+    workspace = Workspace.resolve(data_dir)
+    store_path = _resolve_store(dataset, match, workspace, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Whether this kind has a cube builder is a fact on its row. NetCDF has none
@@ -553,12 +547,12 @@ def to_zarr(
             match=match,
             variables=variables,
             mode=mode,
-            bronze_dir=data_dir / "bronze",
+            workspace=workspace,
             fetcher=default_fetcher(),
         )
         return store_path
 
-    ds = sanitize_noncf_time_units(open_dataset(dataset, variables=variables, match=match, data_dir=data_dir))
+    ds = sanitize_noncf_time_units(open_dataset(dataset, variables=variables, match=match, data_dir=workspace.root))
 
     if rechunk:
         import importlib.util

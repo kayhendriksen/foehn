@@ -19,6 +19,7 @@ from foehn.api import (
 )
 from foehn.collections import COLLECTIONS
 from foehn.fetch import default_fetcher
+from foehn.workspace import Workspace
 
 
 def test_import_from_foehn():
@@ -68,7 +69,7 @@ def test_download_delegates_to_the_registry(mock_dl, dataset, tmp_path):
 
     res = download(dataset, data_dir=tmp_path)
 
-    assert mock_dl.call_args.args == (dataset, tmp_path / "bronze")
+    assert mock_dl.call_args.args == (dataset, Workspace(tmp_path))
     assert res.downloaded == 1
 
 
@@ -287,7 +288,7 @@ def test_to_parquet_unknown_dataset_raises():
 def test_to_parquet_delegates_to_the_registry(mock_conv, tmp_path):
     mock_conv.return_value = 0
     to_parquet("smn", data_dir=tmp_path)
-    mock_conv.assert_called_once_with("smn", tmp_path / "bronze", tmp_path / "parquet")
+    mock_conv.assert_called_once_with("smn", Workspace(tmp_path))
 
 
 @patch("foehn.registry.convert")

@@ -10,6 +10,7 @@ from foehn.api import open_dataset, to_zarr
 from foehn.collections import COLLECTIONS
 from foehn.fetch import FetchError
 from foehn.grids import ensure_grid_files
+from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
 
 
@@ -70,7 +71,7 @@ def test_ensure_netcdf_files_raises_when_no_nc_assets(fetcher, tmp_path):
         {"assets": {"b": {"href": "https://data.geo.admin.ch/x/bundle.zip"}}},
     ]
     with pytest.raises(ValueError, match=r"No \.nc assets"):
-        ensure_grid_files("climate_normals_grid", tmp_path / "bronze", fetcher=fetcher)
+        ensure_grid_files("climate_normals_grid", Workspace(tmp_path), fetcher=fetcher)
 
 
 def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
@@ -84,7 +85,7 @@ def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
 
     items = _items_for("x.rhiresd_ch01h.nc", "x.ranomm9120_ch01r.nc")
     fake = _fake(items)
-    result = ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
     assert len(fake.listings) == 1  # multi-file format always verifies against remote
     assert fake.streams == []  # both already cached
     assert result == [keep]
@@ -103,7 +104,7 @@ def test_ensure_netcdf_files_match_downloads_missing_from_partial_cache(tmp_path
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
     assert len(fake.streams) == 1  # the missing part 2 is fetched
     assert {p.name for p in result} == {"rhiresd_part1.nc", "rhiresd_part2.nc"}
 
@@ -135,7 +136,7 @@ def test_ensure_grid_files_fetches_missing_concurrently(tmp_path):
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
     assert len(fake.streams) == len(names)
     assert peak > 1  # genuinely overlapping
@@ -162,7 +163,7 @@ def test_ensure_grid_files_deduplicates_repeated_asset(tmp_path):
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
     assert len(fake.streams) == 1
     assert [p.name for p in result] == ["rhiresd_ch01h.nc"]
@@ -181,7 +182,7 @@ def test_grid_listing_accepts_a_cached_walk(tmp_path):
     (out_dir / "x.rhiresd_ch01h.nc").write_bytes(b"x")
     fake = _fake(_items_for("x.rhiresd_ch01h.nc"))
 
-    ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+    ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
     assert [cache for _, cache, _, _ in fake.listings] == [True]
 
@@ -223,7 +224,7 @@ def test_ensure_grid_files_narrows_forecast_listing_by_run(tmp_path):
     fake = _fake(_items_for(name))
     ensure_grid_files(
         "forecast_icon_ch1",
-        tmp_path / "bronze",
+        Workspace(tmp_path),
         suffixes=(".grib2",),
         match="202605231500-0-t_2m-ctrl",
         max_files=1,
@@ -253,7 +254,7 @@ def test_ensure_grid_files_falls_back_when_filtered_listing_misses(tmp_path):
     fake.default_body = b"x"
     result = ensure_grid_files(
         "forecast_icon_ch1",
-        tmp_path / "bronze",
+        Workspace(tmp_path),
         suffixes=(".grib2",),
         match="202605231500-0-t_2m-ctrl",
         max_files=1,
@@ -279,7 +280,7 @@ def test_ensure_single_file_match_validated_against_remote_not_cache(tmp_path):
     with pytest.raises(ValueError, match="one file at a time"):
         ensure_grid_files(
             "forecast_icon_ch1",
-            tmp_path / "bronze",
+            Workspace(tmp_path),
             suffixes=(".grib2", ".grib"),
             match="t_2m-ctrl",
             max_files=1,
@@ -299,7 +300,7 @@ def test_ensure_single_file_serves_cache_when_remote_unique(tmp_path):
     fake = _fake(items)
     result = ensure_grid_files(
         "forecast_icon_ch1",
-        tmp_path / "bronze",
+        Workspace(tmp_path),
         suffixes=(".grib2", ".grib"),
         match="t_2m-ctrl",
         max_files=1,
@@ -312,7 +313,7 @@ def test_ensure_single_file_serves_cache_when_remote_unique(tmp_path):
 def test_ensure_netcdf_files_match_no_remote_match_raises(tmp_path):
     fake = _fake([{"assets": {"a": {"href": "https://data.geo.admin.ch/x/ranomm9120.nc"}}}])
     with pytest.raises(ValueError, match="matching 'rhiresd'"):
-        ensure_grid_files("surface_derived_grid", tmp_path / "bronze", match="rhiresd", fetcher=fake)
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
 
 def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tmp_path):
@@ -332,7 +333,7 @@ def test_ensure_netcdf_files_unfiltered_consults_remote_and_downloads_missing(tm
 
     fake = _fake(items)
     fake.stream_hook = fake_download
-    result = ensure_grid_files("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
     assert len(fake.listings) == 1
     assert len(fake.streams) == 1  # only the missing file is fetched; cache reused
@@ -348,7 +349,7 @@ def test_ensure_netcdf_files_offline_falls_back_to_cache(tmp_path):
     fake = _fake()
     fake.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
     with pytest.warns(UserWarning, match="without checking the collection"):
-        result = ensure_grid_files("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+        result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
     assert [p.name for p in result] == ["a.nc"]
 
 
@@ -357,7 +358,7 @@ def test_ensure_netcdf_files_offline_no_cache_reraises(tmp_path):
     fake = _fake()
     fake.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
     with pytest.raises(FetchError):
-        ensure_grid_files("surface_derived_grid", tmp_path / "bronze", fetcher=fake)
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
 
 def test_open_dataset_reads_local_netcdf(fetcher, tmp_path):
@@ -484,7 +485,7 @@ def test_ensure_constants_file_uses_cache(tmp_path):
     f.write_bytes(b"x")
 
     fake = _fake()
-    result = _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake)
+    result = _ensure_constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
     assert fake.collection_calls == []  # the cached file short-circuits the lookup
     assert result == f
@@ -497,7 +498,7 @@ def test_ensure_constants_file_none_when_absent(tmp_path):
     fake = _fake()
     fake.any_collection = {"assets": {"params.csv": {"href": "https://data.geo.admin.ch/x/params.csv"}}}
 
-    assert _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake) is None
+    assert _ensure_constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake) is None
 
 
 def test_ensure_constants_file_downloads_when_missing(tmp_path):
@@ -512,7 +513,7 @@ def test_ensure_constants_file_downloads_when_missing(tmp_path):
         "assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": "https://data.geo.admin.ch/x/hc.grib2"}}
     }
     fake.stream_hook = fake_download
-    path = _ensure_constants_file("forecast_icon_ch1", tmp_path / "bronze", fetcher=fake)
+    path = _ensure_constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
     assert len(fake.streams) == 1
     assert path.name == "hc.grib2"
@@ -537,8 +538,8 @@ def test_icon_unstructured_lonlat_reads_and_caches(tmp_path):
         patch("foehn.grids._ensure_constants_file", return_value=fake_path),
         patch.object(cfgrib, "open_datasets", return_value=[const]) as mock_open,
     ):
-        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze", fetcher=_fake())
-        _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze", fetcher=_fake())  # cached → no re-parse
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())
+        _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())  # cached → no re-parse
 
     assert list(lat) == [46.0, 47.0]
     assert list(lon) == [7.0, 8.0]
@@ -552,7 +553,7 @@ def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
 
     _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
     with patch("foehn.grids._ensure_constants_file", return_value=None):
-        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", tmp_path / "bronze", fetcher=_fake())
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())
     assert lat is None and lon is None
     _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
 
@@ -582,9 +583,9 @@ def test_icon_unstructured_lonlat_cache_is_keyed_on_data_dir(tmp_path):
 
     with patch("foehn.grids._ensure_constants_file", return_value=fake_path):
         with patch.object(cfgrib, "open_datasets", return_value=[const(46.0)]):
-            lat_a, _ = _icon_unstructured_lonlat("forecast_icon_ch1", dir_a, fetcher=_fake())
+            lat_a, _ = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(dir_a), fetcher=_fake())
         with patch.object(cfgrib, "open_datasets", return_value=[const(99.0)]) as mock_b:
-            lat_b, _ = _icon_unstructured_lonlat("forecast_icon_ch1", dir_b, fetcher=_fake())
+            lat_b, _ = _icon_unstructured_lonlat("forecast_icon_ch1", Workspace(dir_b), fetcher=_fake())
 
     assert list(lat_a) == [46.0]
     assert list(lat_b) == [99.0]  # not dir_a's cached value
@@ -602,12 +603,12 @@ def test_icon_unstructured_lonlat_does_not_cache_failure(tmp_path):
 
     from foehn.grids import _ICON_COORDS_CACHE, _icon_unstructured_lonlat
 
-    bronze = tmp_path / "bronze"
-    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(bronze)), None)
+    workspace = Workspace(tmp_path)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(workspace.root)), None)
 
     # First call: constants unreachable (offline) → (None, None), not memoised.
     with patch("foehn.grids._ensure_constants_file", return_value=None):
-        assert _icon_unstructured_lonlat("forecast_icon_ch1", bronze, fetcher=_fake()) == (None, None)
+        assert _icon_unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=_fake()) == (None, None)
 
     const = xr.Dataset({"tlat": ("values", np.array([46.0])), "tlon": ("values", np.array([7.0]))})
     fake_path = tmp_path / "hc.grib2"
@@ -616,10 +617,10 @@ def test_icon_unstructured_lonlat_does_not_cache_failure(tmp_path):
         patch("foehn.grids._ensure_constants_file", return_value=fake_path),
         patch.object(cfgrib, "open_datasets", return_value=[const]),
     ):
-        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", bronze, fetcher=_fake())
+        lat, lon = _icon_unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=_fake())
 
     assert list(lat) == [46.0] and list(lon) == [7.0]
-    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(bronze)), None)
+    _ICON_COORDS_CACHE.pop(("forecast_icon_ch1", str(workspace.root)), None)
 
 
 # ── GRIB2 hypercube (stack=True) ────────────────────────────────────────────

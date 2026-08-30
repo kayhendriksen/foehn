@@ -142,5 +142,5 @@ Settings can also be configured via environment variables. CLI flags always take
 
 | Variable | Equivalent | Description |
 |---|---|---|
-| `FOEHN_DATA_DIR` | `--data-dir` | Root data directory |
+| `FOEHN_DATA_DIR` | `--data-dir` | Root data directory. Also honoured by the Python API, which uses it whenever `data_dir=` is not passed. |
 | `FOEHN_FULL_REFRESH` | `--full-refresh` | Set to `1`, `true`, or `yes` to ignore incremental tracking |
