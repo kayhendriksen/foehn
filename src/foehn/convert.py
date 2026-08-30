@@ -275,7 +275,7 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     must agree with the Parquet converter on where the boundaries are — these
     are upstream naming rules, and two copies of them drift.
     """
-    from foehn.collections import COLLECTIONS, NO_GRANULARITY_COLLECTIONS
+    from foehn.collections import COLLECTIONS, NO_GRANULARITY_KINDS, kind
 
     csv_files = [f for f in sorted(csv_dir.glob("*.csv")) if "_meta_" not in f.name]
     groups: dict[tuple[str, ...], list[Path]] = {}
@@ -283,7 +283,7 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     # No granularity in the filename at all (forecast_local's vnut12.lssw.* names,
     # climate_scenarios). Returning early also avoids slicing off a prefix these
     # names do not carry, which would chop arbitrary characters off the stem.
-    if collection_key in NO_GRANULARITY_COLLECTIONS:
+    if kind(collection_key) in NO_GRANULARITY_KINDS:
         if csv_files:
             groups[()] = csv_files
         return groups

@@ -30,12 +30,10 @@ from pathlib import Path
 import polars as pl
 from pyspark.sql import SparkSession
 
-from foehn.collections import COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
+from foehn import registry
 from foehn.convert import _load_metadata_types, group_csv_files, parse_csv_bytes
 
-TABULAR_COLLECTIONS = [key for key in COLLECTIONS if key not in GRIB2_COLLECTIONS | NETCDF_COLLECTIONS] + [
-    "climate_normals"
-]
+TABULAR_COLLECTIONS = [*registry.tabular_datasets(), "climate_normals"]
 
 # Collections where historical data can exceed available memory.
 # Chunked ingestion is used for these when --historical is set.

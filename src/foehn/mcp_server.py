@@ -18,17 +18,13 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 import foehn
-from foehn.collections import (
-    COLLECTION_META,
-    COLLECTIONS,
-    GRIB2_COLLECTIONS,
-    NETCDF_COLLECTIONS,
-)
+from foehn import registry
+from foehn.collections import COLLECTION_META, COLLECTIONS
 
 logger = logging.getLogger(__name__)
 
 # Datasets that can be loaded as tabular data (CSV-backed).
-_LOADABLE_DATASETS = sorted(k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS and k not in NETCDF_COLLECTIONS)
+_LOADABLE_DATASETS = sorted(registry.tabular_datasets())
 _VALID_FREQUENCIES = {"t", "h", "d", "m", "y"}
 _VALID_TIME_SLICES = {"historical", "recent", "now"}
 _VALID_CATEGORIES = {"A", "C", "D", "E"}
@@ -52,10 +48,10 @@ _GRID_INSPECT = ToolAnnotations(
     open_world_hint=True,
 )
 
-# Gridded collections describe_grid can inspect: every NetCDF, GRIB2, and HDF5
-# (radar) collection (GRIB2_COLLECTIONS holds both GRIB2 and radar). GRIB2/radar
-# additionally require a single-file match=, enforced by open_dataset.
-_INSPECTABLE_GRIDS = sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS)
+# Gridded collections describe_grid can inspect: every NetCDF, GRIB2 and radar
+# dataset. GRIB2/radar additionally require a single-file match=, enforced by
+# open_dataset.
+_INSPECTABLE_GRIDS = sorted(registry.grid_datasets())
 
 mcp = MCPServer(
     "foehn",
@@ -284,7 +280,7 @@ def load_data(
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-    if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
+    if not registry.spec(dataset).tabular:
         fmt = COLLECTION_META[dataset]["format"]
         raise ValueError(f"Dataset {dataset!r} is {fmt} (binary/grid) and cannot be loaded as tabular data.")
     if frequency and frequency.lower() not in _VALID_FREQUENCIES:
@@ -354,7 +350,7 @@ def describe_data(
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset {dataset!r}. Call list_datasets() to see options.")
-    if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
+    if not registry.spec(dataset).tabular:
         fmt = COLLECTION_META[dataset]["format"]
         raise ValueError(f"Dataset {dataset!r} is {fmt} (binary/grid) and cannot be described.")
     if frequency and frequency.lower() not in _VALID_FREQUENCIES:

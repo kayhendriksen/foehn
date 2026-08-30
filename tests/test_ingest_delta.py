@@ -327,11 +327,13 @@ def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
 
 
 def test_tabular_collections_excludes_binary():
-    from foehn.collections import GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
+    from foehn import registry
 
     for key in TABULAR_COLLECTIONS:
-        assert key not in GRIB2_COLLECTIONS
-        assert key not in NETCDF_COLLECTIONS
+        # climate_normals is a ZIP from opendata.swiss, not a STAC collection,
+        # so it has no kind — everything else must be a tabular one.
+        if key != "climate_normals":
+            assert registry.spec(key).tabular
 
 
 def test_tabular_collections_includes_climate_normals():

@@ -99,6 +99,7 @@ format — this is what each foehn reader relies on:
 """
 
 import re
+from enum import StrEnum
 
 STAC_API_BASE = "https://data.geo.admin.ch/api/stac/v1"
 
@@ -302,7 +303,7 @@ COLLECTION_META: dict[str, dict] = {
         "category": "C",
         "subcategory": "C",
         "description": "Indoor climate scenarios (hourly)",
-        "format": "CSV+ZIP",
+        "format": "CSV",
         "frequencies": [],
         "time_slices": [],
     },
@@ -362,51 +363,93 @@ COLLECTION_META: dict[str, dict] = {
 # A collection belongs to at most one of these sets.
 # Everything not in any set is treated as a CSV collection (downloaded + Parquet).
 
+
 # CSV collections that DON'T use "recent"/"historical"/"now" filename suffixes.
 # These get all CSVs regardless of data_types filter. Only latest item is kept.
-FORECAST_CSV_COLLECTIONS = {"forecast_local"}
+class DatasetKind(StrEnum):
+    """Which pipeline handles a dataset: its download, convert and load paths.
 
-# Collections whose CSV filenames do NOT follow the standard
-# ogd-{key}_{station}_{granularity}[_{timeslice}].csv pattern.
-# Granularity filtering is not supported for these.
-NO_GRANULARITY_COLLECTIONS = {"forecast_local", "climate_scenarios"}
+    Distinct from ``format`` in COLLECTION_META, which says what the *bytes* are
+    and is public. Several kinds share one format — smn, climate_scenarios and
+    forecast_local are all CSV but need three different readers — so format
+    cannot carry the routing. Kind is internal; nothing surfaces it to callers.
+    """
 
-# Binary grid collections (HDF5/GRIB2). Large, opt-in via --grids flag.
-# Downloaded as binary blobs, NOT converted to Parquet.
-GRIB2_COLLECTIONS = {
-    "forecast_icon_ch1",
-    "forecast_icon_ch2",
-    "analysis_kenda_ch1",
-    "radar_precip",
-    "radar_hail",
+    STANDARD_CSV = "standard_csv"
+    """Per-station CSV assets split by time slice and granularity. The main path."""
+
+    PREAMBLE_CSV = "preamble_csv"
+    """CSV behind a ``KEY;VALUE`` metadata preamble, on nominal 30-year dates."""
+
+    ARCHIVE_CSV = "archive_csv"
+    """A single ZIP of per-station CSVs rather than per-station STAC assets."""
+
+    FORECAST_CSV = "forecast_csv"
+    """Point forecasts named by run, with no time slice and no reference_timestamp."""
+
+    NETCDF_GRID = "netcdf_grid"
+    """Static gridded analyses, normals and scenarios. Combines across files."""
+
+    GRIB2_GRID = "grib2_grid"
+    """ICON/KENDA on an unstructured grid, one field per file."""
+
+    RADAR_GRID = "radar_grid"
+    """ODIM-H5 Cartesian composites, one per timestep."""
+
+
+# One row per dataset. Adding a collection means adding it here and to
+# COLLECTIONS; a kind missing from either is caught by the tests.
+KIND_OF: dict[str, DatasetKind] = {
+    # A: ground-based measurements
+    "smn": DatasetKind.STANDARD_CSV,
+    "smn_precip": DatasetKind.STANDARD_CSV,
+    "smn_tower": DatasetKind.STANDARD_CSV,
+    "nime": DatasetKind.STANDARD_CSV,
+    "tot": DatasetKind.STANDARD_CSV,
+    "obs": DatasetKind.STANDARD_CSV,
+    "pollen": DatasetKind.STANDARD_CSV,
+    "phenology": DatasetKind.STANDARD_CSV,
+    # C: climate
+    "nbcn": DatasetKind.STANDARD_CSV,
+    "nbcn_precip": DatasetKind.STANDARD_CSV,
+    "surface_derived_grid": DatasetKind.NETCDF_GRID,
+    "satellite_derived_grid": DatasetKind.NETCDF_GRID,
+    "radar_derived_grid": DatasetKind.NETCDF_GRID,
+    "climate_normals_grid": DatasetKind.NETCDF_GRID,
+    "climate_scenarios_grid": DatasetKind.NETCDF_GRID,
+    "climate_scenarios": DatasetKind.PREAMBLE_CSV,
+    "climate_scenarios_indoor": DatasetKind.ARCHIVE_CSV,
+    # D: radar
+    "radar_precip": DatasetKind.RADAR_GRID,
+    "radar_hail": DatasetKind.RADAR_GRID,
+    # E: forecasts
+    "forecast_icon_ch1": DatasetKind.GRIB2_GRID,
+    "forecast_icon_ch2": DatasetKind.GRIB2_GRID,
+    "analysis_kenda_ch1": DatasetKind.GRIB2_GRID,
+    "forecast_local": DatasetKind.FORECAST_CSV,
 }
 
-# Spatial/static collections (NetCDF, GeoTIFF, ZIP). Always downloaded.
-# NOT converted to Parquet — these are gridded/spatial data, not tabular.
-NETCDF_COLLECTIONS = {
-    "surface_derived_grid",
-    "satellite_derived_grid",
-    "radar_derived_grid",
-    "climate_scenarios_grid",
-    "climate_normals_grid",
-}
+# The kinds read as grids rather than tabular frames.
+GRID_KINDS = frozenset({DatasetKind.NETCDF_GRID, DatasetKind.GRIB2_GRID, DatasetKind.RADAR_GRID})
 
-# Tabular collections delivered as a single ZIP of CSVs (not per-station STAC
-# assets), with their own separator/timestamp layout. Like the C6 climate
-# normals, these get a bespoke download+convert path rather than the standard
-# CSV flow.
-CSV_ZIP_COLLECTIONS = {
-    "climate_scenarios_indoor",
-}
+# Kinds whose filenames do not carry the standard
+# ogd-{key}_{station}_{granularity}[_{timeslice}].csv pattern, so there is no
+# granularity to filter on. Derived from the kind rather than listed separately,
+# which is what NO_GRANULARITY_COLLECTIONS used to be.
+NO_GRANULARITY_KINDS = frozenset({DatasetKind.PREAMBLE_CSV, DatasetKind.FORECAST_CSV})
 
-# CSV collections whose files carry a multi-row "KEY;VALUE" metadata preamble
-# before the real "DATE;<model>;..." table (CH2025 climate scenarios). The
-# standard reader would treat the preamble as the header, so these need a
-# preamble-skipping parser. Downloads are standard per-file CSVs; only the
-# parse differs.
-PREAMBLE_CSV_COLLECTIONS = {
-    "climate_scenarios",
-}
+
+def kind(dataset: str) -> DatasetKind:
+    """Return a dataset's :class:`DatasetKind`.
+
+    Raises KeyError for an unknown dataset, same as ``COLLECTIONS[dataset]``.
+    """
+    return KIND_OF[dataset]
+
+
+def is_grid(dataset: str) -> bool:
+    """True if *dataset* is read as a grid (xarray) rather than a DataFrame."""
+    return KIND_OF[dataset] in GRID_KINDS
 
 
 # (The gridded read path's per-format engine/suffix config now lives in

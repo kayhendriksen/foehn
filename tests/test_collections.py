@@ -4,11 +4,8 @@ from foehn.api import list_datasets
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
-    CSV_ZIP_COLLECTIONS,
-    FORECAST_CSV_COLLECTIONS,
-    GRIB2_COLLECTIONS,
-    NETCDF_COLLECTIONS,
-    PREAMBLE_CSV_COLLECTIONS,
+    KIND_OF,
+    DatasetKind,
     forecast_run_from_filename,
     time_slice_from_filename,
 )
@@ -55,39 +52,35 @@ def test_collections_keys_are_strings():
         assert isinstance(collection_id, str) and collection_id.startswith("ch.")
 
 
-def test_routing_sets_are_subsets_of_collections():
-    keys = set(COLLECTIONS.keys())
-    assert keys >= FORECAST_CSV_COLLECTIONS
-    assert keys >= GRIB2_COLLECTIONS
-    assert keys >= NETCDF_COLLECTIONS
-    assert keys >= CSV_ZIP_COLLECTIONS
-    assert keys >= PREAMBLE_CSV_COLLECTIONS
+def test_every_collection_has_exactly_one_kind():
+    """The old routing sets could disagree; one mapping cannot.
+
+    They also had to be kept mutually exclusive by hand — a collection in two
+    sets routed differently depending on which ladder reached it first.
+    """
+    assert set(KIND_OF) == set(COLLECTIONS)
+    assert all(isinstance(k, DatasetKind) for k in KIND_OF.values())
 
 
-def test_routing_sets_are_mutually_exclusive():
-    """A collection should belong to at most one routing set."""
-    all_sets = [
-        FORECAST_CSV_COLLECTIONS,
-        GRIB2_COLLECTIONS,
-        NETCDF_COLLECTIONS,
-        CSV_ZIP_COLLECTIONS,
-        PREAMBLE_CSV_COLLECTIONS,
-    ]
-    for i, a in enumerate(all_sets):
-        for b in all_sets[i + 1 :]:
-            assert a.isdisjoint(b), f"Overlap between routing sets: {a & b}"
+def test_every_kind_is_used():
+    """A kind nothing maps to is a branch no caller can reach."""
+    assert set(KIND_OF.values()) == set(DatasetKind)
 
 
-def test_indoor_scenarios_is_csv_zip_not_netcdf():
-    assert "climate_scenarios_indoor" in CSV_ZIP_COLLECTIONS
-    assert "climate_scenarios_indoor" not in NETCDF_COLLECTIONS
-    assert COLLECTION_META["climate_scenarios_indoor"]["format"] == "CSV+ZIP"
+def test_indoor_scenarios_is_an_archive_of_csvs():
+    """The archive-ness is the kind; the format is plain CSV, which is what it is."""
+    assert KIND_OF["climate_scenarios_indoor"] is DatasetKind.ARCHIVE_CSV
+    assert COLLECTION_META["climate_scenarios_indoor"]["format"] == "CSV"
 
 
 def test_climate_scenarios_is_preamble_csv():
-    assert "climate_scenarios" in PREAMBLE_CSV_COLLECTIONS
-    assert "climate_scenarios" not in NETCDF_COLLECTIONS
-    assert "climate_scenarios" not in CSV_ZIP_COLLECTIONS
+    assert KIND_OF["climate_scenarios"] is DatasetKind.PREAMBLE_CSV
+
+
+def test_radar_is_its_own_kind_not_grib2():
+    """GRIB2_COLLECTIONS used to hold the HDF5 radar datasets; the name lied."""
+    assert KIND_OF["radar_precip"] is DatasetKind.RADAR_GRID
+    assert COLLECTION_META["radar_precip"]["format"] == "HDF5"
 
 
 def test_collection_ids_are_unique():
@@ -155,7 +148,7 @@ def test_spatial_climate_analysis_grids_are_netcdf():
     # static NetCDF collections, read via open_dataset/to_zarr like the others.
     for key in ("radar_derived_grid", "climate_normals_grid"):
         assert COLLECTION_META[key]["format"] == "NetCDF"
-        assert key in NETCDF_COLLECTIONS
+        assert KIND_OF[key] is DatasetKind.NETCDF_GRID
 
 
 # --- forecast run timestamps ---

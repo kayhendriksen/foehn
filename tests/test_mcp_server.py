@@ -10,7 +10,8 @@ import pytest
 
 pytest.importorskip("mcp", reason="mcp not installed")
 
-from foehn.collections import COLLECTIONS, GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
+from foehn import registry
+from foehn.collections import COLLECTIONS
 from foehn.mcp_server import (
     _INSPECTABLE_GRIDS,
     _LOADABLE_DATASETS,
@@ -40,11 +41,11 @@ from foehn.mcp_server import (
 
 class TestConstants:
     def test_loadable_datasets_excludes_grib2(self):
-        for ds in GRIB2_COLLECTIONS:
+        for ds in registry.grid_datasets():
             assert ds not in _LOADABLE_DATASETS
 
     def test_loadable_datasets_excludes_netcdf(self):
-        for ds in NETCDF_COLLECTIONS:
+        for ds in registry.grid_datasets():
             assert ds not in _LOADABLE_DATASETS
 
     def test_loadable_datasets_is_sorted(self):
@@ -55,7 +56,7 @@ class TestConstants:
             assert ds in COLLECTIONS
 
     def test_inspectable_grids_are_all_gridded(self):
-        assert sorted(NETCDF_COLLECTIONS | GRIB2_COLLECTIONS) == _INSPECTABLE_GRIDS
+        assert sorted(registry.grid_datasets()) == _INSPECTABLE_GRIDS
 
     def test_valid_frequencies(self):
         assert {"t", "h", "d", "m", "y"} == _VALID_FREQUENCIES
@@ -697,7 +698,7 @@ class TestUsageGuide:
 
     def test_contains_binary_datasets(self):
         result = usage_guide()
-        for ds in sorted(GRIB2_COLLECTIONS | NETCDF_COLLECTIONS):
+        for ds in sorted(registry.grid_datasets()):
             assert f"`{ds}`" in result
 
     def test_contains_workflow_steps(self):
