@@ -16,8 +16,6 @@ from foehn.mcp_server import (
     _INSPECTABLE_GRIDS,
     _LOADABLE_DATASETS,
     _VALID_CATEGORIES,
-    _VALID_FREQUENCIES,
-    _VALID_TIME_SLICES,
     Dataset,
     DataSummary,
     GridSummary,
@@ -57,12 +55,6 @@ class TestConstants:
 
     def test_inspectable_grids_are_all_gridded(self):
         assert sorted(registry.grid_datasets()) == _INSPECTABLE_GRIDS
-
-    def test_valid_frequencies(self):
-        assert {"t", "h", "d", "m", "y"} == _VALID_FREQUENCIES
-
-    def test_valid_time_slices(self):
-        assert {"historical", "recent", "now"} == _VALID_TIME_SLICES
 
     def test_valid_categories(self):
         assert {"A", "C", "D", "E"} == _VALID_CATEGORIES

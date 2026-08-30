@@ -4,7 +4,9 @@ from foehn.api import list_datasets
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
+    GRANULARITIES,
     KIND_OF,
+    TIME_SLICES,
     DatasetKind,
     forecast_run_from_filename,
     time_slice_from_filename,
@@ -171,3 +173,23 @@ def test_forecast_run_from_filename_rejects_non_forecast_names():
 def test_forecast_runs_sort_lexicographically():
     runs = ["202607210600", "202606300000", "202607192300"]
     assert max(runs) == "202607210600"
+
+
+# --- Filter vocabularies ---
+# These used to be asserted against a second copy in mcp_server. They are facts
+# about MeteoSwiss's filenames, so they are tested where they are defined.
+
+
+def test_time_slice_vocabulary():
+    assert {"historical", "recent", "now"} == set(TIME_SLICES)
+
+
+def test_granularity_vocabulary():
+    assert {"t", "h", "d", "m", "y"} == set(GRANULARITIES)
+
+
+def test_every_advertised_frequency_is_in_the_vocabulary():
+    """list_datasets() doubles as the per-dataset valid-values list for frequency=."""
+    for key, meta in COLLECTION_META.items():
+        assert set(meta["frequencies"]) <= set(GRANULARITIES), key
+        assert set(meta["time_slices"]) <= set(TIME_SLICES), key

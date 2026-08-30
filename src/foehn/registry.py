@@ -4,11 +4,11 @@ One table replacing the routing ladders that used to sit in ``api``, ``cli`` and
 the Databricks ingest script, each re-deriving from a different set of dataset
 keys. Callers ask the registry instead of testing membership.
 
-Layering: ``collections`` (dataset facts) → ``client``/``convert`` (adapters) →
-this module → ``api``/``cli``/``mcp_server``. The load readers deliberately stay
-in ``api``: they are its implementation, and hoisting them here just to fill a
-column would invert that dependency. What the registry says about loading is
-which filters a kind supports, which is a fact about the data.
+Layering: ``collections`` (dataset facts) → ``client``/``convert``/``readers``
+(adapters) → this module → ``api``/``cli``/``mcp_server``. All three pipeline
+stages route through the table: the load readers live in ``foehn.readers``,
+below this module, so ``load`` can sit in :class:`KindSpec` beside ``download``
+and ``convert`` rather than as an if-ladder in ``api``.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from foehn.client import (
     DownloadResult,
@@ -33,10 +34,41 @@ from foehn.convert import (
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 
-# Every download adapter takes the same arguments and ignores what its kind does
-# not use, so callers never have to know which ones apply. The alternative — a
-# per-kind call shape — is the ladder we are removing.
-DownloadAdapter = Callable[..., DownloadResult]
+if TYPE_CHECKING:
+    import polars as pl
+
+from foehn.readers import (
+    Filters,
+    Reader,
+    read_archive,
+    read_preamble,
+    read_standard,
+)
+
+
+class DownloadAdapter(Protocol):
+    """Every download adapter takes the same arguments and ignores what its kind
+    does not use, so callers never have to know which ones apply. The alternative
+    — a per-kind call shape — is the ladder we are removing.
+
+    Spelled as a Protocol rather than ``Callable[..., DownloadResult]``: with
+    ``...`` neither the adapters nor the call site were checked at all, so the
+    "everyone takes everything" convention was documented but not enforced.
+    """
+
+    def __call__(
+        self,
+        dataset: str,
+        bronze_dir: Path,
+        *,
+        time_slice: list[str],
+        since: str | None,
+        workers: int,
+        force: bool,
+        fetcher: Fetcher,
+    ) -> DownloadResult: ...
+
+
 ConvertAdapter = Callable[[str, Path, Path], int]
 
 
@@ -59,13 +91,7 @@ def _download_standard(
     coll = download_collection(
         dataset, bronze_dir, data_types=time_slice, since=since, workers=workers, fetcher=fetcher
     )
-    return DownloadResult(
-        total_assets=meta.total_assets + coll.total_assets,
-        downloaded=meta.downloaded + coll.downloaded,
-        skipped=meta.skipped + coll.skipped,
-        failed=meta.failed + coll.failed,
-        filenames=meta.filenames + coll.filenames,
-    )
+    return meta + coll
 
 
 def _download_archive(dataset: str, bronze_dir: Path, *, force: bool, fetcher: Fetcher, **_: object) -> DownloadResult:
@@ -106,6 +132,9 @@ class KindSpec:
 
     download: DownloadAdapter
     convert: ConvertAdapter | None
+    load: Reader | None
+    """How this kind becomes a DataFrame. None for the grid kinds (use open_dataset)."""
+
     tabular: bool
     """Loadable as a Polars DataFrame. False for the grid kinds (use open_dataset)."""
 
@@ -126,6 +155,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.STANDARD_CSV: KindSpec(
         download=_download_standard,
         convert=_convert_standard,
+        load=read_standard,
         tabular=True,
         supports_granularity=True,
         supports_calendar_filters=True,
@@ -133,6 +163,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.PREAMBLE_CSV: KindSpec(
         download=_download_standard,
         convert=_convert_preamble,
+        load=read_preamble,
         tabular=True,
         supports_granularity=False,
         # Dates are nominal (0001..0030 on a 365-day calendar), so the calendar
@@ -145,6 +176,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.ARCHIVE_CSV: KindSpec(
         download=_download_archive,
         convert=_convert_archive,
+        load=read_archive,
         tabular=True,
         supports_granularity=False,
         supports_calendar_filters=True,
@@ -153,6 +185,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.FORECAST_CSV: KindSpec(
         download=_download_standard,
         convert=_convert_standard,
+        load=read_standard,
         tabular=True,
         supports_granularity=False,
         supports_calendar_filters=True,
@@ -160,6 +193,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.NETCDF_GRID: KindSpec(
         download=_download_netcdf,
         convert=None,
+        load=None,
         tabular=False,
         supports_granularity=False,
         supports_calendar_filters=False,
@@ -167,6 +201,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.GRIB2_GRID: KindSpec(
         download=_download_grib2,
         convert=None,
+        load=None,
         tabular=False,
         supports_granularity=False,
         supports_calendar_filters=False,
@@ -174,6 +209,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.RADAR_GRID: KindSpec(
         download=_download_grib2,
         convert=None,
+        load=None,
         tabular=False,
         supports_granularity=False,
         supports_calendar_filters=False,
@@ -206,6 +242,19 @@ def download(
         force=force,
         fetcher=fetcher,
     )
+
+
+def load(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
+    """Load *dataset* by whichever reader its kind uses.
+
+    Callers guard on ``spec(dataset).tabular`` first — the grid kinds have no
+    reader, which is a fact about the kind rather than a branch each caller
+    re-derives.
+    """
+    reader = spec(dataset).load
+    if reader is None:
+        raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
+    return reader(dataset, filters, fetcher=fetcher)
 
 
 def convert(dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:

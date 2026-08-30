@@ -2,37 +2,27 @@
 
 from __future__ import annotations
 
-import re
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
 
 from foehn import registry
-from foehn._urls import asset_filename
-from foehn.assets import assets_of, collection_assets, hrefs, select
+from foehn.assets import collection_assets
 from foehn.client import (
     DownloadResult,
-    _check_zip_size,
 )
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
-    DatasetKind,
-    kind,
+    GRANULARITIES,
+    TIME_SLICES,
 )
 from foehn.convert import (
-    _parse_metadata_types,
-    add_forecast_local_timestamp,
-    add_indoor_columns,
     decode_meteoswiss_csv,
-    parse_climate_scenarios_csv,
-    parse_csv_bytes,
-    parse_indoor_filename,
-    utf8_meteoswiss_csv,
 )
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import open_dataset, to_zarr
+from foehn.readers import Filters, apply_time_filters
 
 __all__ = [
     "download",
@@ -227,10 +217,6 @@ def inventory(dataset: str) -> pl.DataFrame:
     )
 
 
-# A ``date_to`` of exactly "YYYY-MM-DD" names a whole day, not its midnight.
-_BARE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
 def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
     """Raise ValueError naming any of *names* the loaded frame doesn't have.
 
@@ -248,204 +234,30 @@ def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
     raise ValueError(f"Unknown column(s) {missing} in {label}=. This dataset has: {available}")
 
 
-def _apply_time_filters(
-    df: pl.DataFrame,
-    *,
-    year: int | list[int] | None = None,
-    month: int | list[int] | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-) -> pl.DataFrame:
-    """Apply the timestamp row predicates shared by the post-filter and the per-frame pass.
-
-    Split out of :func:`_apply_post_filters` so ``load()`` can run it on each CSV
-    as it is parsed, instead of only on the concatenated result. These are all
-    per-row predicates, so filtering early is equivalent — but it bounds peak
-    memory by the largest single station file rather than by the whole matched
-    set. ``drop_null`` deliberately stays in the post-filter: a frame missing
-    that column keeps every row here, while after a diagonal concat the column
-    exists as null across those rows and they are dropped.
-    """
-    ts = "reference_timestamp"
-    if year is not None:
-        years = [year] if isinstance(year, int) else year
-        df = df.filter(pl.col(ts).dt.year().is_in(years))
-    if month is not None:
-        months = [month] if isinstance(month, int) else month
-        df = df.filter(pl.col(ts).dt.month().is_in(months))
-    # Cast the timestamp column to Datetime before comparing: some daily/monthly
-    # files parse ``reference_timestamp`` as a Date, and comparing Date vs the
-    # Datetime literal would raise. Date→Datetime and Datetime→Datetime are both safe.
-    if date_from is not None:
-        df = df.filter(pl.col(ts).cast(pl.Datetime) >= pl.lit(date_from).str.to_datetime())
-    if date_to is not None:
-        bound = pl.lit(date_to).str.to_datetime()
-        if _BARE_DATE_RE.match(date_to):
-            # A bare "YYYY-MM-DD" means the whole of that day. Comparing <= the
-            # parsed midnight is right for d/m/y (timestamps sit at 00:00) but
-            # silently drops every 10-minute and hourly reading after 00:00, so
-            # bound the day exclusively at the next midnight instead.
-            df = df.filter(pl.col(ts).cast(pl.Datetime) < bound.dt.offset_by("1d"))
-        else:
-            df = df.filter(pl.col(ts).cast(pl.Datetime) <= bound)
-    return df
-
-
-def _apply_post_filters(
-    df: pl.DataFrame,
-    dataset: str,
-    *,
-    year: int | list[int] | None = None,
-    month: int | list[int] | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    drop_null: str | None = None,
-    sort: str | None = None,
-    columns: list[str] | None = None,
-    limit: int | None = None,
-) -> pl.DataFrame:
-    """Apply the shared in-memory row/column filters used by load() variants.
+def _apply_post_filters(df: pl.DataFrame, dataset: str, filters: Filters) -> pl.DataFrame:
+    """Apply the row/column filters that are the same for every kind.
 
     Which columns an explicit ``columns=`` selection always keeps is a property of
     the dataset's kind, so it is read from the registry rather than passed in —
     callers were previously stating their own schema across this seam, and only
-    one of the three got it right for its kind.
+    one of the three got it right for its kind. Running this once here, after
+    whichever reader produced the frame, is what keeps the readers free of it.
     """
     spec = registry.spec(dataset)
-    df = _apply_time_filters(df, year=year, month=month, date_from=date_from, date_to=date_to)
-    if drop_null:
-        _require_columns(df, [drop_null], "drop_null")
-        df = df.filter(pl.col(drop_null).is_not_null())
-    if sort in ("asc", "desc"):
-        df = df.sort(spec.sort_column, descending=(sort == "desc"))
-    if columns:
-        _require_columns(df, columns, "columns")
+    df = apply_time_filters(df, filters)
+    if filters.drop_null:
+        _require_columns(df, [filters.drop_null], "drop_null")
+        df = df.filter(pl.col(filters.drop_null).is_not_null())
+    if filters.sort in ("asc", "desc"):
+        df = df.sort(spec.sort_column, descending=(filters.sort == "desc"))
+    if filters.columns:
+        _require_columns(df, list(filters.columns), "columns")
         keep = [c for c in spec.key_columns if c in df.columns]
-        keep += [c for c in columns if c not in keep]
+        keep += [c for c in filters.columns if c not in keep]
         df = df.select(keep)
-    if limit is not None:
-        df = df.head(limit)
+    if filters.limit is not None:
+        df = df.head(filters.limit)
     return df
-
-
-def _load_indoor(
-    dataset: str,
-    *,
-    station: str | list[str] | None = None,
-    year: int | list[int] | None = None,
-    month: int | list[int] | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    columns: list[str] | None = None,
-    drop_null: str | None = None,
-    sort: str | None = None,
-    limit: int | None = None,
-) -> pl.DataFrame:
-    """Load a zipped multi-CSV collection (indoor scenarios) into a DataFrame.
-
-    Unlike the per-station collections, this is a single archive, so the whole
-    ZIP is fetched and parsed in memory; ``station`` filters which member CSVs
-    are parsed, the rest of the filters apply to the combined frame.
-    """
-    import io
-    import zipfile
-
-    collection_id = COLLECTIONS[dataset]
-    fetcher = default_fetcher()
-    items = fetcher.items(collection_id)
-    archives = assets_of(items, suffixes=(".zip",))
-    if not archives:
-        raise ValueError(f"No .zip asset found for {dataset!r}.")
-    zip_href = archives[0].href
-
-    station_filter: set[str] | None = None
-    if station is not None:
-        station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
-
-    archive = fetcher.get(zip_href, timeout=300).body
-
-    frames: list[pl.DataFrame] = []
-    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        # Everything below is parsed in memory — refuse a decompression bomb.
-        _check_zip_size(zf, zip_href.split("/")[-1])
-        for name in zf.namelist():
-            if not name.endswith(".csv"):
-                continue
-            parsed = parse_indoor_filename(Path(name).stem)
-            if parsed is None:
-                continue
-            st, period, scenario, variant = parsed
-            if station_filter is not None and st.lower() not in station_filter:
-                continue
-            with zf.open(name) as fh:
-                frame = pl.read_csv(fh.read(), separator=",", infer_schema_length=10_000, truncate_ragged_lines=True)
-            frames.append(add_indoor_columns(frame, st, period, scenario, variant))
-
-    if not frames:
-        raise ValueError(f"No indoor data found for {dataset!r} with station={station}.")
-
-    df = pl.concat(frames, how="diagonal_relaxed")
-    return _apply_post_filters(
-        df,
-        dataset,
-        year=year,
-        month=month,
-        date_from=date_from,
-        date_to=date_to,
-        drop_null=drop_null,
-        sort=sort,
-        columns=columns,
-        limit=limit,
-    )
-
-
-def _load_climate_scenarios(
-    dataset: str,
-    *,
-    station: str | list[str] | None = None,
-    columns: list[str] | None = None,
-    drop_null: str | None = None,
-    sort: str | None = None,
-    limit: int | None = None,
-    workers: int = DEFAULT_WORKERS,
-) -> pl.DataFrame:
-    """Load CH2025 climate-scenario CSVs (metadata preamble + wide model table).
-
-    Dates are nominal (0001..0030 on a 365-day calendar), so the calendar-based
-    year/month/date filters do not apply here; ``sort`` orders lexically by the
-    string ``date`` column.
-    """
-    collection_id = COLLECTIONS[dataset]
-    fetcher = default_fetcher()
-
-    station_filter: set[str] | None = None
-    if station is not None:
-        station_filter = {station.lower()} if isinstance(station, str) else {s.lower() for s in station}
-
-    items = fetcher.items(collection_id)
-    if station_filter is not None:
-        items = [item for item in items if item.get("id", "").lower() in station_filter]
-
-    csv_hrefs = hrefs(assets_of(items, suffixes=(".csv",), excludes="_meta_"))
-    if not csv_hrefs:
-        raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
-
-    # The fetcher is safe to share across the pool: it hands each worker thread
-    # its own session.
-    def _fetch(href: str) -> pl.DataFrame:
-        return parse_climate_scenarios_csv(fetcher.get(href, timeout=120).body, asset_filename(href))
-
-    if len(csv_hrefs) == 1 or workers <= 1:
-        frames = [_fetch(h) for h in csv_hrefs]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            frames = list(pool.map(_fetch, csv_hrefs))
-
-    df = pl.concat(frames, how="diagonal_relaxed")
-    # The calendar filters are rejected for this kind before we get here, so the
-    # shared pass's time filtering is a no-op and only the column/sort/limit half
-    # applies — which is why this can use it rather than repeating it.
-    return _apply_post_filters(df, dataset, drop_null=drop_null, sort=sort, columns=columns, limit=limit)
 
 
 def load(
@@ -529,152 +341,36 @@ def load(
         raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
     if frequency is not None and not spec.supports_granularity:
         raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
-    if not spec.supports_calendar_filters and any(x is not None for x in (year, month, date_from, date_to)):
+    if sort is not None and sort not in ("asc", "desc"):
+        raise ValueError(f"Invalid sort {sort!r}. Valid options: asc, desc.")
+
+    filters = Filters.build(
+        station=station,
+        frequency=frequency,
+        time_slice=time_slice,
+        year=year,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
+        columns=columns,
+        drop_null=drop_null,
+        sort=sort,
+        limit=limit,
+        workers=workers,
+    )
+    # Reject a token outside the vocabulary rather than quietly matching no
+    # assets and reporting "no CSV files found" — a mistyped frequency is a
+    # caller error, and the MCP layer used to catch it with its own copy of
+    # these two sets.
+    if filters.granularities and (unknown := sorted(filters.granularities - GRANULARITIES)):
+        raise ValueError(f"Invalid frequency {unknown}. Valid options: {', '.join(sorted(GRANULARITIES))}.")
+    if unknown_slices := sorted(set(filters.time_slices) - TIME_SLICES):
+        raise ValueError(f"Invalid time_slice {unknown_slices}. Valid options: {', '.join(sorted(TIME_SLICES))}.")
+    if not spec.supports_calendar_filters and filters.has_calendar_filter:
         raise ValueError(
             f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
             "year/month/date_from/date_to filters are not supported."
         )
 
-    if kind(dataset) is DatasetKind.ARCHIVE_CSV:
-        return _load_indoor(
-            dataset,
-            station=station,
-            year=year,
-            month=month,
-            date_from=date_from,
-            date_to=date_to,
-            columns=columns,
-            drop_null=drop_null,
-            sort=sort,
-            limit=limit,
-        )
-
-    if kind(dataset) is DatasetKind.PREAMBLE_CSV:
-        return _load_climate_scenarios(
-            dataset,
-            station=station,
-            columns=columns,
-            drop_null=drop_null,
-            sort=sort,
-            limit=limit,
-            workers=workers,
-        )
-
-    if time_slice is None:
-        time_slice = ["recent"]
-    elif isinstance(time_slice, str):
-        time_slice = [time_slice]
-
-    # Normalise station filter to a set of lowercase abbreviations. An empty list
-    # means "no filter", not "match nothing" — the latter is never what a caller
-    # wants, and the MCP layer used to strip empty lists on load()'s behalf.
-    station_filter: set[str] | None = None
-    if station:
-        if isinstance(station, str):
-            station_filter = {station.lower()}
-        else:
-            station_filter = {s.lower() for s in station}
-
-    # Normalise frequency filter to a set (e.g. {"d", "h"}).
-    freq_filter: set[str] | None = None
-    if frequency:
-        if isinstance(frequency, str):
-            freq_filter = {frequency.lower()}
-        else:
-            freq_filter = {f.lower() for f in frequency}
-
-    collection_id = COLLECTIONS[dataset]
-    fetcher = default_fetcher()
-
-    # 1. Fetch metadata types for schema inference.
-    metadata_types: dict[str, type[pl.DataType]] = {}
-    coll = fetcher.collection(collection_id)
-    for asset in collection_assets(coll, suffixes=(".csv",), contains="_meta_parameters"):
-        metadata_types = _parse_metadata_types(decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body))
-        break
-
-    # 2. Get STAC items and collect matching CSV URLs.
-    items = fetcher.items(collection_id)
-
-    # Filter items by station (item id = station abbreviation).
-    if station_filter is not None:
-        items = [item for item in items if item.get("id", "").lower() in station_filter]
-
-    # A forecast item is one *day*, not one forecast, and the newest one is empty
-    # until that day's runs publish — so keep all items and narrow to the newest
-    # run by filename below. Ranking on ``datetime`` would not help either: it is a
-    # refresh timestamp, identical across items to the microsecond.
-    if kind(dataset) is DatasetKind.FORECAST_CSV and items:
-        items.sort(key=lambda x: x.get("id", ""))
-
-    # Forecast filenames carry no time slice; load() wants the current forecast,
-    # so narrowing to the newest run is what bounds them instead.
-    is_forecast = kind(dataset) is DatasetKind.FORECAST_CSV
-    csv_hrefs = hrefs(
-        select(
-            assets_of(items, suffixes=(".csv",)),
-            time_slices=None if is_forecast else time_slice,
-            granularities=freq_filter,
-            latest_run=is_forecast,
-        )
-    )
-
-    if not csv_hrefs:
-        filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"
-        raise ValueError(f"No CSV files found for {dataset!r} with {filters}.")
-
-    # 3. Download and parse each CSV concurrently. The fetcher is safe to share
-    # across the pool: it hands each worker thread its own session.
-    # With an explicit ``columns=``, tell the parser up front instead of parsing all
-    # ~42 columns of every station file and selecting afterwards. The frame retained
-    # per station drops by an order of magnitude, which is what bounds peak memory
-    # while the whole matched set is assembled. Everything the later filters and the
-    # concat rely on has to survive the projection.
-    wanted_columns: set[str] | None = None
-    if columns:
-        wanted_columns = {"station_abbr", "reference_timestamp", *columns}
-        if drop_null:
-            wanted_columns.add(drop_null)
-        if dataset == "forecast_local":
-            wanted_columns.add("Date")  # reference_timestamp is derived from it
-
-    def _fetch(href: str) -> pl.DataFrame:
-        # Zero-copy when the payload is already UTF-8 (the usual case): these are
-        # the big files, and ``workers`` of them are in flight at once.
-        body = fetcher.get(href, timeout=60).body
-        frame = parse_csv_bytes(utf8_meteoswiss_csv(body), metadata_types, wanted_columns=wanted_columns)
-        # Drop the rows this call can never return *before* they reach the
-        # concat. Every frame is otherwise held in full until the whole matched
-        # set is materialised, so a narrow year= over many stations peaked at the
-        # size of the entire time slice. forecast_local has no reference_timestamp
-        # of its own — derive it here so its frames can be narrowed too.
-        if dataset == "forecast_local":
-            frame = add_forecast_local_timestamp(frame)
-        if "reference_timestamp" in frame.columns:
-            frame = _apply_time_filters(frame, year=year, month=month, date_from=date_from, date_to=date_to)
-        return frame
-
-    if len(csv_hrefs) == 1 or workers <= 1:
-        frames = [_fetch(href) for href in csv_hrefs]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            frames = list(pool.map(_fetch, csv_hrefs))
-
-    df = pl.concat(frames, how="diagonal_relaxed")
-
-    # forecast_local has no reference_timestamp; derive it from the compact Date column.
-    if dataset == "forecast_local":
-        df = add_forecast_local_timestamp(df)
-
-    return _apply_post_filters(
-        df,
-        dataset,
-        year=year,
-        month=month,
-        date_from=date_from,
-        date_to=date_to,
-        drop_null=drop_null,
-        sort=sort,
-        columns=columns,
-        limit=limit,
-    )
+    df = registry.load(dataset, filters, fetcher=default_fetcher())
+    return _apply_post_filters(df, dataset, filters)

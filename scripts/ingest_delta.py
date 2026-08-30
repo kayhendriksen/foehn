@@ -31,7 +31,7 @@ import polars as pl
 from pyspark.sql import SparkSession
 
 from foehn import registry
-from foehn.convert import _load_metadata_types, group_csv_files, parse_csv_bytes
+from foehn.convert import group_csv_files, load_metadata_types, parse_csv_bytes
 
 TABULAR_COLLECTIONS = [*registry.tabular_datasets(), "climate_normals"]
 
@@ -56,7 +56,9 @@ def _table_suffix(group_key: tuple[str, ...]) -> str:
     return ""
 
 
-def _build_schema_overrides(files: list[Path], metadata_types: dict[str, pl.DataType]) -> dict[str, pl.DataType] | None:
+def _build_schema_overrides(
+    files: list[Path], metadata_types: dict[str, type[pl.DataType]]
+) -> dict[str, type[pl.DataType]] | None:
     """Match CSV column headers to metadata types for schema overrides."""
     if not metadata_types:
         return None
@@ -68,7 +70,7 @@ def _build_schema_overrides(files: list[Path], metadata_types: dict[str, pl.Data
         return None
 
 
-def _scan_and_collect(files: list[Path], metadata_types: dict[str, pl.DataType]) -> pl.DataFrame:
+def _scan_and_collect(files: list[Path], metadata_types: dict[str, type[pl.DataType]]) -> pl.DataFrame:
     """Lazily scan CSV files and collect with streaming engine.
 
     Falls back to eager parse_csv_bytes (with retry logic) if streaming
@@ -192,7 +194,7 @@ def _ingest_collection(
 
     Returns (succeeded, skipped) counts.
     """
-    metadata_types = _load_metadata_types(csv_dir)
+    metadata_types = load_metadata_types(csv_dir)
     groups = group_csv_files(csv_dir, key)
 
     meta_ok, meta_skip = _ingest_metadata(spark, key, csv_dir, catalog, schema)

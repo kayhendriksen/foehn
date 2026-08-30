@@ -106,11 +106,11 @@ def test_build_schema_overrides_no_metadata():
 
 
 def test_scan_and_collect(smn_bronze_dir):
-    from foehn.convert import _load_metadata_types
+    from foehn.convert import load_metadata_types
 
     csv_dir = smn_bronze_dir / "smn"
     files = sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))
-    metadata_types = _load_metadata_types(csv_dir)
+    metadata_types = load_metadata_types(csv_dir)
 
     df = _scan_and_collect(files, metadata_types)
 
@@ -122,22 +122,22 @@ def test_scan_and_collect(smn_bronze_dir):
 
 
 def test_scan_and_collect_parses_timestamps(smn_bronze_dir):
-    from foehn.convert import _load_metadata_types
+    from foehn.convert import load_metadata_types
 
     csv_dir = smn_bronze_dir / "smn"
     files = sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))
-    metadata_types = _load_metadata_types(csv_dir)
+    metadata_types = load_metadata_types(csv_dir)
 
     df = _scan_and_collect(files, metadata_types)
     assert df["reference_timestamp"].dtype == pl.Datetime
 
 
 def test_scan_and_collect_single_file(smn_bronze_dir):
-    from foehn.convert import _load_metadata_types
+    from foehn.convert import load_metadata_types
 
     csv_dir = smn_bronze_dir / "smn"
     files = [sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))[0]]
-    metadata_types = _load_metadata_types(csv_dir)
+    metadata_types = load_metadata_types(csv_dir)
 
     df = _scan_and_collect(files, metadata_types)
     assert len(df) == 3
