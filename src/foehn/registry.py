@@ -168,12 +168,6 @@ class KindSpec:
     supports_calendar_filters: bool
     """Whether year/month/date_from/date_to apply. False for nominal 30-year dates."""
 
-    key_columns: tuple[str, ...] = ("station_abbr", "reference_timestamp")
-    """Columns an explicit ``columns=`` selection always keeps."""
-
-    sort_column: str = "reference_timestamp"
-    """What ``sort=`` orders by. The nominal-date kind has no real timestamp."""
-
     @property
     def tabular(self) -> bool:
         """Loadable as a Polars DataFrame — i.e. this kind has a reader."""
@@ -189,7 +183,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.STANDARD_CSV: KindSpec(
         download=_download_csv,
         convert=convert_to_parquet,
-        load=read_standard,
+        load=Reader(read_standard),
         grid=None,
         supports_granularity=True,
         supports_calendar_filters=True,
@@ -197,29 +191,33 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.PREAMBLE_CSV: KindSpec(
         download=_download_csv,
         convert=convert_preamble_to_parquet,
-        load=read_preamble,
+        load=Reader(
+            read_preamble,
+            key_columns=("station_abbr", "variable", "gwl", "date"),
+            # Nominal dates, so ``date`` is a lexically-ordered string, not a timestamp.
+            sort_column="date",
+        ),
         grid=None,
         supports_granularity=False,
         # Dates are nominal (0001..0030 on a 365-day calendar), so the calendar
         # filters would silently match nothing.
         supports_calendar_filters=False,
-        key_columns=("station_abbr", "variable", "gwl", "date"),
-        # Nominal dates, so ``date`` is a lexically-ordered string, not a timestamp.
-        sort_column="date",
     ),
     DatasetKind.ARCHIVE_CSV: KindSpec(
         download=download_indoor_zip,
         convert=convert_indoor_to_parquet,
-        load=read_archive,
+        load=Reader(
+            read_archive,
+            key_columns=("station_abbr", "reference_timestamp", "period", "scenario", "variant"),
+        ),
         grid=None,
         supports_granularity=False,
         supports_calendar_filters=True,
-        key_columns=("station_abbr", "reference_timestamp", "period", "scenario", "variant"),
     ),
     DatasetKind.FORECAST_CSV: KindSpec(
         download=_download_forecast_csv,
         convert=convert_to_parquet,
-        load=read_standard,
+        load=Reader(read_standard),
         grid=None,
         supports_granularity=False,
         supports_calendar_filters=True,
@@ -339,15 +337,17 @@ def unreadable_message(dataset: str) -> str:
 
 
 def load(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
-    """Load *dataset* by whichever reader its kind uses.
+    """Load *dataset* by whichever reader its kind uses, filters applied.
 
     Callers guard on ``spec(dataset).tabular`` first — which kinds have no reader
-    is a fact about the kind rather than a branch each caller re-derives.
+    is a fact about the kind rather than a branch each caller re-derives. The
+    frame comes back finished: the reader knows its own key columns and what
+    ``sort`` orders by, so nothing above this seam restates them.
     """
     reader = spec(dataset).load
     if reader is None:
         raise ValueError(unreadable_message(dataset))
-    return reader(dataset, filters, fetcher=fetcher)
+    return reader.finish(reader.read(dataset, filters, fetcher=fetcher), filters)
 
 
 def _grid_reader(dataset: str) -> GridReader:

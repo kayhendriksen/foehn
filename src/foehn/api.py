@@ -24,7 +24,7 @@ from foehn.convert import (
 )
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import sanitize_noncf_time_units, write_zarr
-from foehn.readers import Filters, apply_time_filters
+from foehn.readers import Filters
 from foehn.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -219,49 +219,6 @@ def inventory(dataset: str) -> pl.DataFrame:
     )
 
 
-def _require_columns(df: pl.DataFrame, names: list[str], label: str) -> None:
-    """Raise ValueError naming any of *names* the loaded frame doesn't have.
-
-    Silently ignoring an unknown column turns a mistyped MeteoSwiss shortcode
-    (``tre200dO`` for ``tre200d0``) into a plausible-looking wrong answer: the
-    ``columns`` filter returns only the always-kept key columns, and
-    ``drop_null`` keeps every null row it was asked to remove. Both are worth an
-    error, especially on the MCP surface where the caller is an LLM guessing
-    parameter names.
-    """
-    missing = [n for n in names if n not in df.columns]
-    if not missing:
-        return
-    available = ", ".join(sorted(df.columns))
-    raise ValueError(f"Unknown column(s) {missing} in {label}=. This dataset has: {available}")
-
-
-def _apply_post_filters(df: pl.DataFrame, dataset: str, filters: Filters) -> pl.DataFrame:
-    """Apply the row/column filters that are the same for every kind.
-
-    Which columns an explicit ``columns=`` selection always keeps is a property of
-    the dataset's kind, so it is read from the registry rather than passed in —
-    callers were previously stating their own schema across this seam, and only
-    one of the three got it right for its kind. Running this once here, after
-    whichever reader produced the frame, is what keeps the readers free of it.
-    """
-    spec = registry.spec(dataset)
-    df = apply_time_filters(df, filters)
-    if filters.drop_null:
-        _require_columns(df, [filters.drop_null], "drop_null")
-        df = df.filter(pl.col(filters.drop_null).is_not_null())
-    if filters.sort in ("asc", "desc"):
-        df = df.sort(spec.sort_column, descending=(filters.sort == "desc"))
-    if filters.columns:
-        _require_columns(df, list(filters.columns), "columns")
-        keep = [c for c in spec.key_columns if c in df.columns]
-        keep += [c for c in filters.columns if c not in keep]
-        df = df.select(keep)
-    if filters.limit is not None:
-        df = df.head(filters.limit)
-    return df
-
-
 def load(
     dataset: str,
     *,
@@ -374,8 +331,7 @@ def load(
             "year/month/date_from/date_to filters are not supported."
         )
 
-    df = registry.load(dataset, filters, fetcher=default_fetcher())
-    return _apply_post_filters(df, dataset, filters)
+    return registry.load(dataset, filters, fetcher=default_fetcher())
 
 
 # --- Gridded datasets --------------------------------------------------------

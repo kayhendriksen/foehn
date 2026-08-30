@@ -118,10 +118,34 @@ def test_preamble_csv_rejects_calendar_filters():
 
 
 def test_key_columns_differ_where_the_schema_does():
-    """``columns=`` keeps a different set per kind; it used to be passed in by hand."""
-    assert registry.KINDS[DatasetKind.PREAMBLE_CSV].key_columns == ("station_abbr", "variable", "gwl", "date")
-    assert "period" in registry.KINDS[DatasetKind.ARCHIVE_CSV].key_columns
-    assert registry.KINDS[DatasetKind.STANDARD_CSV].key_columns == ("station_abbr", "reference_timestamp")
+    """``columns=`` keeps a different set per kind, and the reader carries it.
+
+    It used to sit on KindSpec, a layer above the reader that produces the frame
+    it describes, because the pass that reads it lived in ``api``.
+    """
+    assert registry.KINDS[DatasetKind.PREAMBLE_CSV].load.key_columns == ("station_abbr", "variable", "gwl", "date")
+    assert "period" in registry.KINDS[DatasetKind.ARCHIVE_CSV].load.key_columns
+    assert registry.KINDS[DatasetKind.STANDARD_CSV].load.key_columns == ("station_abbr", "reference_timestamp")
+
+
+def test_only_the_nominal_date_kind_sorts_on_something_else():
+    """The preamble kind's dates are 0001..0030 strings, not timestamps."""
+    assert registry.KINDS[DatasetKind.PREAMBLE_CSV].load.sort_column == "date"
+    assert registry.KINDS[DatasetKind.STANDARD_CSV].load.sort_column == "reference_timestamp"
+
+
+def test_registry_load_returns_a_finished_frame():
+    """sort, columns and limit are applied here; ``api.load`` used to do it after."""
+    from foehn.readers import Filters
+
+    body = b"station_abbr;reference_timestamp;tre200d0;other\nBER;2026-01-01;1.0;9\nBER;2026-01-02;2.0;9\n"
+    fake = _fetcher([stac_item("BER", "https://data.geo.admin.ch/ogd-smn_ber_d_recent.csv")], body=body)
+
+    df = registry.load("smn", Filters.build(columns=["tre200d0"], sort="desc", limit=1), fetcher=fake)
+
+    assert df.columns == ["station_abbr", "reference_timestamp", "tre200d0"]  # key columns kept
+    assert len(df) == 1
+    assert df["tre200d0"][0] == 2.0  # newest first
 
 
 # --- dataset listings ---

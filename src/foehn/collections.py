@@ -479,14 +479,32 @@ CLIMATE_NORMALS_ZIP_URL = "https://data.geo.admin.ch/ch.meteoschweiz.klima/normw
 
 
 # Time-slice tokens that appear as the trailing filename segment of standard
-# CSV assets (ogd-{key}_{station}_{granularity}_{timeslice}.csv).
-TIME_SLICES = frozenset({"historical", "recent", "now"})
+# CSV assets (ogd-{key}_{station}_{granularity}_{timeslice}.csv), each with what
+# it covers. The MCP guide renders these rather than restating them: a token
+# added here has to reach the LLM-facing documentation, and prose cannot be
+# checked against a set.
+TIME_SLICE_LABELS: dict[str, str] = {
+    "now": "last ~24 hours, updated every 10 minutes (t, h only)",
+    "recent": "this calendar year through yesterday, updated daily (the default)",
+    "historical": "start of measurements through Dec 31 of last year",
+}
+
+TIME_SLICES = frozenset(TIME_SLICE_LABELS)
 
 # The granularity segment's vocabulary — the ``_t``/``_h``/``_d``/``_m``/``_y``
 # documented at the top of this module. Which of them a given dataset actually
 # has is ``COLLECTION_META[...]["frequencies"]``; this is the whole alphabet, and
-# the single source for it (the MCP layer used to carry its own copy).
-GRANULARITIES = frozenset({"t", "h", "d", "m", "y"})
+# the single source for it (the MCP layer used to carry its own copy of the
+# tokens, and then its own prose gloss of them).
+GRANULARITY_LABELS: dict[str, str] = {
+    "t": "10-minute (near real-time measurements)",
+    "h": "hourly",
+    "d": "daily",
+    "m": "monthly",
+    "y": "yearly",
+}
+
+GRANULARITIES = frozenset(GRANULARITY_LABELS)
 
 
 # MeteoSwiss chunks the high-frequency historical series by decade, so the slice

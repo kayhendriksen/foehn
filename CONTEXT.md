@@ -142,7 +142,10 @@ other three sum to it.
 
 **Reader**:
 How one **Dataset kind** becomes a Polars DataFrame — one per tabular kind,
-selected from the registry exactly as its download and convert paths are.
+selected from the registry exactly as its download and convert paths are. Owns
+what its frame looks like as well as how it is fetched: which columns an explicit
+`columns=` always keeps, and what `sort=` orders by. Hands back a finished frame,
+so nothing above the registry filters it further.
 _Avoid_: loader, parser (parsing is one step inside a reader)
 
 **Grid reader**:
@@ -193,6 +196,11 @@ _Avoid_: query, params, options
   it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
   it is a **Direct ZIP** **Dataset** like any other. What "download everything"
   means is now *not gridded* rather than *tabular*, which is what it always meant.
+- The MCP guide restated `load()`'s filter vocabulary as prose and had drifted:
+  it told callers `sort` defaults to `"asc"` when an omitted `sort` does not sort
+  at all. Resolved: the granularity and time-slice tokens carry their own labels
+  in `collections` and the guide renders them. The worked examples stay prose —
+  they are guidance for an LLM, not a vocabulary that can drift.
 - The default data directory was written at seven call sites and only the CLI
   read `$FOEHN_DATA_DIR`, so the same environment sent `foehn download` and
   `foehn.download()` to different places; the ETag store was placed at whatever
