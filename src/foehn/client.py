@@ -8,7 +8,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from foehn.assets import Asset, assets_of, collection_assets, latest_run_of, select
+from foehn.assets import assets_of, collection_assets, latest_run_of, select
 from foehn.collections import CLIMATE_NORMALS_ZIP_URL, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.transfer import (
@@ -225,35 +225,6 @@ def download_metadata(
         write=csv_to_disk,
         label="metadata file",
     )
-
-
-# --- Skip rules ---
-
-
-def already_current(asset: Asset, filepath: Path) -> bool:
-    """A :data:`~foehn.transfer.SkipRule`: is the local copy of *asset* up to date?
-
-    Handles MeteoSwiss's in-place overwrites — e.g. CombiPrecip reanalysis
-    (CPCH) replaces the original CPC hourly file with the same filename
-    ~8 days later. A plain exists() check would leave the stale version
-    on disk; comparing the STAC "updated" timestamp against local mtime
-    picks up those server-side updates.
-    """
-    if not filepath.exists():
-        return False
-    if not asset.updated:
-        return True
-    try:
-        remote_dt = datetime.fromisoformat(asset.updated)
-        local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
-    except (ValueError, OSError):
-        return True
-    return remote_dt <= local_dt
-
-
-def exists(_asset: Asset, filepath: Path) -> bool:
-    """A :data:`~foehn.transfer.SkipRule` for static assets: fetch each one once."""
-    return filepath.exists()
 
 
 # --- ZIP safety (zip-slip + decompression-bomb guards) ---

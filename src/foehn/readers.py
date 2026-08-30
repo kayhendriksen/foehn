@@ -3,7 +3,7 @@
 ``download`` and ``convert`` route through :mod:`foehn.registry`; loading used to
 route through an if-ladder in ``api`` instead, because hoisting the readers into
 the registry would have inverted ``registry → api``. The fix was not to hoist but
-to drop: these readers depend on ``assets``, ``client``, ``convert`` and
+to drop: these readers depend on ``assets``, ``client``, ``meteocsv`` and
 ``fetch``, never on ``api``, so they sit *below* the registry and
 :class:`~foehn.registry.KindSpec` can carry a ``load`` adapter beside its
 ``download`` and ``convert`` ones. All three pipeline stages now route the
@@ -33,7 +33,8 @@ from foehn._urls import asset_filename
 from foehn.assets import assets_of, collection_assets, hrefs, select
 from foehn.client import check_zip_size
 from foehn.collections import COLLECTIONS, DatasetKind, kind
-from foehn.convert import (
+from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.meteocsv import (
     add_forecast_local_timestamp,
     add_indoor_columns,
     decode_meteoswiss_csv,
@@ -43,7 +44,6 @@ from foehn.convert import (
     parse_metadata_types,
     utf8_meteoswiss_csv,
 )
-from foehn.fetch import DEFAULT_WORKERS, Fetcher
 
 # A ``date_to`` of exactly "YYYY-MM-DD" names a whole day, not its midnight.
 _BARE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

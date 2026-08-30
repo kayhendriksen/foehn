@@ -19,11 +19,9 @@ from foehn.collections import (
     GRANULARITIES,
     TIME_SLICES,
 )
-from foehn.convert import (
-    decode_meteoswiss_csv,
-)
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import sanitize_noncf_time_units, write_zarr
+from foehn.meteocsv import decode_meteoswiss_csv
 from foehn.readers import Filters
 from foehn.workspace import Workspace
 

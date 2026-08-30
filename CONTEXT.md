@@ -140,6 +140,15 @@ What a download reports: `total_assets`, `downloaded`, `skipped`, `failed` and
 the new filenames. The first is every **Asset** the call was given, and the
 other three sum to it.
 
+**MeteoSwiss CSV**:
+How MeteoSwiss writes a CSV and what foehn needs to read one back: the
+UTF-8/Windows-1252 fallback, the semicolon separator, the dtypes named in a
+**Collection**'s `_meta_parameters.csv`, the `KEY;VALUE` preamble, and the
+filename rules that carry station, **Granularity**, **Time slice** and
+**Forecast run**. Upstream's conventions, below every pipeline that reads them —
+the load path, the convert stage and the Databricks ingest script alike.
+_Avoid_: parsing, format (a **Format** is a value; this is the rules for one)
+
 **Reader**:
 How one **Dataset kind** becomes a Polars DataFrame — one per tabular kind,
 selected from the registry exactly as its download and convert paths are. Owns
@@ -173,6 +182,8 @@ _Avoid_: query, params, options
 - Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
 - Every **Asset** written to **Bronze** goes through **Transfer**, which calls the **Fetcher**.
 - Every path foehn reads or writes comes from a **Workspace**.
+- Every module that reads a MeteoSwiss file goes through **MeteoSwiss CSV**; only
+  the convert stage depends on the Parquet one.
 - A **Dataset kind** has one download path and one convert path, and at most one
   of a **Reader** (tabular) or a **Grid reader** (gridded) — never both, and
   neither for **Direct ZIP**.
@@ -196,6 +207,11 @@ _Avoid_: query, params, options
   it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
   it is a **Direct ZIP** **Dataset** like any other. What "download everything"
   means is now *not gridded* rather than *tabular*, which is what it always meant.
+- Upstream's CSV conventions and the Bronze → Parquet stage lived in one module,
+  so `transfer` — the download engine — depended on the Parquet converter for one
+  byte-level helper, and the gridded read path did too, through it. Five modules
+  imported that one and four of them wanted only the conventions. Resolved:
+  **MeteoSwiss CSV** is its own module and `convert` has a single consumer.
 - The MCP guide restated `load()`'s filter vocabulary as prose and had drifted:
   it told callers `sort` defaults to `"asc"` when an omitted `sort` does not sort
   at all. Resolved: the granularity and time-slice tokens carry their own labels

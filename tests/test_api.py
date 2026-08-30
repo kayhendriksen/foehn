@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
+from conftest import CLIMATE_SCENARIOS_CSV
 
 import foehn
 from foehn.api import (
@@ -133,11 +134,6 @@ def test_load_indoor_station_filter(fetcher):
 
 # --- climate_scenarios (C8: metadata preamble + wide model table) ---
 
-_CS_CSV = (
-    "TITLE;X\nVARIABLE;Daily precipitation sum\nGWL;GWL1.5\n\n"
-    "DATE;MODEL_A;MODEL_B\n0001-01-01;0;24.2\n0001-01-02;1.5;0\n"
-)
-
 
 def test_load_climate_scenarios_year_filter_raises():
     with pytest.raises(ValueError, match="nominal"):
@@ -147,7 +143,7 @@ def test_load_climate_scenarios_year_filter_raises():
 def test_load_climate_scenarios_returns_dataframe(fetcher):
     href = "https://data.geo.admin.ch/x/ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
     fetcher.any_items = [{"id": "abe", "assets": {"d": {"href": href}}}]
-    fetcher.default_body = _CS_CSV
+    fetcher.default_body = CLIMATE_SCENARIOS_CSV
 
     df = load("climate_scenarios")
     assert isinstance(df, pl.DataFrame)

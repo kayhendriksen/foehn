@@ -32,7 +32,7 @@ from pyspark.sql import SparkSession
 
 from foehn import registry
 from foehn.collections import DatasetKind, kind
-from foehn.convert import group_csv_files, load_metadata_types, parse_csv_bytes
+from foehn.meteocsv import group_csv_files, load_metadata_types, parse_csv_bytes
 
 # Every dataset that is not a grid — climate_normals included, which used to be
 # appended by hand because it converts to Parquet without being loadable.
