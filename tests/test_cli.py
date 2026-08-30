@@ -16,7 +16,7 @@ _PATCHES = [
     "foehn.registry.download",
     "foehn.registry.convert",
     "foehn.cli.download_climate_normals_zip",
-    "foehn.cli.convert_climate_normals_to_parquet",
+    "foehn.cli.convert_normals_to_parquet",
     "foehn.cli.save_last_run",
     "foehn.cli.load_last_run",
 ]
@@ -31,7 +31,7 @@ def _start_mocks():
         mocks[name.split(".")[-1]] = mock
     mocks["load_last_run"].return_value = None
     mocks["convert"].return_value = 0
-    mocks["convert_climate_normals_to_parquet"].return_value = 0
+    mocks["convert_normals_to_parquet"].return_value = 0
     # cmd_download sums result.failed from each download call to gate _last_run;
     # give the download mock a clean (0-failure) DownloadResult by default.
     mocks["download"].return_value.failed = 0
@@ -123,13 +123,13 @@ def test_to_parquet_skips_downloads(tmp_path):
 def test_no_parquet_skips_conversion(tmp_path):
     mocks = _run("download", ["--no-parquet"], tmp_path)
     mocks["convert"].assert_not_called()
-    mocks["convert_climate_normals_to_parquet"].assert_not_called()
+    mocks["convert_normals_to_parquet"].assert_not_called()
 
 
 def test_default_runs_conversion(tmp_path):
     mocks = _run("download", [], tmp_path)
     mocks["convert"].assert_called()
-    mocks["convert_climate_normals_to_parquet"].assert_called()
+    mocks["convert_normals_to_parquet"].assert_called()
 
 
 def test_default_run_covers_every_tabular_dataset(tmp_path):

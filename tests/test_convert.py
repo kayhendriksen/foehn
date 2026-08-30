@@ -8,9 +8,9 @@ import pytest
 
 from foehn.convert import (
     add_forecast_local_timestamp,
-    convert_climate_normals_to_parquet,
-    convert_climate_scenarios_indoor_to_parquet,
-    convert_climate_scenarios_to_parquet,
+    convert_indoor_to_parquet,
+    convert_normals_to_parquet,
+    convert_preamble_to_parquet,
     convert_to_parquet,
     decode_meteoswiss_csv,
     group_csv_files,
@@ -238,20 +238,20 @@ def test_convert_skips_meta_files(smn_bronze_dir, tmp_path):
     assert all("_meta_" not in f.name for f in parquet_files)
 
 
-# --- convert_climate_normals_to_parquet ---
+# --- convert_normals_to_parquet ---
 
 
-def test_convert_climate_normals_creates_file(climate_normals_bronze_dir, tmp_path):
+def test_convert_normals_creates_file(climate_normals_bronze_dir, tmp_path):
     parquet_dir = tmp_path / "parquet"
-    convert_climate_normals_to_parquet(climate_normals_bronze_dir, parquet_dir)
+    convert_normals_to_parquet("climate_normals", climate_normals_bronze_dir, parquet_dir)
 
     out = parquet_dir / "climate_normals" / "sample.parquet"
     assert out.exists()
 
 
-def test_convert_climate_normals_readable(climate_normals_bronze_dir, tmp_path):
+def test_convert_normals_readable(climate_normals_bronze_dir, tmp_path):
     parquet_dir = tmp_path / "parquet"
-    convert_climate_normals_to_parquet(climate_normals_bronze_dir, parquet_dir)
+    convert_normals_to_parquet("climate_normals", climate_normals_bronze_dir, parquet_dir)
 
     df = pl.read_parquet(parquet_dir / "climate_normals" / "sample.parquet")
     assert "Station" in df.columns
@@ -324,33 +324,33 @@ def test_convert_to_parquet_handles_bad_csv(tmp_path):
     assert failed >= 1
 
 
-# --- convert_climate_normals edge cases ---
+# --- convert_normals edge cases ---
 
 
-def test_convert_climate_normals_no_txt_files(tmp_path):
+def test_convert_normals_no_txt_files(tmp_path):
     """Empty climate_normals dir should not raise."""
     bronze_dir = tmp_path / "bronze"
     (bronze_dir / "climate_normals").mkdir(parents=True)
     parquet_dir = tmp_path / "parquet"
-    convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+    convert_normals_to_parquet("climate_normals", bronze_dir, parquet_dir)
     # Dir may be created but should contain no parquet files
     cn_dir = parquet_dir / "climate_normals"
     assert not cn_dir.exists() or not list(cn_dir.glob("*.parquet"))
 
 
-def test_convert_climate_normals_skips_up_to_date(climate_normals_bronze_dir, tmp_path):
+def test_convert_normals_skips_up_to_date(climate_normals_bronze_dir, tmp_path):
     """Already-converted files should be skipped on second run."""
     parquet_dir = tmp_path / "parquet"
-    convert_climate_normals_to_parquet(climate_normals_bronze_dir, parquet_dir)
+    convert_normals_to_parquet("climate_normals", climate_normals_bronze_dir, parquet_dir)
 
     out_file = parquet_dir / "climate_normals" / "sample.parquet"
     mtime_before = out_file.stat().st_mtime
 
-    convert_climate_normals_to_parquet(climate_normals_bronze_dir, parquet_dir)
+    convert_normals_to_parquet("climate_normals", climate_normals_bronze_dir, parquet_dir)
     assert out_file.stat().st_mtime == mtime_before
 
 
-def test_convert_climate_normals_handles_bad_file(tmp_path):
+def test_convert_normals_handles_bad_file(tmp_path):
     """A corrupt TXT should be reported as a failure, not crash."""
     bronze_dir = tmp_path
     cn_dir = bronze_dir / "climate_normals"
@@ -358,7 +358,7 @@ def test_convert_climate_normals_handles_bad_file(tmp_path):
     (cn_dir / "bad.txt").write_bytes(b"\x00\xff")
 
     parquet_dir = tmp_path / "parquet"
-    failed = convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+    failed = convert_normals_to_parquet("climate_normals", bronze_dir, parquet_dir)
 
     assert failed >= 1
 
@@ -381,7 +381,7 @@ def test_convert_indoor_scenarios_parses_filename_and_timestamp(tmp_path):
     (indoor_dir / "AIG_2060_RCP26_DRY.csv").write_text(_INDOOR_CSV)
 
     parquet_dir = tmp_path / "parquet"
-    failed = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    failed = convert_indoor_to_parquet("climate_scenarios_indoor", bronze_dir, parquet_dir)
     assert failed == 0
 
     out = parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet"
@@ -400,7 +400,7 @@ def test_convert_indoor_scenarios_parses_filename_and_timestamp(tmp_path):
 
 
 def test_convert_indoor_scenarios_no_files_returns_zero(tmp_path):
-    assert convert_climate_scenarios_indoor_to_parquet(tmp_path / "bronze", tmp_path / "parquet") == 0
+    assert convert_indoor_to_parquet("climate_scenarios_indoor", tmp_path / "bronze", tmp_path / "parquet") == 0
 
 
 def test_convert_indoor_scenarios_skips_metadata_file(tmp_path):
@@ -412,7 +412,7 @@ def test_convert_indoor_scenarios_skips_metadata_file(tmp_path):
     (indoor_dir / "Klimaszenarien-Raumklima_Metadata.csv").write_text("foo,bar\n1,2\n")
 
     parquet_dir = tmp_path / "parquet"
-    failed = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+    failed = convert_indoor_to_parquet("climate_scenarios_indoor", bronze_dir, parquet_dir)
     assert failed == 0
 
     df = pl.read_parquet(parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet")
@@ -445,7 +445,7 @@ def test_parse_climate_scenarios_csv_skips_preamble():
     assert len(df) == 2
 
 
-def test_convert_climate_scenarios_to_parquet(tmp_path):
+def test_convert_preamble_to_parquet(tmp_path):
     bronze_dir = tmp_path / "bronze"
     cs_dir = bronze_dir / "climate_scenarios"
     cs_dir.mkdir(parents=True)
@@ -453,7 +453,7 @@ def test_convert_climate_scenarios_to_parquet(tmp_path):
     (cs_dir / "ogd-climate-scenarios-ch2025_ber_tas_gwl2.0.csv").write_text(_CS_CSV)
 
     parquet_dir = tmp_path / "parquet"
-    failed = convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
+    failed = convert_preamble_to_parquet("climate_scenarios", bronze_dir, parquet_dir)
     assert failed == 0
 
     df = pl.read_parquet(parquet_dir / "climate_scenarios" / "climate_scenarios.parquet")
@@ -482,7 +482,7 @@ def test_scan_climate_scenarios_csv_survives_quote_in_preamble(tmp_path):
     assert len(df) == 2
 
 
-def test_convert_climate_scenarios_to_parquet_counts_bad_file(tmp_path):
+def test_convert_preamble_to_parquet_counts_bad_file(tmp_path):
     bronze_dir = tmp_path / "bronze"
     cs_dir = bronze_dir / "climate_scenarios"
     cs_dir.mkdir(parents=True)
@@ -491,7 +491,7 @@ def test_convert_climate_scenarios_to_parquet_counts_bad_file(tmp_path):
     (cs_dir / "ogd-climate-scenarios-ch2025_ber_tas_gwl2.0.csv").write_text("TITLE;nope\n")
 
     parquet_dir = tmp_path / "parquet"
-    assert convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir) == 1
+    assert convert_preamble_to_parquet("climate_scenarios", bronze_dir, parquet_dir) == 1
 
     df = pl.read_parquet(parquet_dir / "climate_scenarios" / "climate_scenarios.parquet")
     assert set(df["station_abbr"].unique()) == {"abe"}

@@ -489,7 +489,7 @@ def add_indoor_columns(frame, station: str, period: str, scenario: str, variant:
     ).drop(_INDOOR_TIME_COLS)
 
 
-def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
+def convert_indoor_to_parquet(dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert extracted indoor climate scenario CSVs to a single Parquet file.
 
     Each CSV is per-station/per-scenario hourly data: comma-separated, with the
@@ -497,7 +497,7 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
     {station}_{period}_{scenario}_{variant}, which become columns alongside a
     synthesised reference_timestamp. All files are concatenated into one Parquet.
     """
-    csv_files = sorted((bronze_dir / "climate_scenarios_indoor").glob("*.csv"))
+    csv_files = sorted((bronze_dir / dataset).glob("*.csv"))
     if not csv_files:
         return 0
 
@@ -527,8 +527,8 @@ def convert_climate_scenarios_indoor_to_parquet(bronze_dir: Path, parquet_dir: P
         logger.info("  Done: wrote %s (%d files, %d non-data skipped)", group.out_path.name, len(frames), skipped)
         return 0
 
-    out_path = parquet_dir / "climate_scenarios_indoor" / "climate_scenarios_indoor.parquet"
-    return run_conversions([ConversionGroup(out_path, csv_files)], convert_one, label="climate_scenarios_indoor")
+    out_path = parquet_dir / dataset / f"{dataset}.parquet"
+    return run_conversions([ConversionGroup(out_path, csv_files)], convert_one, label=dataset)
 
 
 _CS_HEADER_PREFIX = "DATE;"
@@ -626,9 +626,9 @@ def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
     return add_climate_scenarios_columns(lf, station, variable, gwl)
 
 
-def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
+def convert_preamble_to_parquet(dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert CH2025 climate-scenario CSVs (with metadata preamble) to one Parquet."""
-    csv_files = sorted(f for f in (bronze_dir / "climate_scenarios").glob("*.csv") if "_meta_" not in f.name)
+    csv_files = sorted(f for f in (bronze_dir / dataset).glob("*.csv") if "_meta_" not in f.name)
     if not csv_files:
         return 0
 
@@ -650,17 +650,17 @@ def convert_climate_scenarios_to_parquet(bronze_dir: Path, parquet_dir: Path) ->
         logger.info("  Done: wrote %s (%d files)", group.out_path.name, len(frames))
         return failed
 
-    out_path = parquet_dir / "climate_scenarios" / "climate_scenarios.parquet"
-    return run_conversions([ConversionGroup(out_path, csv_files)], convert_one, label="climate_scenarios")
+    out_path = parquet_dir / dataset / f"{dataset}.parquet"
+    return run_conversions([ConversionGroup(out_path, csv_files)], convert_one, label=dataset)
 
 
-def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> int:
+def convert_normals_to_parquet(dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
     """Convert C6 climate normals TXT files to Parquet.
 
     These files use tab separators, latin1 encoding, and have 8 header rows
     to skip before the actual data begins.
     """
-    txt_files = sorted((bronze_dir / "climate_normals").glob("*.txt"))
+    txt_files = sorted((bronze_dir / dataset).glob("*.txt"))
     if not txt_files:
         return 0
 
@@ -679,6 +679,6 @@ def convert_climate_normals_to_parquet(bronze_dir: Path, parquet_dir: Path) -> i
         logger.info("  %s... Converted", source.name)
         return 0
 
-    out_dir = parquet_dir / "climate_normals"
+    out_dir = parquet_dir / dataset
     groups = [ConversionGroup(out_dir / txt.with_suffix(".parquet").name, [txt]) for txt in txt_files]
-    return run_conversions(groups, convert_one, label="climate_normals")
+    return run_conversions(groups, convert_one, label=dataset)

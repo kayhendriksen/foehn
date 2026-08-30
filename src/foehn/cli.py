@@ -18,9 +18,7 @@ from foehn.client import (
     save_last_run,
 )
 from foehn.collections import COLLECTIONS
-from foehn.convert import (
-    convert_climate_normals_to_parquet,
-)
+from foehn.convert import convert_normals_to_parquet
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 
 
@@ -149,7 +147,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     if not args.datasets:
         download_climate_normals_zip(bronze_dir, force=full_refresh, fetcher=fetcher)
         if not args.no_parquet:
-            failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+            failures += convert_normals_to_parquet("climate_normals", bronze_dir, parquet_dir)
 
     if failures == download_failures == 0:
         save_last_run(data_dir)
@@ -188,7 +186,7 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
         failures += registry.convert(ds, bronze_dir, parquet_dir)
 
     if not args.datasets:
-        failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)
+        failures += convert_normals_to_parquet("climate_normals", bronze_dir, parquet_dir)
 
     print(f"Parquet files saved to: {parquet_dir}")
 

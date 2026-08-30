@@ -21,16 +21,15 @@ from typing import TYPE_CHECKING, Protocol
 
 from foehn.client import (
     DownloadResult,
-    download_climate_scenarios_indoor,
-    download_collection,
-    download_grib2,
-    download_metadata,
-    download_netcdf,
+    already_current,
+    download_indoor_zip,
+    exists,
+    stac_download,
 )
 from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, kind
 from foehn.convert import (
-    convert_climate_scenarios_indoor_to_parquet,
-    convert_climate_scenarios_to_parquet,
+    convert_indoor_to_parquet,
+    convert_preamble_to_parquet,
     convert_to_parquet,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
@@ -47,6 +46,7 @@ from foehn.grids import (
     require_radar,
     select_variables,
 )
+from foehn.transfer import csv_to_disk
 
 if TYPE_CHECKING:
     import polars as pl
@@ -87,54 +87,55 @@ class DownloadAdapter(Protocol):
 ConvertAdapter = Callable[[str, Path, Path], int]
 
 
-def _download_standard(
-    dataset: str,
-    bronze_dir: Path,
-    *,
-    time_slice: list[str],
-    since: str | None,
-    workers: int,
-    force: bool,
-    fetcher: Fetcher,
-) -> DownloadResult:
-    """Collection-level metadata plus the per-station CSVs, as one result.
+# The CSV kinds share one listing configuration; only whether the assets are
+# time-sliced or narrowed to the newest forecast run differs.
+_download_csv = stac_download(
+    suffixes=(".csv",),
+    title="Collection",
+    label="CSV",
+    write=csv_to_disk,
+    etags=True,
+    time_sliced=True,
+    with_metadata=True,
+)
 
-    Both callers previously did this pairing themselves — ``api.download``
-    summing the two results, the CLI adding their ``failed`` counts separately.
-    """
-    meta = download_metadata(dataset, bronze_dir, workers=workers, fetcher=fetcher)
-    coll = download_collection(
-        dataset, bronze_dir, data_types=time_slice, since=since, workers=workers, fetcher=fetcher
-    )
-    return meta + coll
+_download_forecast_csv = stac_download(
+    suffixes=(".csv",),
+    title="Collection",
+    label="CSV",
+    write=csv_to_disk,
+    etags=True,
+    # Forecast filenames carry no time slice; the newest run bounds them instead.
+    latest_run=True,
+    with_metadata=True,
+)
 
+_download_netcdf = stac_download(
+    suffixes=(".nc", ".tif", ".zip"),
+    title="NetCDF collection",
+    # These are static: an existing file is never restated upstream, so a plain
+    # existence check is enough.
+    skip=exists,
+)
 
-def _download_archive(dataset: str, bronze_dir: Path, *, force: bool, fetcher: Fetcher, **_: object) -> DownloadResult:
-    return download_climate_scenarios_indoor(bronze_dir, dataset, force=force, fetcher=fetcher)
+# The ephemeral collections only ever want the newest page, and MeteoSwiss
+# overwrites their files in place (CombiPrecip reanalysis reuses a filename
+# ~8 days later), so the skip rule compares timestamps rather than existence.
+_download_grib2 = stac_download(
+    suffixes=(".grib2", ".grib"),
+    title="GRIB2 collection",
+    label="binary file",
+    skip=already_current,
+    max_items=100,
+)
 
-
-def _download_grib2(
-    dataset: str, bronze_dir: Path, *, since: str | None, workers: int, fetcher: Fetcher, **_: object
-) -> DownloadResult:
-    return download_grib2(dataset, bronze_dir, since=since, workers=workers, fetcher=fetcher)
-
-
-def _download_netcdf(
-    dataset: str, bronze_dir: Path, *, since: str | None, workers: int, fetcher: Fetcher, **_: object
-) -> DownloadResult:
-    return download_netcdf(dataset, bronze_dir, since=since, workers=workers, fetcher=fetcher)
-
-
-def _convert_standard(dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
-    return convert_to_parquet(dataset, bronze_dir, parquet_dir)
-
-
-def _convert_preamble(_dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
-    return convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
-
-
-def _convert_archive(_dataset: str, bronze_dir: Path, parquet_dir: Path) -> int:
-    return convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
+_download_radar = stac_download(
+    suffixes=(".h5", ".hdf5"),
+    title="Radar collection",
+    label="binary file",
+    skip=already_current,
+    max_items=100,
+)
 
 
 @dataclass(frozen=True)
@@ -183,16 +184,16 @@ class KindSpec:
 
 KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.STANDARD_CSV: KindSpec(
-        download=_download_standard,
-        convert=_convert_standard,
+        download=_download_csv,
+        convert=convert_to_parquet,
         load=read_standard,
         grid=None,
         supports_granularity=True,
         supports_calendar_filters=True,
     ),
     DatasetKind.PREAMBLE_CSV: KindSpec(
-        download=_download_standard,
-        convert=_convert_preamble,
+        download=_download_csv,
+        convert=convert_preamble_to_parquet,
         load=read_preamble,
         grid=None,
         supports_granularity=False,
@@ -204,8 +205,8 @@ KINDS: dict[DatasetKind, KindSpec] = {
         sort_column="date",
     ),
     DatasetKind.ARCHIVE_CSV: KindSpec(
-        download=_download_archive,
-        convert=_convert_archive,
+        download=download_indoor_zip,
+        convert=convert_indoor_to_parquet,
         load=read_archive,
         grid=None,
         supports_granularity=False,
@@ -213,8 +214,8 @@ KINDS: dict[DatasetKind, KindSpec] = {
         key_columns=("station_abbr", "reference_timestamp", "period", "scenario", "variant"),
     ),
     DatasetKind.FORECAST_CSV: KindSpec(
-        download=_download_standard,
-        convert=_convert_standard,
+        download=_download_forecast_csv,
+        convert=convert_to_parquet,
         load=read_standard,
         grid=None,
         supports_granularity=False,
@@ -258,7 +259,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         supports_calendar_filters=False,
     ),
     DatasetKind.RADAR_GRID: KindSpec(
-        download=_download_grib2,
+        download=_download_radar,
         convert=None,
         load=None,
         grid=GridReader(
