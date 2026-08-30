@@ -55,16 +55,25 @@ def test_grid_kinds_have_no_parquet_path():
         assert registry.KINDS[kind_].tabular is False
 
 
-def test_every_kind_has_exactly_one_read_path():
-    """A kind carries either a reader or a grid reader, never both and never neither.
+def test_no_kind_has_two_read_paths():
+    """A kind is read as a frame or as a grid, never both.
 
     ``tabular`` and ``is_grid`` are read off those two adapters rather than set
-    beside them, so this is what keeps them meaningful.
+    beside them, so this is what keeps them meaningful. DIRECT_ZIP has neither:
+    it downloads and converts to Parquet but is not reachable from load().
     """
     for kind_, spec in registry.KINDS.items():
-        assert (spec.load is None) != (spec.grid is None), f"{kind_} must have exactly one read path"
+        assert not (spec.load is not None and spec.grid is not None), f"{kind_} has two read paths"
         assert spec.tabular is (spec.load is not None)
         assert spec.is_grid is (spec.grid is not None)
+
+
+def test_direct_zip_is_the_only_kind_with_no_read_path():
+    """Guards the exception: a second one would be a kind nobody can get data out of."""
+    unreadable = {k for k, spec in registry.KINDS.items() if not spec.tabular and not spec.is_grid}
+    assert unreadable == {DatasetKind.DIRECT_ZIP}
+    # ...and it still has both write paths, which is why it is a dataset at all.
+    assert registry.KINDS[DatasetKind.DIRECT_ZIP].convert is not None
 
 
 def test_only_the_single_file_kinds_cap_an_open():
@@ -117,9 +126,16 @@ def test_key_columns_differ_where_the_schema_does():
 # --- dataset listings ---
 
 
-def test_tabular_and_grid_datasets_partition_the_collections():
-    assert set(registry.tabular_datasets()) | set(registry.grid_datasets()) == set(COLLECTIONS)
-    assert not set(registry.tabular_datasets()) & set(registry.grid_datasets())
+def test_tabular_and_grid_datasets_are_disjoint():
+    tabular, grid = set(registry.tabular_datasets()), set(registry.grid_datasets())
+    assert not tabular & grid
+    # climate_normals is in neither: it converts to Parquet but has no reader.
+    assert set(COLLECTIONS) - tabular - grid == {"climate_normals"}
+
+
+def test_non_grid_datasets_is_everything_but_the_grids():
+    assert set(registry.non_grid_datasets()) == set(COLLECTIONS) - set(registry.grid_datasets())
+    assert "climate_normals" in registry.non_grid_datasets()
 
 
 def test_listings_keep_declaration_order():

@@ -12,13 +12,8 @@ import polars as pl
 
 from foehn import registry
 from foehn.api import inventory, list_datasets, parameters, stations
-from foehn.client import (
-    download_climate_normals_zip,
-    load_last_run,
-    save_last_run,
-)
+from foehn.client import load_last_run, save_last_run
 from foehn.collections import COLLECTIONS
-from foehn.convert import convert_normals_to_parquet
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 
 
@@ -57,10 +52,10 @@ def _resolve_datasets(datasets: list[str], *, allow_grids: bool = False) -> list
                 print(f"Error: unknown dataset {d!r}. Run 'foehn list' to see options.", file=sys.stderr)
                 sys.exit(1)
         return datasets
-    # Default: all collections (skip grids unless opted in)
+    # Default: every dataset that is not a grid, unless grids are opted in.
     if allow_grids:
         return list(COLLECTIONS)
-    return registry.tabular_datasets()
+    return registry.non_grid_datasets()
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -143,12 +138,6 @@ def cmd_download(args: argparse.Namespace) -> None:
         if not args.no_parquet:
             failures += registry.convert(ds, bronze_dir, parquet_dir)
 
-    # C6 climate normals (ZIP from opendata.swiss, not STAC)
-    if not args.datasets:
-        download_climate_normals_zip(bronze_dir, force=full_refresh, fetcher=fetcher)
-        if not args.no_parquet:
-            failures += convert_normals_to_parquet("climate_normals", bronze_dir, parquet_dir)
-
     if failures == download_failures == 0:
         save_last_run(data_dir)
     else:
@@ -184,9 +173,6 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
     failures = 0
     for ds in datasets:
         failures += registry.convert(ds, bronze_dir, parquet_dir)
-
-    if not args.datasets:
-        failures += convert_normals_to_parquet("climate_normals", bronze_dir, parquet_dir)
 
     print(f"Parquet files saved to: {parquet_dir}")
 

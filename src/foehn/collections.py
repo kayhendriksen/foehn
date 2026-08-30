@@ -132,7 +132,9 @@ COLLECTIONS = {
     "surface_derived_grid": "ch.meteoschweiz.ogd-surface-derived-grid",  # C3 — Precipitation, temperature, sunshine
     "satellite_derived_grid": "ch.meteoschweiz.ogd-satellite-derived-grid",  # C4 — Radiation, clouds, LST
     "radar_derived_grid": "ch.meteoschweiz.ogd-radar-derived-grid",  # C5 — Hail (days + return periods), radar-derived
-    # C6 — Climate normals → downloaded separately as ZIP, see CLIMATE_NORMALS_ZIP_URL
+    # C6 — Station normals. The only dataset with no STAC collection: it ships as a
+    # single ZIP under this geo.admin identifier, see CLIMATE_NORMALS_ZIP_URL.
+    "climate_normals": "ch.meteoschweiz.klima",
     # C7 — Spatial climate normals (NetCDF/GeoTIFF, static reference grids)
     # Supersedes the retired per-parameter klimanormwerte-* map layers: the same
     # temp/precip/sun normals (1991-2020 and 1961-1990) are assets on this
@@ -272,6 +274,16 @@ COLLECTION_META: dict[str, dict] = {
         "frequencies": [],
         "time_slices": [],
     },
+    "climate_normals": {
+        "category": "C",
+        "subcategory": "C6",
+        "description": "Station climate normals, 1961-1990 and 1991-2020 (monthly + yearly)",
+        "format": "TXT",
+        # No reader, so no filter vocabulary to advertise: this dataset downloads
+        # and converts to Parquet but is not reachable from load().
+        "frequencies": [],
+        "time_slices": [],
+    },
     "climate_normals_grid": {
         "category": "C",
         "subcategory": "C7",
@@ -396,6 +408,15 @@ class DatasetKind(StrEnum):
     RADAR_GRID = "radar_grid"
     """ODIM-H5 Cartesian composites, one per timestep."""
 
+    DIRECT_ZIP = "direct_zip"
+    """A ZIP fetched from a fixed URL rather than listed on the STAC API.
+
+    Climate normals only. It has a download path and a convert path but no
+    reader: the TXT files are a wide per-parameter table keyed by station *name*
+    with twelve month columns and no timestamp, so what a normals DataFrame
+    should look like is an open question rather than a missing adapter.
+    """
+
 
 # One row per dataset. Adding a collection means adding it here and to
 # COLLECTIONS; a kind missing from either is caught by the tests.
@@ -417,6 +438,7 @@ KIND_OF: dict[str, DatasetKind] = {
     "radar_derived_grid": DatasetKind.NETCDF_GRID,
     "climate_normals_grid": DatasetKind.NETCDF_GRID,
     "climate_scenarios_grid": DatasetKind.NETCDF_GRID,
+    "climate_normals": DatasetKind.DIRECT_ZIP,
     "climate_scenarios": DatasetKind.PREAMBLE_CSV,
     "climate_scenarios_indoor": DatasetKind.ARCHIVE_CSV,
     # D: radar

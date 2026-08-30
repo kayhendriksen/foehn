@@ -23,12 +23,14 @@ from foehn.client import (
     DownloadResult,
     already_current,
     download_indoor_zip,
+    download_normals_zip,
     exists,
     stac_download,
 )
 from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, kind
 from foehn.convert import (
     convert_indoor_to_parquet,
+    convert_normals_to_parquet,
     convert_preamble_to_parquet,
     convert_to_parquet,
 )
@@ -221,6 +223,17 @@ KINDS: dict[DatasetKind, KindSpec] = {
         supports_granularity=False,
         supports_calendar_filters=True,
     ),
+    DatasetKind.DIRECT_ZIP: KindSpec(
+        download=download_normals_zip,
+        convert=convert_normals_to_parquet,
+        # Neither loadable nor gridded: it converts to Parquet but has no reader,
+        # so it is the one dataset ``tabular_datasets()`` and ``grid_datasets()``
+        # both leave out. See DatasetKind.DIRECT_ZIP.
+        load=None,
+        grid=None,
+        supports_granularity=False,
+        supports_calendar_filters=False,
+    ),
     DatasetKind.NETCDF_GRID: KindSpec(
         download=_download_netcdf,
         convert=None,
@@ -307,16 +320,32 @@ def download(
     )
 
 
+def unreadable_message(dataset: str) -> str:
+    """Why *dataset* has no DataFrame, in terms of what the caller should do instead.
+
+    Two reasons, not one: a grid dataset has ``open_dataset``, while the
+    direct-ZIP kind has a Parquet path and no in-memory reader at all. Saying
+    "binary/grid" for both was accurate until the second reason existed.
+    """
+    kind_spec = spec(dataset)
+    if kind_spec.is_grid:
+        fmt = COLLECTION_META[dataset]["format"]
+        return f"Dataset {dataset!r} is a gridded ({fmt}) dataset. Use foehn.open_dataset() to get an xarray Dataset."
+    return (
+        f"Dataset {dataset!r} has no in-memory reader. Use foehn.download() and foehn.to_parquet() "
+        "to materialise it, then read the Parquet."
+    )
+
+
 def load(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
     """Load *dataset* by whichever reader its kind uses.
 
-    Callers guard on ``spec(dataset).tabular`` first — the grid kinds have no
-    reader, which is a fact about the kind rather than a branch each caller
-    re-derives.
+    Callers guard on ``spec(dataset).tabular`` first — which kinds have no reader
+    is a fact about the kind rather than a branch each caller re-derives.
     """
     reader = spec(dataset).load
     if reader is None:
-        raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
+        raise ValueError(unreadable_message(dataset))
     return reader(dataset, filters, fetcher=fetcher)
 
 
@@ -427,3 +456,14 @@ def tabular_datasets() -> list[str]:
 def grid_datasets() -> list[str]:
     """Every dataset read as a grid, in declaration order."""
     return [key for key in COLLECTIONS if KINDS[KIND_OF[key]].is_grid]
+
+
+def non_grid_datasets() -> list[str]:
+    """Every dataset that is not a grid, in declaration order.
+
+    What "download everything by default" has always meant: skip the large
+    binary collections unless asked for them. The CLI and the Databricks script
+    used ``tabular_datasets()`` for it and then added ``climate_normals`` back by
+    hand, because that dataset converts to Parquet without being loadable.
+    """
+    return [key for key in COLLECTIONS if not KINDS[KIND_OF[key]].is_grid]

@@ -7,12 +7,14 @@ import polars as pl
 import pytest
 from conftest import FIXTURES_DIR
 
+from foehn import registry
+
 # We can't import the script directly (it has a top-level pyspark import),
 # so we patch pyspark before importing.
 pyspark_mock = MagicMock()
 with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_mock.sql}):
     from scripts.ingest_delta import (
-        TABULAR_COLLECTIONS,
+        INGESTED_COLLECTIONS,
         _apply_column_comments,
         _build_schema_overrides,
         _ingest_climate_normals,
@@ -333,18 +335,20 @@ def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
     assert skip == 1
 
 
-# ── TABULAR_COLLECTIONS ─────────────────────────────────────────────────────
+# ── INGESTED_COLLECTIONS ─────────────────────────────────────────────────────
 
 
 def test_tabular_collections_excludes_binary():
     from foehn import registry
 
-    for key in TABULAR_COLLECTIONS:
+    for key in INGESTED_COLLECTIONS:
         # climate_normals is a ZIP from opendata.swiss, not a STAC collection,
         # so it has no kind — everything else must be a tabular one.
         if key != "climate_normals":
             assert registry.spec(key).tabular
 
 
-def test_tabular_collections_includes_climate_normals():
-    assert "climate_normals" in TABULAR_COLLECTIONS
+def test_ingested_collections_includes_climate_normals():
+    """It used to be appended by hand; it is a row in the registry now."""
+    assert "climate_normals" in INGESTED_COLLECTIONS
+    assert registry.non_grid_datasets() == INGESTED_COLLECTIONS

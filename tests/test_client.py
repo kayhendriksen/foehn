@@ -17,8 +17,8 @@ from foehn import registry
 from foehn.client import (
     DownloadResult,
     _safe_extract_zip,
-    download_climate_normals_zip,
     download_metadata,
+    download_normals_zip,
     load_etags,
     load_last_run,
     save_etags,
@@ -356,28 +356,28 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def test_download_climate_normals_zip_extracts_files(tmp_path):
+def test_normals_zip_extracts_files(tmp_path):
     zip_bytes = _make_zip({"sample.txt": b"data"})
     fake = _fake(body=zip_bytes)
 
-    download_climate_normals_zip(tmp_path / "bronze", fetcher=fake)
+    download_normals_zip("climate_normals", tmp_path / "bronze", fetcher=fake)
 
     assert (tmp_path / "bronze" / "climate_normals" / "normwerte.zip").exists()
     assert (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
 
 
-def test_download_climate_normals_zip_skips_if_extracted(tmp_path):
+def test_normals_zip_skips_if_extracted(tmp_path):
     fake = _fake(body=_make_zip({"sample.txt": b"data"}))
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "sample.txt").write_bytes(b"extracted")
 
-    download_climate_normals_zip(tmp_path / "bronze", fetcher=fake)
+    download_normals_zip("climate_normals", tmp_path / "bronze", fetcher=fake)
 
     assert fake.gets == [] and fake.streams == []
 
 
-def test_download_climate_normals_zip_redownloads_if_not_extracted(tmp_path):
+def test_normals_zip_redownloads_if_not_extracted(tmp_path):
     """A ZIP left by a run that died before extraction must not be mistaken for done."""
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
@@ -386,20 +386,20 @@ def test_download_climate_normals_zip_redownloads_if_not_extracted(tmp_path):
     zip_bytes = _make_zip({"sample.txt": b"data"})
     fake = _fake(body=zip_bytes)
 
-    download_climate_normals_zip(tmp_path / "bronze", fetcher=fake)
+    download_normals_zip("climate_normals", tmp_path / "bronze", fetcher=fake)
 
     assert len(fake.streams) == 1
     assert (out_dir / "sample.txt").exists()
 
 
-def test_download_climate_normals_zip_rejects_decompression_bomb(tmp_path, monkeypatch):
+def test_normals_zip_rejects_decompression_bomb(tmp_path, monkeypatch):
     """An archive declaring more decompressed bytes than the cap must not extract."""
     monkeypatch.setattr("foehn.client._MAX_ZIP_EXTRACT_BYTES", 10)
     zip_bytes = _make_zip({"sample.txt": b"x" * 1024})
     fake = _fake(body=zip_bytes)
 
     with pytest.raises(ValueError, match="decompressed"):
-        download_climate_normals_zip(tmp_path / "bronze", fetcher=fake)
+        download_normals_zip("climate_normals", tmp_path / "bronze", fetcher=fake)
 
     assert not (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
 
@@ -433,7 +433,7 @@ def test_safe_extract_zip_rejects_path_traversal(tmp_path):
     assert not (tmp_path / "evil.txt").exists()
 
 
-def test_download_climate_normals_zip_force_redownloads(tmp_path):
+def test_normals_zip_force_redownloads(tmp_path):
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "old.txt").write_bytes(b"stale")
@@ -441,7 +441,7 @@ def test_download_climate_normals_zip_force_redownloads(tmp_path):
     zip_bytes = _make_zip({"new.txt": b"fresh"})
     fake = _fake(body=zip_bytes)
 
-    download_climate_normals_zip(tmp_path / "bronze", force=True, fetcher=fake)
+    download_normals_zip("climate_normals", tmp_path / "bronze", force=True, fetcher=fake)
 
     assert len(fake.streams) == 1
     assert (out_dir / "new.txt").exists()

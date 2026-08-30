@@ -299,21 +299,27 @@ def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
 # --- C6 climate normals ZIP ---
 
 
-def download_climate_normals_zip(output_dir: Path, force: bool = False, *, fetcher: Fetcher) -> DownloadResult:
-    """Download C6 climate normals ZIP from opendata.swiss and extract."""
-    out_dir = output_dir / "climate_normals"
+def download_normals_zip(
+    dataset: str, bronze_dir: Path, *, force: bool = False, fetcher: Fetcher, **_: object
+) -> DownloadResult:
+    """Download the C6 climate normals ZIP and extract it.
+
+    A :class:`~foehn.registry.DownloadAdapter` that never lists STAC: this is the
+    one dataset MeteoSwiss publishes as a fixed-URL ZIP rather than a collection,
+    which is why it used to be a special case in the CLI, in the to-parquet
+    command and in the Databricks ingest script instead of a row.
+    """
+    out_dir = bronze_dir / dataset
     out_dir.mkdir(parents=True, exist_ok=True)
     filepath = out_dir / "normwerte.zip"
 
     # Skip on the *extraction output*, not the ZIP: a run that died between
     # download and extract must not be mistaken for a completed one.
     if not force and any(out_dir.glob("*.txt")):
-        logger.info("  Climate normals already downloaded and extracted — skipping")
+        logger.info("  %s already downloaded and extracted — skipping", dataset)
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
-    logger.info("%s", "=" * 60)
-    logger.info("Climate normals (C6): downloading from opendata.swiss")
-    logger.info("%s", "=" * 60)
+    _banner("Climate normals (C6): fixed-URL ZIP", out_dir)
 
     fetcher.stream(CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
     logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)

@@ -343,7 +343,7 @@ def load(
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     spec = registry.spec(dataset)
     if not spec.tabular:
-        raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
+        raise ValueError(registry.unreadable_message(dataset))
     if frequency is not None and not spec.supports_granularity:
         raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
     if sort is not None and sort not in ("asc", "desc"):

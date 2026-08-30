@@ -252,11 +252,11 @@ class TestLoadData:
             load_data("nonexistent")
 
     def test_grib2_dataset_raises(self):
-        with pytest.raises(ValueError, match="binary/grid"):
+        with pytest.raises(ValueError, match="gridded"):
             load_data("forecast_icon_ch1")
 
     def test_netcdf_dataset_raises(self):
-        with pytest.raises(ValueError, match="binary/grid"):
+        with pytest.raises(ValueError, match="gridded"):
             load_data("surface_derived_grid")
 
     def test_invalid_frequency_raises(self):
@@ -504,7 +504,7 @@ class TestDescribeData:
             describe_data("nonexistent")
 
     def test_grib2_dataset_raises(self):
-        with pytest.raises(ValueError, match="binary/grid"):
+        with pytest.raises(ValueError, match="gridded"):
             describe_data("forecast_icon_ch1")
 
     def test_invalid_frequency_raises(self):

@@ -14,8 +14,10 @@ foehn's short key for one body of MeteoSwiss data — `smn`, `radar_precip`,
 _Avoid_: collection (that is the STAC id), source, feed, product
 
 **Collection**:
-The STAC collection a **Dataset** maps to, e.g. `ch.meteoschweiz.ogd-smn`. One
-**Dataset** is exactly one **Collection**.
+The upstream identifier a **Dataset** maps to, e.g. `ch.meteoschweiz.ogd-smn`.
+A STAC collection id for every **Dataset kind** but **Direct ZIP**, which has no
+STAC collection and whose identifier is the geo.admin path its ZIP lives under.
+One **Dataset** is exactly one **Collection**.
 _Avoid_: dataset, endpoint
 
 **Dataset kind**:
@@ -35,7 +37,7 @@ MeteoSwiss's own A–E classification of its data (A ground-based, C climate,
 D radar, E forecast). Public, and theirs — foehn reports it but never routes on it.
 _Avoid_: kind, group, class
 
-### The seven dataset kinds
+### The eight dataset kinds
 
 **Standard CSV** (10 datasets):
 Per-station CSV assets split by **Time slice** and **Granularity**. The main path:
@@ -64,6 +66,14 @@ One field per file.
 ODIM-H5 Cartesian composites, one per timestep.
 _Avoid_: HDF5 grid, GRIB2 collection — lumping radar with GRIB2 was the original
 routing mistake.
+
+**Direct ZIP** (`climate_normals`):
+A ZIP fetched from a fixed URL rather than listed on the STAC API. The only kind
+with a download path and a convert path but neither a **Reader** nor a **Grid
+reader**: its TXT files are a wide per-parameter table keyed by station *name*,
+with twelve month columns and no timestamp, so what a normals DataFrame should
+look like is an open question rather than a missing adapter.
+_Avoid_: normals kind (the kind is the shipping shape, not the subject matter)
 
 ### Assets
 
@@ -151,8 +161,9 @@ _Avoid_: query, params, options
 - A **Forecast CSV** **Asset** is identified by its **Forecast run**.
 - Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
 - Every **Asset** written to **Bronze** goes through **Transfer**, which calls the **Fetcher**.
-- A **Dataset kind** has one download path, one convert path, and exactly one of
-  a **Reader** (tabular) or a **Grid reader** (gridded).
+- A **Dataset kind** has one download path and one convert path, and at most one
+  of a **Reader** (tabular) or a **Grid reader** (gridded) — never both, and
+  neither for **Direct ZIP**.
 
 ## Flagged ambiguities
 
@@ -168,6 +179,11 @@ _Avoid_: query, params, options
   `collections`, once again in the MCP layer, which could only agree or drift.
   Resolved: `collections.GRANULARITIES` and `collections.TIME_SLICES` are the
   vocabulary, `load()` enforces it, and the MCP tools restate nothing.
+- `climate_normals` was a **Dataset** in the docs and in three callers' special
+  cases, but not in the dataset table — so `foehn.list_datasets()` did not show
+  it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
+  it is a **Direct ZIP** **Dataset** like any other. What "download everything"
+  means is now *not gridded* rather than *tabular*, which is what it always meant.
 - Which **Dataset kinds** are gridded was stated twice — as `collections.GRID_KINDS`
   beside the kind enum, and again as the keys of the grid path's own reader table.
   Resolved: a kind is gridded iff its registry row carries a **Grid reader**;

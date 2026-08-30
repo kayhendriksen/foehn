@@ -316,13 +316,19 @@ def test_load_unknown_dataset_raises():
         load("nonexistent")
 
 
+def test_load_dataset_without_a_reader_says_what_to_do_instead():
+    """climate_normals is neither loadable nor gridded — the old message said "binary/grid"."""
+    with pytest.raises(ValueError, match="no in-memory reader"):
+        foehn.load("climate_normals")
+
+
 def test_load_grib2_dataset_raises():
-    with pytest.raises(ValueError, match="binary/grid dataset"):
+    with pytest.raises(ValueError, match="gridded"):
         load("forecast_icon_ch1")
 
 
 def test_load_netcdf_dataset_raises():
-    with pytest.raises(ValueError, match="binary/grid dataset"):
+    with pytest.raises(ValueError, match="gridded"):
         load("surface_derived_grid")
 
 
