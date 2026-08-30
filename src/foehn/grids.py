@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from foehn._urls import asset_filename, clean_href
+from foehn.assets import Asset, assets_of, collection_assets, other_extensions
 from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, is_grid, kind
 from foehn.fetch import DEFAULT_WORKERS, Fetcher, FetchError, default_fetcher
 
@@ -187,25 +187,15 @@ def _raise_if_too_many(collection_key: str, match: str | None, names: list[str],
     )
 
 
-def _grid_asset_hrefs(items: list[dict], suffixes: tuple[str, ...], match: str | None) -> tuple[list[str], set[str]]:
-    """Pick the grid asset hrefs out of a STAC listing.
+def _grid_assets(items: list[dict], suffixes: tuple[str, ...], match: str | None) -> tuple[list[Asset], set[str]]:
+    """Pick the grid assets out of a STAC listing.
 
-    Returns the matching hrefs plus the other extensions seen, which feed the
+    Returns the matching assets plus the other extensions seen, which feed the
     "available asset types" hint when nothing matches.
     """
-    hrefs: list[str] = []
-    other_exts: set[str] = set()
-    for item in items:
-        for asset_info in item.get("assets", {}).values():
-            href = asset_info.get("href", "")
-            clean = clean_href(href)
-            filename = clean.split("/")[-1]
-            if clean.endswith(suffixes):
-                if match is None or match in filename:
-                    hrefs.append(href)
-            elif "." in filename:
-                other_exts.add("." + filename.rsplit(".", 1)[-1])
-    return hrefs, other_exts
+    matched = assets_of(items, suffixes=suffixes, contains=match)
+    other_exts = {ext for ext in other_extensions(items) if not ext.endswith(suffixes)}
+    return matched, other_exts
 
 
 def _ensure_grid_files(
@@ -256,17 +246,17 @@ def _ensure_grid_files(
             return cached
         raise
 
-    hrefs, other_exts = _grid_asset_hrefs(items, suffixes, match)
+    matched, other_exts = _grid_assets(items, suffixes, match)
 
-    if not hrefs and datetime_filter is not None:
+    if not matched and datetime_filter is not None:
         # The run-narrowed listing came back with nothing usable. Rather than
         # report a file as missing on the strength of an optimisation, fall back
         # to the full walk — slow, but it is exactly what happened before.
         logger.debug("No %s assets for %r under datetime=%s; retrying unfiltered", sfx, match, datetime_filter)
         items = fetcher.items(collection_id, cache=True)
-        hrefs, other_exts = _grid_asset_hrefs(items, suffixes, match)
+        matched, other_exts = _grid_assets(items, suffixes, match)
 
-    if not hrefs:
+    if not matched:
         if match is not None:
             raise ValueError(f"No {sfx} assets matching {match!r} found for {collection_key!r}.")
         found = ", ".join(sorted(other_exts)) or "none"
@@ -274,18 +264,18 @@ def _ensure_grid_files(
 
     # Enforce the per-format file cap before downloading so an over-broad match
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
-    _raise_if_too_many(collection_key, match, [asset_filename(h) for h in hrefs], max_files)
+    _raise_if_too_many(collection_key, match, [a.name for a in matched], max_files)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     # Deduplicate by destination: a STAC item can list one asset under several
     # keys, and two workers streaming into the same ``.part`` would corrupt it.
     targets: dict[Path, str] = {}
-    for href in hrefs:
-        filepath = out_dir / asset_filename(href)
+    for asset in matched:
+        filepath = out_dir / asset.name
         paths.append(filepath)
         if not filepath.exists() and filepath not in targets:
-            targets[filepath] = href
+            targets[filepath] = asset.href
 
     if targets:
         # Fetch concurrently, like the CSV path. Serial downloads made the network
@@ -469,15 +459,13 @@ def _ensure_constants_file(collection_key: str, bronze_dir: Path, *, fetcher: Fe
         return cached[0]
 
     meta = fetcher.collection(COLLECTIONS[collection_key])
-    href = next(
-        (a.get("href", "") for k, a in meta.get("assets", {}).items() if "horizontal_constants" in k.lower()),
-        "",
-    )
-    if not href:
+    constants = collection_assets(meta, key_contains="horizontal_constants")
+    if not constants:
         return None
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / asset_filename(href)
+    href = constants[0].href
+    path = out_dir / constants[0].name
     if not path.exists():
         fetcher.stream(href, path)
     return path
