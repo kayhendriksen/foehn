@@ -73,11 +73,12 @@ grids = [
 ]
 dev = [
     "ruff>=0.9",
-    # Typechecks src/ in CI, which pins the exact version (TY_VERSION in ci.yml).
-    # The floor here is so a local `ty check` is available without hunting for it;
-    # keep it at or below the CI pin. ty is pre-1.0, so treat a version bump as a
-    # change that can turn a green PR red on its own.
-    "ty>=0.0.74",
+    # Pinned, not floored: ty typechecks src/ in CI, it is pre-1.0, and a version
+    # bump can turn a green PR red on its own. Dependabot bumps this weekly, so
+    # the upgrade arrives as its own reviewable PR rather than landing on whoever
+    # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
+    # which CI reads — see scripts/hook_version.sh.)
+    "ty==0.0.74",
     "numpy>=1.24",
     "pydantic>=2.0",
     "pytest>=8.0",

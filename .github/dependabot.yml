@@ -29,6 +29,32 @@ updates:
         update-types:
           - major
 
+  # The pinned dev toolchain (ruff, zizmor, the hygiene hooks) lives in
+  # .pre-commit-config.yaml, and CI reads its versions from there — so bumping
+  # this file is what keeps the whole toolchain current.
+  - package-ecosystem: pre-commit
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:15"
+      timezone: Europe/Zurich
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      pre-commit-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

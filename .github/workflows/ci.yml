@@ -14,13 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  # Single source of truth for the pinned dev toolchain. RUFF_VERSION must stay
-  # in step with .pre-commit-config.yaml so local hooks and CI agree — a drifting
-  # ruff turns green PRs red with no code change.
-  RUFF_VERSION: "0.16.4"
-  TY_VERSION: "0.0.74"
-  ZIZMOR_VERSION: "1.29.0"
+# The pinned dev toolchain lives in .pre-commit-config.yaml (ruff, zizmor) and
+# the pyproject dev extra (ty), both of which Dependabot bumps. The jobs below
+# read the versions from there rather than repeating them here: the previous
+# env vars had to be kept in step with the hook revs by hand, and a silent
+# mismatch means local hooks and CI disagree about what "clean" means.
   PIP_AUDIT_VERSION: "2.9.0"
   # Must match the pins in publish.yml — the build job below is that job's smoke
   # test, and only catches its failures if it runs the same toolchain.
@@ -39,10 +37,19 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
+      - name: Resolve pinned ruff
+        id: ruff
+        run: scripts/hook_version.sh ruff-pre-commit >> "$GITHUB_OUTPUT"
       # scripts/ is linted too — ingest_delta.py builds Spark SQL by hand and is
       # the highest-risk file in the repo.
-      - run: uvx ruff@${RUFF_VERSION} check src/ tests/ scripts/
-      - run: uvx ruff@${RUFF_VERSION} format --check src/ tests/ scripts/
+      # Via env rather than expanding ${{ }} straight into the run block, which
+      # is the template-injection shape zizmor flags.
+      - run: uvx "ruff@${RUFF_PIN}" check src/ tests/ scripts/
+        env:
+          RUFF_PIN: ${{ steps.ruff.outputs.version }}
+      - run: uvx "ruff@${RUFF_PIN}" format --check src/ tests/ scripts/
+        env:
+          RUFF_PIN: ${{ steps.ruff.outputs.version }}
 
   typecheck:
     runs-on: ubuntu-latest
@@ -57,7 +64,8 @@ jobs:
       # foehn ships py.typed, so downstream type checkers trust these annotations.
       # Nothing verified them before this job existed.
       - run: uv venv --python 3.12
-      - run: uv pip install -e ".[dev]" "ty==${TY_VERSION}"
+      # ty is pinned in the pyproject dev extra, so Dependabot bumps it there.
+      - run: uv pip install -e ".[dev]"
       - run: .venv/bin/ty check src/
 
   test:
@@ -163,9 +171,13 @@ jobs:
       # Static analysis for the workflows themselves: template injection, unpinned
       # actions, credential persistence, over-broad permissions. Clean as of this
       # commit — the point is to keep it that way as workflows change.
+      - name: Resolve pinned zizmor
+        id: zizmor
+        run: scripts/hook_version.sh zizmor-pre-commit >> "$GITHUB_OUTPUT"
       - name: Run zizmor
-        run: uvx zizmor@${ZIZMOR_VERSION} --format sarif .github/workflows/ > zizmor.sarif
+        run: uvx "zizmor@${ZIZMOR_PIN}" --format sarif .github/workflows/ > zizmor.sarif
         env:
+          ZIZMOR_PIN: ${{ steps.zizmor.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload SARIF
         if: always() && hashFiles('zizmor.sarif') != ''

@@ -1,5 +1,8 @@
-# Keep the ruff rev in step with RUFF_VERSION in .github/workflows/ci.yml —
-# a mismatch means hooks and CI disagree about what "clean" means.
+# The single source of truth for the pinned dev toolchain. CI reads the ruff and
+# zizmor versions out of this file rather than repeating them, so local hooks and
+# CI cannot disagree about what "clean" means — they were previously kept in step
+# by hand, and a drifting ruff turns green PRs red with no code change.
+# Dependabot bumps these revs weekly (see .github/dependabot.yml).
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.4
