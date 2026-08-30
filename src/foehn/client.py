@@ -14,8 +14,9 @@ from foehn._urls import asset_filename, clean_href
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
     COLLECTIONS,
-    FORECAST_CSV_COLLECTIONS,
+    DatasetKind,
     forecast_run_from_filename,
+    kind,
     time_slice_from_filename,
 )
 from foehn.convert import utf8_meteoswiss_csv
@@ -207,7 +208,7 @@ def download_collection(
     # Collect matching CSV assets. ``all_csv_hrefs`` is the full pre-filter set
     # (every CSV in the listing, regardless of time slice) — the prune universe
     # below, so ETags for slices outside this run's data_types are kept.
-    skip_data_type_filter = collection_key in FORECAST_CSV_COLLECTIONS
+    skip_data_type_filter = kind(collection_key) is DatasetKind.FORECAST_CSV
     csv_assets = []
     all_csv_hrefs: set[str] = set()
     for item in items:
@@ -226,7 +227,7 @@ def download_collection(
 
     # One forecast run is ~32 files at ~30 MB each (~1 GB); the full retained
     # window is ~40 runs (~40 GB). Keep only the newest complete-ish run.
-    if collection_key in FORECAST_CSV_COLLECTIONS and csv_assets:
+    if kind(collection_key) is DatasetKind.FORECAST_CSV and csv_assets:
         runs = {run for href, _ in csv_assets if (run := forecast_run_from_filename(clean_href(href))) is not None}
         if runs:
             latest_run = max(runs)

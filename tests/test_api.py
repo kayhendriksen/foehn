@@ -2,7 +2,7 @@
 
 import io
 import zipfile
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -58,23 +58,17 @@ def test_download_unknown_dataset_raises():
         download("nonexistent")
 
 
-@patch("foehn.api.download_grib2")
-def test_download_grib2_dataset_routes_to_handler(mock_dl, tmp_path):
+@pytest.mark.parametrize("dataset", ["smn", "forecast_icon_ch1", "surface_derived_grid", "climate_scenarios_indoor"])
+@patch("foehn.registry.download")
+def test_download_delegates_to_the_registry(mock_dl, dataset, tmp_path):
+    """Whichever kind it is, download() hands it to the registry and returns the result."""
     from foehn.client import DownloadResult
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
-    res = download("forecast_icon_ch1", data_dir=tmp_path)
-    mock_dl.assert_called_once_with("forecast_icon_ch1", tmp_path / "bronze", since=None, workers=8, fetcher=ANY)
-    assert res.downloaded == 1
 
+    res = download(dataset, data_dir=tmp_path)
 
-@patch("foehn.api.download_netcdf")
-def test_download_netcdf_dataset_routes_to_handler(mock_dl, tmp_path):
-    from foehn.client import DownloadResult
-
-    mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
-    res = download("surface_derived_grid", data_dir=tmp_path)
-    mock_dl.assert_called_once_with("surface_derived_grid", tmp_path / "bronze", since=None, workers=8, fetcher=ANY)
+    assert mock_dl.call_args.args == (dataset, tmp_path / "bronze")
     assert res.downloaded == 1
 
 
@@ -91,18 +85,8 @@ def _make_indoor_zip(data_names):
     return buf.getvalue()
 
 
-@patch("foehn.api.download_climate_scenarios_indoor")
-def test_download_indoor_routes_to_handler(mock_dl, tmp_path):
-    from foehn.client import DownloadResult
-
-    mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
-    res = download("climate_scenarios_indoor", data_dir=tmp_path)
-    mock_dl.assert_called_once_with(tmp_path / "bronze", "climate_scenarios_indoor", force=False, fetcher=ANY)
-    assert res.downloaded == 1
-
-
-@patch("foehn.api.download_climate_scenarios_indoor")
-def test_download_indoor_passes_force(mock_dl, tmp_path):
+@patch("foehn.registry.download")
+def test_download_passes_force_through(mock_dl, tmp_path):
     from foehn.client import DownloadResult
 
     mock_dl.return_value = DownloadResult()
@@ -110,15 +94,8 @@ def test_download_indoor_passes_force(mock_dl, tmp_path):
     assert mock_dl.call_args.kwargs["force"] is True
 
 
-@patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")
-def test_to_parquet_indoor_routes_to_converter(mock_conv, tmp_path):
-    mock_conv.return_value = 0
-    to_parquet("climate_scenarios_indoor", data_dir=tmp_path)
-    mock_conv.assert_called_once_with(tmp_path / "bronze", tmp_path / "parquet")
-
-
-@patch("foehn.api.convert_climate_scenarios_indoor_to_parquet")
-def test_to_parquet_indoor_raises_on_failure(mock_conv, tmp_path):
+@patch("foehn.registry.convert")
+def test_to_parquet_raises_when_the_registry_reports_failures(mock_conv, tmp_path):
     mock_conv.return_value = 1
     with pytest.raises(RuntimeError, match="did not convert"):
         to_parquet("climate_scenarios_indoor", data_dir=tmp_path)
@@ -159,13 +136,6 @@ _CS_CSV = (
     "TITLE;X\nVARIABLE;Daily precipitation sum\nGWL;GWL1.5\n\n"
     "DATE;MODEL_A;MODEL_B\n0001-01-01;0;24.2\n0001-01-02;1.5;0\n"
 )
-
-
-@patch("foehn.api.convert_climate_scenarios_to_parquet")
-def test_to_parquet_climate_scenarios_routes(mock_conv, tmp_path):
-    mock_conv.return_value = 0
-    to_parquet("climate_scenarios", data_dir=tmp_path)
-    mock_conv.assert_called_once_with(tmp_path / "bronze", tmp_path / "parquet")
 
 
 def test_load_climate_scenarios_year_filter_raises():
@@ -298,24 +268,14 @@ def test_load_forecast_local_fetches_only_latest_run(fetcher):
     assert all("202607210600" in url for url in fetched)
 
 
-@patch("foehn.api.download_collection")
-@patch("foehn.api.download_metadata")
-def test_download_calls_underlying_functions(mock_meta, mock_dl, tmp_path):
+@patch("foehn.registry.download")
+def test_download_passes_the_requested_time_slice(mock_dl, tmp_path):
     from foehn.client import DownloadResult
 
-    mock_meta.return_value = DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["m.csv"])
-    mock_dl.return_value = DownloadResult(total_assets=2, downloaded=2, skipped=0, filenames=["a.csv", "b.csv"])
+    mock_dl.return_value = DownloadResult()
+    download("smn", data_dir=tmp_path, time_slice=["historical"])
 
-    result = download("smn", data_dir=tmp_path, time_slice=["historical"])
-    mock_meta.assert_called_once_with("smn", tmp_path / "bronze", workers=8, fetcher=ANY)
-    mock_dl.assert_called_once_with(
-        "smn", tmp_path / "bronze", data_types=["historical"], since=None, workers=8, fetcher=ANY
-    )
-
-    assert isinstance(result, DownloadResult)
-    assert result.total_assets == 3
-    assert result.downloaded == 3
-    assert result.filenames == ["m.csv", "a.csv", "b.csv"]
+    assert mock_dl.call_args.kwargs["time_slice"] == ["historical"]
 
 
 def test_to_parquet_unknown_dataset_raises():
@@ -323,14 +283,14 @@ def test_to_parquet_unknown_dataset_raises():
         to_parquet("nonexistent")
 
 
-@patch("foehn.api.convert_to_parquet")
-def test_to_parquet_calls_convert_to_parquet(mock_conv, tmp_path):
+@patch("foehn.registry.convert")
+def test_to_parquet_delegates_to_the_registry(mock_conv, tmp_path):
     mock_conv.return_value = 0
     to_parquet("smn", data_dir=tmp_path)
     mock_conv.assert_called_once_with("smn", tmp_path / "bronze", tmp_path / "parquet")
 
 
-@patch("foehn.api.convert_to_parquet")
+@patch("foehn.registry.convert")
 def test_to_parquet_raises_on_convert_failure(mock_conv, tmp_path):
     """Python API should mirror the CLI: any conversion failure raises, not silent."""
     mock_conv.return_value = 2
@@ -338,7 +298,7 @@ def test_to_parquet_raises_on_convert_failure(mock_conv, tmp_path):
         to_parquet("smn", data_dir=tmp_path)
 
 
-@patch("foehn.api.convert_to_parquet")
+@patch("foehn.registry.convert")
 def test_to_parquet_silent_when_no_failures(mock_conv, tmp_path):
     mock_conv.return_value = 0
     to_parquet("smn", data_dir=tmp_path)  # must not raise
@@ -632,17 +592,19 @@ def test_declared_time_slices_match_what_meteoswiss_publishes():
     missing slice tells callers a slice does not exist when it does — pollen's
     hourly "now" series was invisible this way.
     """
+    from foehn import registry
     from foehn._urls import asset_filename
     from foehn.collections import (
         COLLECTION_META,
         COLLECTIONS,
-        CSV_ZIP_COLLECTIONS,
-        GRIB2_COLLECTIONS,
-        NETCDF_COLLECTIONS,
+        DatasetKind,
+        kind,
         time_slice_from_filename,
     )
 
-    tabular = [k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS | NETCDF_COLLECTIONS | CSV_ZIP_COLLECTIONS]
+    # The archive kind ships one ZIP rather than per-slice CSV assets, so it has
+    # no time slices to compare.
+    tabular = [k for k in registry.tabular_datasets() if kind(k) is not DatasetKind.ARCHIVE_CSV]
     mismatches = {}
     for key in tabular:
         found = set()

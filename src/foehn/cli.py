@@ -10,29 +10,16 @@ from pathlib import Path
 
 import polars as pl
 
+from foehn import registry
 from foehn.api import inventory, list_datasets, parameters, stations
 from foehn.client import (
     download_climate_normals_zip,
-    download_climate_scenarios_indoor,
-    download_collection,
-    download_grib2,
-    download_metadata,
-    download_netcdf,
     load_last_run,
     save_last_run,
 )
-from foehn.collections import (
-    COLLECTIONS,
-    CSV_ZIP_COLLECTIONS,
-    GRIB2_COLLECTIONS,
-    NETCDF_COLLECTIONS,
-    PREAMBLE_CSV_COLLECTIONS,
-)
+from foehn.collections import COLLECTIONS
 from foehn.convert import (
     convert_climate_normals_to_parquet,
-    convert_climate_scenarios_indoor_to_parquet,
-    convert_climate_scenarios_to_parquet,
-    convert_to_parquet,
 )
 from foehn.fetch import default_fetcher
 
@@ -75,7 +62,7 @@ def _resolve_datasets(datasets: list[str], *, allow_grids: bool = False) -> list
     # Default: all collections (skip grids unless opted in)
     if allow_grids:
         return list(COLLECTIONS)
-    return [k for k in COLLECTIONS if k not in GRIB2_COLLECTIONS and k not in NETCDF_COLLECTIONS]
+    return registry.tabular_datasets()
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -146,26 +133,17 @@ def cmd_download(args: argparse.Namespace) -> None:
     failures = 0
     download_failures = 0
     for ds in datasets:
-        if ds in GRIB2_COLLECTIONS:
-            download_failures += download_grib2(ds, bronze_dir, since=since, workers=workers, fetcher=fetcher).failed
-        elif ds in NETCDF_COLLECTIONS:
-            download_failures += download_netcdf(ds, bronze_dir, since=since, workers=workers, fetcher=fetcher).failed
-        elif ds in CSV_ZIP_COLLECTIONS:
-            download_failures += download_climate_scenarios_indoor(
-                bronze_dir, ds, force=full_refresh, fetcher=fetcher
-            ).failed
-            if not args.no_parquet:
-                failures += convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
-        else:
-            download_failures += download_metadata(ds, bronze_dir, workers=workers, fetcher=fetcher).failed
-            download_failures += download_collection(
-                ds, bronze_dir, data_types=time_slices, since=since, workers=workers, fetcher=fetcher
-            ).failed
-            if not args.no_parquet:
-                if ds in PREAMBLE_CSV_COLLECTIONS:
-                    failures += convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
-                else:
-                    failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
+        download_failures += registry.download(
+            ds,
+            bronze_dir,
+            time_slice=time_slices,
+            since=since,
+            workers=workers,
+            force=full_refresh,
+            fetcher=fetcher,
+        ).failed
+        if not args.no_parquet:
+            failures += registry.convert(ds, bronze_dir, parquet_dir)
 
     # C6 climate normals (ZIP from opendata.swiss, not STAC)
     if not args.datasets:
@@ -207,15 +185,7 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
 
     failures = 0
     for ds in datasets:
-        if ds in GRIB2_COLLECTIONS or ds in NETCDF_COLLECTIONS:
-            continue
-        if ds in CSV_ZIP_COLLECTIONS:
-            failures += convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
-            continue
-        if ds in PREAMBLE_CSV_COLLECTIONS:
-            failures += convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
-            continue
-        failures += convert_to_parquet(ds, bronze_dir, parquet_dir)
+        failures += registry.convert(ds, bronze_dir, parquet_dir)
 
     if not args.datasets:
         failures += convert_climate_normals_to_parquet(bronze_dir, parquet_dir)

@@ -73,7 +73,7 @@ df = foehn.load("smn", station="BER", frequency="d", sort="desc")
 The CH2025 scenario collections have their own layout but load the same way:
 
 ```python
-# Indoor climate scenarios (CSV+ZIP): the whole archive is fetched once, then
+# Indoor climate scenarios: the whole archive is fetched once, then
 # filtered in memory by station.
 df = foehn.load("climate_scenarios_indoor", station="ABO")
 

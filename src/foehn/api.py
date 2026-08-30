@@ -8,35 +8,24 @@ from pathlib import Path
 
 import polars as pl
 
+from foehn import registry
 from foehn._urls import asset_filename, clean_href
 from foehn.client import (
     DownloadResult,
     _check_zip_size,
-    download_climate_scenarios_indoor,
-    download_collection,
-    download_grib2,
-    download_metadata,
-    download_netcdf,
 )
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
-    CSV_ZIP_COLLECTIONS,
-    FORECAST_CSV_COLLECTIONS,
-    GRIB2_COLLECTIONS,
-    NETCDF_COLLECTIONS,
-    NO_GRANULARITY_COLLECTIONS,
-    PREAMBLE_CSV_COLLECTIONS,
+    DatasetKind,
     forecast_run_from_filename,
+    kind,
     time_slice_from_filename,
 )
 from foehn.convert import (
     _parse_metadata_types,
     add_forecast_local_timestamp,
     add_indoor_columns,
-    convert_climate_scenarios_indoor_to_parquet,
-    convert_climate_scenarios_to_parquet,
-    convert_to_parquet,
     decode_meteoswiss_csv,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
@@ -108,27 +97,17 @@ def download(
     bronze_dir.mkdir(parents=True, exist_ok=True)
     fetcher = default_fetcher()
 
-    # Binary/grid datasets have no Parquet path — download the raw assets so the
-    # Python API mirrors the CLI's --grids behaviour (and open_dataset/to_zarr).
-    if dataset in GRIB2_COLLECTIONS:
-        return download_grib2(dataset, bronze_dir, since=since, workers=workers, fetcher=fetcher)
-    if dataset in NETCDF_COLLECTIONS:
-        return download_netcdf(dataset, bronze_dir, since=since, workers=workers, fetcher=fetcher)
-
-    if dataset in CSV_ZIP_COLLECTIONS:
-        return download_climate_scenarios_indoor(bronze_dir, dataset, force=force, fetcher=fetcher)
-
-    meta = download_metadata(dataset, bronze_dir, workers=workers, fetcher=fetcher)
-    coll = download_collection(
-        dataset, bronze_dir, data_types=time_slice or ["recent"], since=since, workers=workers, fetcher=fetcher
-    )
-
-    return DownloadResult(
-        total_assets=meta.total_assets + coll.total_assets,
-        downloaded=meta.downloaded + coll.downloaded,
-        skipped=meta.skipped + coll.skipped,
-        failed=meta.failed + coll.failed,
-        filenames=meta.filenames + coll.filenames,
+    # Each kind knows its own download path, including the grid kinds, which have
+    # no Parquet stage but still fetch their raw assets so the Python API mirrors
+    # the CLI's --grids behaviour (and open_dataset/to_zarr).
+    return registry.download(
+        dataset,
+        bronze_dir,
+        time_slice=time_slice,
+        since=since,
+        workers=workers,
+        force=force,
+        fetcher=fetcher,
     )
 
 
@@ -154,12 +133,7 @@ def to_parquet(
     data_dir = Path(data_dir) if data_dir else Path.cwd() / "data" / "meteoswiss"
     bronze_dir = data_dir / "bronze"
     parquet_dir = data_dir / "parquet"
-    if dataset in CSV_ZIP_COLLECTIONS:
-        failures = convert_climate_scenarios_indoor_to_parquet(bronze_dir, parquet_dir)
-    elif dataset in PREAMBLE_CSV_COLLECTIONS:
-        failures = convert_climate_scenarios_to_parquet(bronze_dir, parquet_dir)
-    else:
-        failures = convert_to_parquet(dataset, bronze_dir, parquet_dir)
+    failures = registry.convert(dataset, bronze_dir, parquet_dir)
     if failures:
         raise RuntimeError(
             f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
@@ -571,11 +545,18 @@ def load(
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-    if dataset in GRIB2_COLLECTIONS or dataset in NETCDF_COLLECTIONS:
+    spec = registry.spec(dataset)
+    if not spec.tabular:
         raise ValueError(f"Dataset {dataset!r} is a binary/grid dataset and cannot be loaded as a DataFrame.")
-    if dataset in CSV_ZIP_COLLECTIONS:
-        if frequency is not None:
-            raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
+    if frequency is not None and not spec.supports_granularity:
+        raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
+    if not spec.supports_calendar_filters and any(x is not None for x in (year, month, date_from, date_to)):
+        raise ValueError(
+            f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
+            "year/month/date_from/date_to filters are not supported."
+        )
+
+    if kind(dataset) is DatasetKind.ARCHIVE_CSV:
         return _load_indoor(
             dataset,
             station=station,
@@ -589,14 +570,7 @@ def load(
             limit=limit,
         )
 
-    if dataset in PREAMBLE_CSV_COLLECTIONS:
-        if frequency is not None:
-            raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
-        if any(x is not None for x in (year, month, date_from, date_to)):
-            raise ValueError(
-                f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
-                "year/month/date_from/date_to filters are not supported."
-            )
+    if kind(dataset) is DatasetKind.PREAMBLE_CSV:
         return _load_climate_scenarios(
             dataset,
             station=station,
@@ -623,8 +597,6 @@ def load(
     # Normalise frequency filter to a set (e.g. {"d", "h"}).
     freq_filter: set[str] | None = None
     if frequency is not None:
-        if dataset in NO_GRANULARITY_COLLECTIONS:
-            raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
         if isinstance(frequency, str):
             freq_filter = {frequency.lower()}
         else:
@@ -653,10 +625,10 @@ def load(
     # until that day's runs publish — so keep all items and narrow to the newest
     # run by filename below. Ranking on ``datetime`` would not help either: it is a
     # refresh timestamp, identical across items to the microsecond.
-    if dataset in FORECAST_CSV_COLLECTIONS and items:
+    if kind(dataset) is DatasetKind.FORECAST_CSV and items:
         items.sort(key=lambda x: x.get("id", ""))
 
-    skip_data_type_filter = dataset in FORECAST_CSV_COLLECTIONS
+    skip_data_type_filter = kind(dataset) is DatasetKind.FORECAST_CSV
     csv_hrefs: list[str] = []
     for item in items:
         assets = item.get("assets", {})
@@ -680,7 +652,7 @@ def load(
 
     # Narrow forecasts to the newest model run — the retained window holds ~40 runs
     # of ~32 files each, and load() wants the current forecast, not all of them.
-    if dataset in FORECAST_CSV_COLLECTIONS and csv_hrefs:
+    if kind(dataset) is DatasetKind.FORECAST_CSV and csv_hrefs:
         runs = {run for href in csv_hrefs if (run := forecast_run_from_filename(clean_href(href))) is not None}
         if runs:
             latest_run = max(runs)

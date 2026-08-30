@@ -5,19 +5,17 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
+from foehn import registry
 from foehn.cli import main
 
+# The CLI no longer knows which handler serves which dataset — the registry does.
+# What is left to stub is the registry's two entry points plus the C6 climate
+# normals, which are not a STAC collection and so have no kind.
 _PATCHES = [
-    "foehn.cli.download_collection",
-    "foehn.cli.download_metadata",
-    "foehn.cli.download_grib2",
-    "foehn.cli.download_netcdf",
+    "foehn.registry.download",
+    "foehn.registry.convert",
     "foehn.cli.download_climate_normals_zip",
-    "foehn.cli.download_climate_scenarios_indoor",
-    "foehn.cli.convert_to_parquet",
     "foehn.cli.convert_climate_normals_to_parquet",
-    "foehn.cli.convert_climate_scenarios_indoor_to_parquet",
-    "foehn.cli.convert_climate_scenarios_to_parquet",
     "foehn.cli.save_last_run",
     "foehn.cli.load_last_run",
 ]
@@ -31,21 +29,22 @@ def _start_mocks():
     for name, mock in zip(_PATCHES, started, strict=True):
         mocks[name.split(".")[-1]] = mock
     mocks["load_last_run"].return_value = None
-    mocks["convert_to_parquet"].return_value = 0
+    mocks["convert"].return_value = 0
     mocks["convert_climate_normals_to_parquet"].return_value = 0
-    mocks["convert_climate_scenarios_indoor_to_parquet"].return_value = 0
-    mocks["convert_climate_scenarios_to_parquet"].return_value = 0
     # cmd_download sums result.failed from each download call to gate _last_run;
-    # give the download mocks a clean (0-failure) DownloadResult by default.
-    for name in (
-        "download_collection",
-        "download_metadata",
-        "download_grib2",
-        "download_netcdf",
-        "download_climate_scenarios_indoor",
-    ):
-        mocks[name].return_value.failed = 0
+    # give the download mock a clean (0-failure) DownloadResult by default.
+    mocks["download"].return_value.failed = 0
     return mocks, patchers
+
+
+def _downloaded(mocks):
+    """Datasets passed to registry.download, in call order."""
+    return [call.args[0] for call in mocks["download"].call_args_list]
+
+
+def _converted(mocks):
+    """Datasets passed to registry.convert, in call order."""
+    return [call.args[0] for call in mocks["convert"].call_args_list]
 
 
 def _run(subcommand, args, tmp_path):
@@ -79,32 +78,32 @@ def _run_without_data_dir(subcommand, args, tmp_path):
 
 def test_default_uses_recent_only(tmp_path):
     mocks = _run("download", [], tmp_path)
-    calls = mocks["download_collection"].call_args_list
-    assert calls, "download_collection should be called"
-    time_slices = calls[0][1]["data_types"]
+    calls = mocks["download"].call_args_list
+    assert calls, "registry.download should be called"
+    time_slices = calls[0].kwargs["time_slice"]
     assert time_slices == ["recent"]
 
 
 def test_now_flag_adds_now(tmp_path):
     mocks = _run("download", ["--now"], tmp_path)
-    calls = mocks["download_collection"].call_args_list
-    time_slices = calls[0][1]["data_types"]
+    calls = mocks["download"].call_args_list
+    time_slices = calls[0].kwargs["time_slice"]
     assert "now" in time_slices
     assert "recent" in time_slices
 
 
 def test_historical_flag_prepends_historical(tmp_path):
     mocks = _run("download", ["--historical"], tmp_path)
-    calls = mocks["download_collection"].call_args_list
-    time_slices = calls[0][1]["data_types"]
+    calls = mocks["download"].call_args_list
+    time_slices = calls[0].kwargs["time_slice"]
     assert time_slices[0] == "historical"
     assert "recent" in time_slices
 
 
 def test_all_time_slices(tmp_path):
     mocks = _run("download", ["--now", "--historical"], tmp_path)
-    calls = mocks["download_collection"].call_args_list
-    time_slices = calls[0][1]["data_types"]
+    calls = mocks["download"].call_args_list
+    time_slices = calls[0].kwargs["time_slice"]
     assert set(time_slices) == {"historical", "recent", "now"}
 
 
@@ -113,9 +112,8 @@ def test_all_time_slices(tmp_path):
 
 def test_to_parquet_skips_downloads(tmp_path):
     mocks = _run("to-parquet", [], tmp_path)
-    mocks["download_collection"].assert_not_called()
-    mocks["download_metadata"].assert_not_called()
-    mocks["convert_to_parquet"].assert_called()
+    mocks["download"].assert_not_called()
+    mocks["convert"].assert_called()
 
 
 # --- no-parquet ---
@@ -123,29 +121,22 @@ def test_to_parquet_skips_downloads(tmp_path):
 
 def test_no_parquet_skips_conversion(tmp_path):
     mocks = _run("download", ["--no-parquet"], tmp_path)
-    mocks["convert_to_parquet"].assert_not_called()
+    mocks["convert"].assert_not_called()
     mocks["convert_climate_normals_to_parquet"].assert_not_called()
 
 
 def test_default_runs_conversion(tmp_path):
     mocks = _run("download", [], tmp_path)
-    mocks["convert_to_parquet"].assert_called()
+    mocks["convert"].assert_called()
     mocks["convert_climate_normals_to_parquet"].assert_called()
 
 
-def test_default_runs_indoor_handler(tmp_path):
-    """Indoor scenarios (CSV+ZIP) should be downloaded + converted in the default run."""
+def test_default_run_covers_every_tabular_dataset(tmp_path):
+    """Which handler each one needs is the registry's business, not the CLI's."""
     mocks = _run("download", [], tmp_path)
-    mocks["download_climate_scenarios_indoor"].assert_called()
-    mocks["convert_climate_scenarios_indoor_to_parquet"].assert_called()
 
-
-def test_default_runs_climate_scenarios_handler(tmp_path):
-    """climate_scenarios (preamble CSV) should use its bespoke converter, not convert_to_parquet."""
-    mocks = _run("download", [], tmp_path)
-    mocks["convert_climate_scenarios_to_parquet"].assert_called()
-    for call in mocks["convert_to_parquet"].call_args_list:
-        assert call[0][0] != "climate_scenarios"
+    assert _downloaded(mocks) == registry.tabular_datasets()
+    assert _converted(mocks) == registry.tabular_datasets()
 
 
 # --- full-refresh ---
@@ -164,16 +155,14 @@ def test_incremental_passes_since_to_download(tmp_path):
 # --- grids ---
 
 
-def test_grids_flag_enables_grib2_and_netcdf(tmp_path):
+def test_grids_flag_enables_grid_datasets(tmp_path):
     mocks = _run("download", ["--grids"], tmp_path)
-    mocks["download_grib2"].assert_called()
-    mocks["download_netcdf"].assert_called()
+    assert set(_downloaded(mocks)) >= set(registry.grid_datasets())
 
 
 def test_default_skips_grids(tmp_path):
     mocks = _run("download", [], tmp_path)
-    mocks["download_grib2"].assert_not_called()
-    mocks["download_netcdf"].assert_not_called()
+    assert not set(_downloaded(mocks)) & set(registry.grid_datasets())
 
 
 # --- list subcommand ---
@@ -184,7 +173,7 @@ def test_list_prints_collections(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "smn" in out
     assert "Automatic weather stations" in out
-    mocks["download_collection"].assert_not_called()
+    mocks["download"].assert_not_called()
 
 
 # --- env vars ---
@@ -193,18 +182,18 @@ def test_list_prints_collections(tmp_path, capsys):
 def test_env_data_dir_used_when_no_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path / "env-dir"))
     mocks = _run_without_data_dir("download", [], tmp_path)
-    calls = mocks["download_collection"].call_args_list
+    calls = mocks["download"].call_args_list
     assert calls
-    bronze_dir = calls[0][0][1]
+    bronze_dir = calls[0].args[1]
     assert str(tmp_path / "env-dir") in str(bronze_dir)
 
 
 def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path / "env-dir"))
     mocks = _run("download", [], tmp_path)
-    calls = mocks["download_collection"].call_args_list
+    calls = mocks["download"].call_args_list
     assert calls
-    bronze_dir = calls[0][0][1]
+    bronze_dir = calls[0].args[1]
     assert str(tmp_path) in str(bronze_dir)
     assert "env-dir" not in str(bronze_dir)
 
@@ -267,9 +256,9 @@ def test_incremental_prints_since(tmp_path, capsys):
 
 
 def test_save_last_run_skipped_on_convert_failure(tmp_path, capsys):
-    """If convert_to_parquet reports failures, _last_run.json must NOT be saved."""
+    """If a conversion reports failures, _last_run.json must NOT be saved."""
     mocks, patchers = _start_mocks()
-    mocks["convert_to_parquet"].return_value = 2  # 2 groups failed
+    mocks["convert"].return_value = 2  # 2 groups failed
     try:
         with patch("sys.argv", ["foehn", "download", "--data-dir", str(tmp_path)]), pytest.raises(SystemExit) as exc:
             main()
@@ -284,9 +273,9 @@ def test_save_last_run_skipped_on_convert_failure(tmp_path, capsys):
 
 
 def test_save_last_run_skipped_on_download_failure(tmp_path, capsys):
-    """If download_collection reports failures, _last_run.json must NOT be saved."""
+    """If a download reports failures, _last_run.json must NOT be saved."""
     mocks, patchers = _start_mocks()
-    mocks["download_collection"].return_value.failed = 1
+    mocks["download"].return_value.failed = 1
     try:
         with patch("sys.argv", ["foehn", "download", "--data-dir", str(tmp_path)]), pytest.raises(SystemExit) as exc:
             main()
@@ -308,7 +297,7 @@ def test_save_last_run_called_on_clean_run(tmp_path):
 
 def test_to_parquet_exits_nonzero_on_failure(tmp_path):
     mocks, patchers = _start_mocks()
-    mocks["convert_to_parquet"].return_value = 1
+    mocks["convert"].return_value = 1
     try:
         with patch("sys.argv", ["foehn", "to-parquet", "--data-dir", str(tmp_path)]), pytest.raises(SystemExit) as exc:
             main()
@@ -323,13 +312,7 @@ def test_to_parquet_exits_nonzero_on_failure(tmp_path):
 
 def test_to_parquet_skips_grid_collections(tmp_path):
     mocks = _run("to-parquet", [], tmp_path)
-    # convert_to_parquet should only be called for CSV collections, not grid ones
-    for call in mocks["convert_to_parquet"].call_args_list:
-        key = call[0][0]
-        from foehn.collections import GRIB2_COLLECTIONS, NETCDF_COLLECTIONS
-
-        assert key not in GRIB2_COLLECTIONS
-        assert key not in NETCDF_COLLECTIONS
+    assert all(registry.spec(key).tabular for key in _converted(mocks))
 
 
 # --- load subcommand ---
