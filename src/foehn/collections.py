@@ -429,9 +429,6 @@ KIND_OF: dict[str, DatasetKind] = {
     "forecast_local": DatasetKind.FORECAST_CSV,
 }
 
-# The kinds read as grids rather than tabular frames.
-GRID_KINDS = frozenset({DatasetKind.NETCDF_GRID, DatasetKind.GRIB2_GRID, DatasetKind.RADAR_GRID})
-
 # Kinds whose filenames do not carry the standard
 # ogd-{key}_{station}_{granularity}[_{timeslice}].csv pattern, so there is no
 # granularity to filter on. Derived from the kind rather than listed separately,
@@ -447,13 +444,10 @@ def kind(dataset: str) -> DatasetKind:
     return KIND_OF[dataset]
 
 
-def is_grid(dataset: str) -> bool:
-    """True if *dataset* is read as a grid (xarray) rather than a DataFrame."""
-    return KIND_OF[dataset] in GRID_KINDS
-
-
-# (The gridded read path's per-format engine/suffix config now lives in
-# foehn.grids._GRID_READERS, keyed off each collection's COLLECTION_META format.)
+# Whether a dataset is read as a grid is not listed here: it is whether its kind
+# has a grid reader, which is ``registry.spec(dataset).is_grid``. A set naming
+# the grid kinds beside the table that gives them their readers could only ever
+# agree with it or drift from it.
 
 
 # C6 climate normals — separate ZIP from opendata.swiss (not on STAC API).

@@ -57,6 +57,40 @@ def test_grid_kinds_have_no_parquet_path():
         assert registry.KINDS[kind_].tabular is False
 
 
+def test_every_kind_has_exactly_one_read_path():
+    """A kind carries either a reader or a grid reader, never both and never neither.
+
+    ``tabular`` and ``is_grid`` are read off those two adapters rather than set
+    beside them, so this is what keeps them meaningful.
+    """
+    for kind_, spec in registry.KINDS.items():
+        assert (spec.load is None) != (spec.grid is None), f"{kind_} must have exactly one read path"
+        assert spec.tabular is (spec.load is not None)
+        assert spec.is_grid is (spec.grid is not None)
+
+
+def test_only_the_single_file_kinds_cap_an_open():
+    """The cap is what makes match= mandatory, and it differs from the cube's."""
+    grib2 = registry.KINDS[DatasetKind.GRIB2_GRID].grid
+    radar = registry.KINDS[DatasetKind.RADAR_GRID].grid
+    netcdf = registry.KINDS[DatasetKind.NETCDF_GRID].grid
+
+    assert grib2.max_files == 1 and radar.max_files == 1
+    assert netcdf.max_files is None  # combines cleanly, so an unfiltered open is fine
+
+    # The cube caps are a different per-kind fact: GRIB2 holds the whole set in
+    # memory, radar appends one timestep at a time and wants every file.
+    assert grib2.cube_max_files == 1000
+    assert radar.cube_max_files is None
+
+
+def test_only_netcdf_lacks_a_cube_builder():
+    """NetCDF needs none — a multi-file match already combines on read."""
+    assert registry.KINDS[DatasetKind.NETCDF_GRID].grid.cube is None
+    assert registry.KINDS[DatasetKind.GRIB2_GRID].grid.cube is not None
+    assert registry.KINDS[DatasetKind.RADAR_GRID].grid.cube is not None
+
+
 def test_tabular_kinds_all_convert():
     for kind_, spec in registry.KINDS.items():
         if spec.tabular:

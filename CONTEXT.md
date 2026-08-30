@@ -127,6 +127,14 @@ How one **Dataset kind** becomes a Polars DataFrame — one per tabular kind,
 selected from the registry exactly as its download and convert paths are.
 _Avoid_: loader, parser (parsing is one step inside a reader)
 
+**Grid reader**:
+How one **Dataset kind** becomes an xarray Dataset — one per grid kind, selected
+from the registry exactly as a **Reader** is. Carries what its kind needs opened
+and, where the kind has one, how its matched files assemble into a single Zarr
+cube. A **Dataset kind** has a **Reader** or a **Grid reader**, never both.
+_Avoid_: engine, backend (those are xarray's, and one grid reader uses no xarray
+engine at all), format reader
+
 **Filters**:
 One load query, normalised: stations and granularities lowercased, scalars
 widened to tuples, an empty list read as "no filter". The public `load()`
@@ -143,7 +151,8 @@ _Avoid_: query, params, options
 - A **Forecast CSV** **Asset** is identified by its **Forecast run**.
 - Every network read of a **Collection**, **Item** or **Asset** goes through the **Fetcher**.
 - Every **Asset** written to **Bronze** goes through **Transfer**, which calls the **Fetcher**.
-- A **Dataset kind** has one download path, one convert path and (when tabular) one **Reader**.
+- A **Dataset kind** has one download path, one convert path, and exactly one of
+  a **Reader** (tabular) or a **Grid reader** (gridded).
 
 ## Flagged ambiguities
 
@@ -159,3 +168,7 @@ _Avoid_: query, params, options
   `collections`, once again in the MCP layer, which could only agree or drift.
   Resolved: `collections.GRANULARITIES` and `collections.TIME_SLICES` are the
   vocabulary, `load()` enforces it, and the MCP tools restate nothing.
+- Which **Dataset kinds** are gridded was stated twice — as `collections.GRID_KINDS`
+  beside the kind enum, and again as the keys of the grid path's own reader table.
+  Resolved: a kind is gridded iff its registry row carries a **Grid reader**;
+  `GRID_KINDS` and `is_grid` are gone.
