@@ -498,6 +498,20 @@ def time_slice_from_filename(filename: str) -> str | None:
     return None
 
 
+def granularity_from_filename(filename: str) -> str | None:
+    """Return the granularity segment of a standard CSV asset, or None.
+
+    Standard assets are ``ogd-{key}_{station}_{granularity}[_{timeslice}].csv``,
+    so the granularity is the third underscore-separated segment
+    (``ogd-smn_ber_d_recent.csv`` -> ``"d"``). Returns None for the kinds whose
+    filenames do not carry one, rather than guessing at whatever sits in that
+    position.
+    """
+    stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    parts = stem.split("_")
+    return parts[2] if len(parts) > 2 else None
+
+
 # Forecast CSV assets are named ``vnut12.lssw.<YYYYMMDDHHMM>.<param>.csv``, where
 # the middle field is the model run time — i.e. when the forecast was issued. Note
 # this is NOT the "reference timestamp" of MeteoSwiss's docs, which is the ``Date``

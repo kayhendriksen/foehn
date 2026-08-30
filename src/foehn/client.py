@@ -10,14 +10,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from foehn._urls import asset_filename, clean_href
+from foehn.assets import assets_of, collection_assets, latest_run_of, select
 from foehn.collections import (
     CLIMATE_NORMALS_ZIP_URL,
     COLLECTIONS,
     DatasetKind,
-    forecast_run_from_filename,
     kind,
-    time_slice_from_filename,
 )
 from foehn.convert import utf8_meteoswiss_csv
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
@@ -205,36 +203,21 @@ def download_collection(
     # picked out of the filenames below. (Ordering the items buys nothing: the run
     # is chosen with max(), and downloads complete out of order regardless.)
 
-    # Collect matching CSV assets. ``all_csv_hrefs`` is the full pre-filter set
-    # (every CSV in the listing, regardless of time slice) — the prune universe
-    # below, so ETags for slices outside this run's data_types are kept.
-    skip_data_type_filter = kind(collection_key) is DatasetKind.FORECAST_CSV
-    csv_assets = []
-    all_csv_hrefs: set[str] = set()
-    for item in items:
-        assets = item.get("assets", {})
-        for asset_info in assets.values():
-            href = asset_info.get("href", "")
-            clean = clean_href(href)
-            if not clean.endswith(".csv"):
-                continue
-            all_csv_hrefs.add(href)
-            if not skip_data_type_filter:
-                slice_ = time_slice_from_filename(clean)
-                if slice_ is not None and slice_ not in data_types:
-                    continue
-            csv_assets.append((href, asset_info))
-
+    # ``every_csv`` is the full pre-filter set — the prune universe below, so
+    # ETags for slices outside this run's data_types are kept.
+    is_forecast = kind(collection_key) is DatasetKind.FORECAST_CSV
+    every_csv = assets_of(items, suffixes=(".csv",))
     # One forecast run is ~32 files at ~30 MB each (~1 GB); the full retained
-    # window is ~40 runs (~40 GB). Keep only the newest complete-ish run.
-    if kind(collection_key) is DatasetKind.FORECAST_CSV and csv_assets:
-        runs = {run for href, _ in csv_assets if (run := forecast_run_from_filename(clean_href(href))) is not None}
-        if runs:
-            latest_run = max(runs)
-            csv_assets = [
-                (href, info) for href, info in csv_assets if forecast_run_from_filename(clean_href(href)) == latest_run
-            ]
-            logger.info("  Latest forecast run: %s (of %d available)", latest_run, len(runs))
+    # window is ~40 runs (~40 GB). Forecast filenames carry no time slice, so
+    # narrowing to the newest run is what bounds them instead.
+    csv_assets = select(
+        every_csv,
+        time_slices=None if is_forecast else data_types,
+        latest_run=is_forecast,
+    )
+    if is_forecast and (run := latest_run_of(every_csv)) is not None:
+        available = len({a.forecast_run for a in every_csv if a.forecast_run is not None})
+        logger.info("  Latest forecast run: %s (of %d available)", run, available)
 
     logger.info("  %d CSV files to process", len(csv_assets))
 
@@ -246,7 +229,7 @@ def download_collection(
     skipped = 0
     failed = 0
     filenames: list[str] = []
-    fetch_targets = _dedupe_by_destination([(href, out_dir / asset_filename(href)) for href, _ in csv_assets])
+    fetch_targets = _dedupe_by_destination([(a.href, out_dir / a.name) for a in csv_assets])
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_href = {
             pool.submit(_do_csv, href, filepath, etags.get(href)): href for href, filepath in fetch_targets
@@ -280,7 +263,8 @@ def download_collection(
     # after failures the universe may be incomplete.
     if since is None and failed == 0:
         prefix = f"/{collection_id}/"
-        stale = [k for k in etags if prefix in k and k not in all_csv_hrefs]
+        listed = {a.href for a in every_csv}
+        stale = [k for k in etags if prefix in k and k not in listed]
         for k in stale:
             del etags[k]
         if stale:
@@ -310,17 +294,7 @@ def download_metadata(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     coll = fetcher.collection(collection_id)
-    assets = coll.get("assets", {})
-    if not assets:
-        return DownloadResult()
-
-    targets = _dedupe_by_destination(
-        [
-            (asset_info["href"], out_dir / asset_filename(asset_info["href"]))
-            for asset_info in assets.values()
-            if clean_href(asset_info.get("href", "")).endswith(".csv")
-        ]
-    )
+    targets = _dedupe_by_destination([(a.href, out_dir / a.name) for a in collection_assets(coll, suffixes=(".csv",))])
     if not targets:
         return DownloadResult()
 
@@ -405,28 +379,11 @@ def download_grib2(
             logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
-    binary_assets = []
-    for item in items:
-        item_updated = item.get("properties", {}).get("updated", "")
-        assets = item.get("assets", {})
-        for asset_info in assets.values():
-            href = asset_info.get("href", "")
-            clean = clean_href(href)
-            # Accept grib2, h5, and other binary formats
-            if any(clean.endswith(ext) for ext in (".grib2", ".h5", ".hdf5")):
-                # Per-asset "updated" is preferred when present (STAC allows it),
-                # otherwise fall back to the item-level updated timestamp.
-                updated = asset_info.get("updated") or item_updated
-                binary_assets.append((href, clean.split("/")[-1], updated))
-
+    binary_assets = assets_of(items, suffixes=(".grib2", ".h5", ".hdf5"))
     logger.info("  %d binary files to download", len(binary_assets))
 
     to_fetch = _dedupe_by_destination(
-        [
-            (href, out_dir / filename)
-            for href, filename, updated in binary_assets
-            if _needs_redownload(out_dir / filename, updated)
-        ]
+        [(a.href, out_dir / a.name) for a in binary_assets if _needs_redownload(out_dir / a.name, a.updated)]
     )
 
     def _do_binary(href: str, filepath: Path) -> str:
@@ -501,20 +458,9 @@ def download_netcdf(
             logger.info("  Nothing changed — skipping")
             return DownloadResult()
 
-    total_assets = 0
-    targets: list[tuple[str, Path]] = []
-    for item in items:
-        for asset_info in item.get("assets", {}).values():
-            href = asset_info.get("href", "")
-            clean = clean_href(href)
-            if not clean.endswith((".nc", ".tif", ".zip")):
-                continue
-            total_assets += 1
-            filepath = out_dir / clean.split("/")[-1]
-            if filepath.exists():
-                continue
-            targets.append((href, filepath))
-    targets = _dedupe_by_destination(targets)
+    spatial = assets_of(items, suffixes=(".nc", ".tif", ".zip"))
+    total_assets = len(spatial)
+    targets = _dedupe_by_destination([(a.href, out_dir / a.name) for a in spatial if not (out_dir / a.name).exists()])
 
     def _do_binary(href: str, filepath: Path) -> str:
         fetcher.stream(href, filepath)
@@ -641,16 +587,9 @@ def download_climate_scenarios_indoor(
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     items = fetcher.items(collection_id)
-    zip_href = next(
-        (
-            asset_info.get("href", "")
-            for item in items
-            for asset_info in item.get("assets", {}).values()
-            if clean_href(asset_info.get("href", "")).endswith(".zip")
-        ),
-        None,
-    )
-    if not zip_href:
+    archives = assets_of(items, suffixes=(".zip",))
+    archive = archives[0] if archives else None
+    if archive is None:
         logger.warning("  No .zip asset found for %s", collection_key)
         return DownloadResult()
 
@@ -658,8 +597,8 @@ def download_climate_scenarios_indoor(
     logger.info("Indoor scenarios (%s): downloading ZIP", collection_id)
     logger.info("%s", "=" * 60)
 
-    zip_path = out_dir / asset_filename(zip_href)
-    fetcher.stream(zip_href, zip_path, timeout=300)
+    zip_path = out_dir / archive.name
+    fetcher.stream(archive.href, zip_path, timeout=300)
     logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)
 
     extracted = _safe_extract_zip(zip_path, out_dir)

@@ -9,7 +9,8 @@ from pathlib import Path
 import polars as pl
 
 from foehn import registry
-from foehn._urls import asset_filename, clean_href
+from foehn._urls import asset_filename
+from foehn.assets import assets_of, collection_assets, hrefs, select
 from foehn.client import (
     DownloadResult,
     _check_zip_size,
@@ -18,9 +19,7 @@ from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
     DatasetKind,
-    forecast_run_from_filename,
     kind,
-    time_slice_from_filename,
 )
 from foehn.convert import (
     _parse_metadata_types,
@@ -157,11 +156,9 @@ def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
     fetcher = default_fetcher()
 
     coll = fetcher.collection(collection_id)
-    for asset_info in coll.get("assets", {}).values():
-        href = asset_info.get("href", "")
-        if clean_href(href).endswith(".csv") and suffix in href:
-            content = decode_meteoswiss_csv(fetcher.get(href, timeout=60).body)
-            return pl.read_csv(content.encode("utf-8"), separator=";")
+    for asset in collection_assets(coll, suffixes=(".csv",), contains=suffix):
+        content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
+        return pl.read_csv(content.encode("utf-8"), separator=";")
 
     raise ValueError(f"No {suffix} metadata found for dataset {dataset!r}.")
 
@@ -356,17 +353,10 @@ def _load_indoor(
     collection_id = COLLECTIONS[dataset]
     fetcher = default_fetcher()
     items = fetcher.items(collection_id)
-    zip_href = next(
-        (
-            asset_info.get("href", "")
-            for item in items
-            for asset_info in item.get("assets", {}).values()
-            if clean_href(asset_info.get("href", "")).endswith(".zip")
-        ),
-        None,
-    )
-    if not zip_href:
+    archives = assets_of(items, suffixes=(".zip",))
+    if not archives:
         raise ValueError(f"No .zip asset found for {dataset!r}.")
+    zip_href = archives[0].href
 
     station_filter: set[str] | None = None
     if station is not None:
@@ -436,15 +426,8 @@ def _load_climate_scenarios(
     if station_filter is not None:
         items = [item for item in items if item.get("id", "").lower() in station_filter]
 
-    hrefs: list[str] = []
-    for item in items:
-        for asset_info in item.get("assets", {}).values():
-            href = asset_info.get("href", "")
-            filename = asset_filename(href)
-            if filename.endswith(".csv") and "_meta_" not in filename:
-                hrefs.append(href)
-
-    if not hrefs:
+    csv_hrefs = hrefs(assets_of(items, suffixes=(".csv",), excludes="_meta_"))
+    if not csv_hrefs:
         raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={station}.")
 
     # The fetcher is safe to share across the pool: it hands each worker thread
@@ -452,11 +435,11 @@ def _load_climate_scenarios(
     def _fetch(href: str) -> pl.DataFrame:
         return parse_climate_scenarios_csv(fetcher.get(href, timeout=120).body, asset_filename(href))
 
-    if len(hrefs) == 1 or workers <= 1:
-        frames = [_fetch(h) for h in hrefs]
+    if len(csv_hrefs) == 1 or workers <= 1:
+        frames = [_fetch(h) for h in csv_hrefs]
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            frames = list(pool.map(_fetch, hrefs))
+            frames = list(pool.map(_fetch, csv_hrefs))
 
     df = pl.concat(frames, how="diagonal_relaxed")
     # The calendar filters are rejected for this kind before we get here, so the
@@ -606,11 +589,9 @@ def load(
     # 1. Fetch metadata types for schema inference.
     metadata_types: dict[str, type[pl.DataType]] = {}
     coll = fetcher.collection(collection_id)
-    for asset_info in coll.get("assets", {}).values():
-        href = asset_info.get("href", "")
-        if clean_href(href).endswith(".csv") and "_meta_parameters" in href:
-            metadata_types = _parse_metadata_types(decode_meteoswiss_csv(fetcher.get(href, timeout=60).body))
-            break
+    for asset in collection_assets(coll, suffixes=(".csv",), contains="_meta_parameters"):
+        metadata_types = _parse_metadata_types(decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body))
+        break
 
     # 2. Get STAC items and collect matching CSV URLs.
     items = fetcher.items(collection_id)
@@ -626,35 +607,17 @@ def load(
     if kind(dataset) is DatasetKind.FORECAST_CSV and items:
         items.sort(key=lambda x: x.get("id", ""))
 
-    skip_data_type_filter = kind(dataset) is DatasetKind.FORECAST_CSV
-    csv_hrefs: list[str] = []
-    for item in items:
-        assets = item.get("assets", {})
-        for asset_info in assets.values():
-            href = asset_info.get("href", "")
-            filename = asset_filename(href)
-            if not filename.endswith(".csv"):
-                continue
-            # Filter by frequency — encoded as _{f}_ or _{f}. in the filename.
-            if freq_filter is not None:
-                parts = filename.rsplit(".", 1)[0].split("_")
-                # Frequency is the segment after the station abbr (e.g. ogd-smn_ber_d_recent)
-                file_freq = parts[2] if len(parts) > 2 else None
-                if file_freq not in freq_filter:
-                    continue
-            if not skip_data_type_filter:
-                slice_ = time_slice_from_filename(filename)
-                if slice_ is not None and slice_ not in time_slice:
-                    continue
-            csv_hrefs.append(href)
-
-    # Narrow forecasts to the newest model run — the retained window holds ~40 runs
-    # of ~32 files each, and load() wants the current forecast, not all of them.
-    if kind(dataset) is DatasetKind.FORECAST_CSV and csv_hrefs:
-        runs = {run for href in csv_hrefs if (run := forecast_run_from_filename(clean_href(href))) is not None}
-        if runs:
-            latest_run = max(runs)
-            csv_hrefs = [href for href in csv_hrefs if forecast_run_from_filename(clean_href(href)) == latest_run]
+    # Forecast filenames carry no time slice; load() wants the current forecast,
+    # so narrowing to the newest run is what bounds them instead.
+    is_forecast = kind(dataset) is DatasetKind.FORECAST_CSV
+    csv_hrefs = hrefs(
+        select(
+            assets_of(items, suffixes=(".csv",)),
+            time_slices=None if is_forecast else time_slice,
+            granularities=freq_filter,
+            latest_run=is_forecast,
+        )
+    )
 
     if not csv_hrefs:
         filters = f"station={station}, frequency={frequency}, time_slice={time_slice}"
