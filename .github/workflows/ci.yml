@@ -14,18 +14,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# ruff, zizmor and ty are NOT pinned here: they live in .pre-commit-config.yaml
-# and the pyproject dev extra, both of which Dependabot bumps, and the jobs below
-# read the versions from there. They used to be duplicated here and kept in step
-# by hand, and a silent mismatch means local hooks and CI disagree about what
-# "clean" means. The pins that remain are single-copy, so they cannot drift.
-env:
-  PIP_AUDIT_VERSION: "2.9.0"
-  # Must match the pins in publish.yml — the build job below is that job's smoke
-  # test, and only catches its failures if it runs the same toolchain.
-  BUILD_VERSION: "1.6.0"
-  TWINE_VERSION: "7.0.0"
-  BANDIT_VERSION: "1.9.4"
+# No tool versions here. Every pin lives in the one file Dependabot can bump —
+# .pre-commit-config.yaml for the tools that also run as local hooks,
+# requirements-ci.txt for the ones only CI runs, the pyproject dev extra for ty —
+# and the jobs resolve it with scripts/tool_version.sh. Duplicating a version
+# into this block is how they went unbumped, and how build/twine drifted out of
+# step with publish.yml.
 
 jobs:
   lint:
@@ -40,7 +34,7 @@ jobs:
           enable-cache: true
       - name: Resolve pinned ruff
         id: ruff
-        run: scripts/hook_version.sh ruff-pre-commit >> "$GITHUB_OUTPUT"
+        run: scripts/tool_version.sh ruff-pre-commit >> "$GITHUB_OUTPUT"
       # scripts/ is linted too — ingest_delta.py builds Spark SQL by hand and is
       # the highest-risk file in the repo.
       # Via env rather than expanding ${{ }} straight into the run block, which
@@ -141,8 +135,18 @@ jobs:
       # publish.yml only builds at release time, from a tag-triggered job. Without
       # this, a broken pyproject.toml or missing package data surfaces mid-release
       # instead of in the PR that caused it.
-      - run: uvx --from build==${BUILD_VERSION} pyproject-build
-      - run: uvx twine@${TWINE_VERSION} check dist/*
+      - name: Resolve pinned build
+        id: build
+        run: scripts/tool_version.sh build >> "$GITHUB_OUTPUT"
+      - name: Resolve pinned twine
+        id: twine
+        run: scripts/tool_version.sh twine >> "$GITHUB_OUTPUT"
+      - run: uvx --from "build==${BUILD_PIN}" pyproject-build
+        env:
+          BUILD_PIN: ${{ steps.build.outputs.version }}
+      - run: uvx "twine@${TWINE_PIN}" check dist/*
+        env:
+          TWINE_PIN: ${{ steps.twine.outputs.version }}
       # Confirm the built wheel actually imports and exposes its entry point,
       # rather than only that it is well-formed metadata.
       - run: uv venv --python 3.12 /tmp/wheeltest
@@ -165,11 +169,21 @@ jobs:
       # requirements list left unaudited despite being C-library-backed.
       - name: Resolve full dependency tree (all extras)
         run: uv pip compile --quiet --all-extras pyproject.toml -o requirements-audit.txt
+      - name: Resolve pinned pip-audit
+        id: pip_audit
+        run: scripts/tool_version.sh pip-audit >> "$GITHUB_OUTPUT"
       - name: Audit dependencies
-        run: uvx pip-audit@${PIP_AUDIT_VERSION} -r requirements-audit.txt --progress-spinner off
+        run: uvx "pip-audit@${PIP_AUDIT_PIN}" -r requirements-audit.txt --progress-spinner off
+        env:
+          PIP_AUDIT_PIN: ${{ steps.pip_audit.outputs.version }}
+      - name: Resolve pinned bandit
+        id: bandit
+        run: scripts/tool_version.sh bandit >> "$GITHUB_OUTPUT"
       # scripts/ included — see the lint job.
       - name: Static security scan
-        run: uvx bandit@${BANDIT_VERSION} -r src/ scripts/ -q
+        run: uvx "bandit@${BANDIT_PIN}" -r src/ scripts/ -q
+        env:
+          BANDIT_PIN: ${{ steps.bandit.outputs.version }}
 
   zizmor:
     name: zizmor (workflow audit)
@@ -191,7 +205,7 @@ jobs:
       # commit — the point is to keep it that way as workflows change.
       - name: Resolve pinned zizmor
         id: zizmor
-        run: scripts/hook_version.sh zizmor-pre-commit >> "$GITHUB_OUTPUT"
+        run: scripts/tool_version.sh zizmor-pre-commit >> "$GITHUB_OUTPUT"
       - name: Run zizmor
         run: uvx "zizmor@${ZIZMOR_PIN}" --format sarif .github/workflows/ > zizmor.sarif
         env:

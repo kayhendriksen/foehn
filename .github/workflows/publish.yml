@@ -30,12 +30,21 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: false
-      # Pinned: this job builds the published artifact. Bump manually —
-      # Dependabot doesn't track inline pip installs in workflows.
-      # Keep in step with BUILD_VERSION/TWINE_VERSION in ci.yml, whose build job
-      # is the smoke test for this one. twine < 7 rejects Metadata-Version 2.5,
-      # which hatchling now emits.
-      - run: pip install build==1.6.0 twine==7.0.0
+      # Pinned in requirements-ci.txt, which Dependabot bumps and ci.yml's build
+      # job reads from too — that job is this one's smoke test, and only catches
+      # its failures if both run the same toolchain. They used to be pinned
+      # separately with a comment asking for them to be kept in step.
+      # twine < 7 rejects Metadata-Version 2.5, which hatchling now emits.
+      - name: Resolve pinned packaging tools
+        id: pins
+        run: |
+          scripts/tool_version.sh build | sed 's/^version=/build=/' >> "$GITHUB_OUTPUT"
+          scripts/tool_version.sh twine | sed 's/^version=/twine=/' >> "$GITHUB_OUTPUT"
+          scripts/tool_version.sh cyclonedx-bom | sed 's/^version=/cyclonedx=/' >> "$GITHUB_OUTPUT"
+      - run: pip install "build==${BUILD_PIN}" "twine==${TWINE_PIN}"
+        env:
+          BUILD_PIN: ${{ steps.pins.outputs.build }}
+          TWINE_PIN: ${{ steps.pins.outputs.twine }}
       - name: Verify tag matches pyproject.toml version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
@@ -58,10 +67,12 @@ jobs:
           # not leak into foehn's.
           uv venv /tmp/sbomenv --python 3.12
           VIRTUAL_ENV=/tmp/sbomenv uv pip install --quiet dist/*.whl
-          uvx --from cyclonedx-bom==7.3.1 cyclonedx-py environment /tmp/sbomenv \
+          uvx --from "cyclonedx-bom==${CYCLONEDX_PIN}" cyclonedx-py environment /tmp/sbomenv \
             --pyproject pyproject.toml \
             --output-format JSON \
             --output-file "sbom/foehn-${GITHUB_REF_NAME#v}-sbom.cdx.json"
+        env:
+          CYCLONEDX_PIN: ${{ steps.pins.outputs.cyclonedx }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
