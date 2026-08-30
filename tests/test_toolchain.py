@@ -83,3 +83,25 @@ def test_ty_is_pinned_exactly():
     dev = pyproject["project"]["optional-dependencies"]["dev"]
     ty = next(d for d in dev if d.startswith("ty"))
     assert ty.startswith("ty=="), f"expected an exact pin, got {ty!r}"
+
+
+def test_workflow_env_block_holds_the_single_copy_pins():
+    """The remaining pins must stay under `env:`, not drift into a neighbour.
+
+    Regression: removing three entries from this block once took the ``env:``
+    key with them, leaving the other four indented under ``concurrency:``. That
+    is valid YAML and passes a schema check, so both slipped through — and
+    GitHub refused to start the workflow. actionlint (a pre-commit hook now)
+    catches the general case; this pins the specific keys.
+    """
+    from ruamel.yaml import YAML
+
+    workflow = YAML(typ="safe").load(WORKFLOW.read_text())
+
+    assert set(workflow["concurrency"]) == {"group", "cancel-in-progress"}
+    assert set(workflow["env"]) == {
+        "PIP_AUDIT_VERSION",
+        "BUILD_VERSION",
+        "TWINE_VERSION",
+        "BANDIT_VERSION",
+    }

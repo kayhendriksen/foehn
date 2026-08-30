@@ -27,6 +27,15 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=2048]
 
+  # Validates workflows against GitHub's own schema and expression contexts.
+  # check-yaml only proves a file is well-formed YAML — it happily accepted a
+  # workflow whose `env:` block had lost its key and been silently reparented
+  # under `concurrency:`, which GitHub then refused to run at all.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+
   # Workflow static analysis, same version CI runs.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
     rev: v1.29.0

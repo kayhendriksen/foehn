@@ -81,6 +81,9 @@ dev = [
     "ty==0.0.74",
     "numpy>=1.24",
     "pydantic>=2.0",
+    # Strict YAML parsing for the workflow-structure test: PyYAML silently
+    # tolerates the duplicate keys and reparenting that break a workflow.
+    "ruamel.yaml>=0.18",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pyarrow>=14.0",

@@ -14,11 +14,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The pinned dev toolchain lives in .pre-commit-config.yaml (ruff, zizmor) and
-# the pyproject dev extra (ty), both of which Dependabot bumps. The jobs below
-# read the versions from there rather than repeating them here: the previous
-# env vars had to be kept in step with the hook revs by hand, and a silent
-# mismatch means local hooks and CI disagree about what "clean" means.
+# ruff, zizmor and ty are NOT pinned here: they live in .pre-commit-config.yaml
+# and the pyproject dev extra, both of which Dependabot bumps, and the jobs below
+# read the versions from there. They used to be duplicated here and kept in step
+# by hand, and a silent mismatch means local hooks and CI disagree about what
+# "clean" means. The pins that remain are single-copy, so they cannot drift.
+env:
   PIP_AUDIT_VERSION: "2.9.0"
   # Must match the pins in publish.yml — the build job below is that job's smoke
   # test, and only catches its failures if it runs the same toolchain.
