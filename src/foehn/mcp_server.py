@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-import polars as pl
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
@@ -159,47 +158,6 @@ class GridSummary(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _load_and_filter(
-    dataset: str,
-    station: list[str] | None,
-    frequency: str | None,
-    time_slice: str | None,
-    year: list[int] | None,
-    month: list[int] | None,
-    date_from: str | None,
-    date_to: str | None,
-    columns: list[str] | None,
-    drop_null: str | None,
-    sort: str | None,
-    limit: int | None = None,
-) -> pl.DataFrame:
-    """Load a dataset and apply all filters via foehn.load()."""
-    kwargs: dict = {}
-    if station:
-        kwargs["station"] = station
-    if frequency:
-        kwargs["frequency"] = frequency
-    if time_slice:
-        kwargs["time_slice"] = time_slice
-    if year:
-        kwargs["year"] = year
-    if month:
-        kwargs["month"] = month
-    if date_from:
-        kwargs["date_from"] = date_from
-    if date_to:
-        kwargs["date_to"] = date_to
-    if columns:
-        kwargs["columns"] = columns
-    if drop_null:
-        kwargs["drop_null"] = drop_null
-    if sort:
-        kwargs["sort"] = sort
-    if limit is not None:
-        kwargs["limit"] = limit
-    return foehn.load(dataset, **kwargs)
-
-
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 
@@ -292,18 +250,18 @@ def load_data(
 
     limit = min(max(1, limit), 500)
 
-    df = _load_and_filter(
+    df = foehn.load(
         dataset,
-        station,
-        frequency,
-        time_slice,
-        year,
-        month,
-        date_from,
-        date_to,
-        columns,
-        drop_null,
-        sort,
+        station=station,
+        frequency=frequency,
+        time_slice=time_slice,
+        year=year,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
+        columns=columns,
+        drop_null=drop_null,
+        sort=sort,
         limit=limit,
     )
     return df.to_dicts()
@@ -358,18 +316,16 @@ def describe_data(
     if time_slice and time_slice.lower() not in _VALID_TIME_SLICES:
         raise ValueError(f"Invalid time_slice {time_slice!r}. Valid options: historical, recent, now.")
 
-    df = _load_and_filter(
+    df = foehn.load(
         dataset,
-        station,
-        frequency,
-        time_slice,
-        year,
-        month,
-        date_from,
-        date_to,
-        columns=None,
+        station=station,
+        frequency=frequency,
+        time_slice=time_slice,
+        year=year,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
         drop_null=drop_null,
-        sort=None,
     )
 
     stations = sorted(df["station_abbr"].unique().to_list()) if "station_abbr" in df.columns else []

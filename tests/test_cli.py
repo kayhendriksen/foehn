@@ -1,5 +1,6 @@
 """Tests for the CLI argument handling."""
 
+from datetime import datetime
 from unittest.mock import patch
 
 import polars as pl
@@ -425,6 +426,30 @@ def test_metadata_inventory(capsys):
     out = capsys.readouterr().out
     assert "BER" in out
     assert "tre200d0" in out
+
+
+def test_metadata_column_width_matches_what_is_printed(capsys):
+    """Width is measured from the same strings that get printed.
+
+    Measuring in Polars while printing Python's ``str()`` looked equivalent but
+    is not for Datetime: the cast renders microseconds (26 chars) where str()
+    gives 19, so the column was padded wider than anything in it. Latent while
+    the metadata frames are all strings — this pins it shut.
+    """
+    fake_df = pl.DataFrame({"when": [datetime(2026, 1, 1), None], "name": ["Bern", "Zurich"]})
+    with (
+        patch("foehn.cli.stations", return_value=fake_df),
+        patch("sys.argv", ["foehn", "metadata", "stations", "smn"]),
+    ):
+        main()
+
+    body = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    rule = next(line for line in body if line.startswith("─"))
+    rows = [line for line in body if line and not line.startswith(("─", "when", "["))]
+    when_width = len(rule.split("  ")[0])
+
+    assert when_width == max(len(row.split("  ")[0].rstrip()) for row in rows)
+    assert "—" in "".join(rows)  # nulls still render as a dash
 
 
 def test_metadata_empty(capsys):

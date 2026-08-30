@@ -118,6 +118,9 @@ class KindSpec:
     key_columns: tuple[str, ...] = ("station_abbr", "reference_timestamp")
     """Columns an explicit ``columns=`` selection always keeps."""
 
+    sort_column: str = "reference_timestamp"
+    """What ``sort=`` orders by. The nominal-date kind has no real timestamp."""
+
 
 KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.STANDARD_CSV: KindSpec(
@@ -136,6 +139,8 @@ KINDS: dict[DatasetKind, KindSpec] = {
         # filters would silently match nothing.
         supports_calendar_filters=False,
         key_columns=("station_abbr", "variable", "gwl", "date"),
+        # Nominal dates, so ``date`` is a lexically-ordered string, not a timestamp.
+        sort_column="date",
     ),
     DatasetKind.ARCHIVE_CSV: KindSpec(
         download=_download_archive,

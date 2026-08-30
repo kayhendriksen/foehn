@@ -216,20 +216,23 @@ def cmd_metadata(args: argparse.Namespace) -> None:
 
     # Table output similar to foehn list
     headers = df.columns
-    # Compute column widths (min width = header length, capped at 40). Measured in
-    # Polars rather than by materialising every column as a Python list of strings —
-    # that pass ran over the whole frame before iter_rows() walked it a second time,
-    # which is seconds of pure-Python work on a large inventory.
-    max_lens = df.select(pl.col(c).cast(pl.Utf8).str.len_chars().max().alias(c) for c in headers).row(0)
+    # Render to strings once, in Polars, and measure and print from that same
+    # projection. Measuring in Polars while printing Python's str() looked
+    # equivalent but is not: a Datetime casts to 26 characters here
+    # ("...00:00:00.000000") against str()'s 19, so the column came out padded
+    # wider than anything in it. Doing both from one projection cannot drift —
+    # and it keeps the measurement off the pure-Python path, which took seconds
+    # on a large inventory.
+    rendered = df.select(pl.col(c).cast(pl.Utf8).fill_null("—").alias(c) for c in headers)
+    max_lens = rendered.select(pl.col(c).str.len_chars().max().alias(c) for c in headers).row(0)
     widths = [min(max(len(col), n or 0), 40) for col, n in zip(headers, max_lens, strict=True)]
 
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*headers))
     print(fmt.format(*(("─" * w) for w in widths)))
-    for row in df.iter_rows():
-        values = [str(v) if v is not None else "—" for v in row]
+    for row in rendered.iter_rows():
         # Truncate long values
-        values = [v[:w] if len(v) > w else v for v, w in zip(values, widths, strict=True)]
+        values = [v[:w] if len(v) > w else v for v, w in zip(row, widths, strict=True)]
         print(fmt.format(*values))
 
     print(f"\n[{df.shape[0]} rows]")
