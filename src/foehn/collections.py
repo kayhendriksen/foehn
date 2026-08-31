@@ -465,11 +465,21 @@ NO_GRANULARITY_KINDS = frozenset({DatasetKind.PREAMBLE_CSV, DatasetKind.FORECAST
 DERIVED_TIMESTAMP_KINDS = frozenset({DatasetKind.FORECAST_CSV})
 
 
-def kind(dataset: str) -> DatasetKind:
-    """Return a dataset's :class:`DatasetKind`.
+def collection_id(dataset: str) -> str:
+    """Return a dataset's **Collection**, or raise the message every caller used to write.
 
-    Raises KeyError for an unknown dataset, same as ``COLLECTIONS[dataset]``.
+    ``api`` spelled this guard out at six entry points because the layers below
+    raised a bare ``KeyError``, which is not a sentence a caller can act on.
     """
+    try:
+        return COLLECTIONS[dataset]
+    except KeyError:
+        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.") from None
+
+
+def kind(dataset: str) -> DatasetKind:
+    """Return a dataset's :class:`DatasetKind`, or raise for an unknown dataset."""
+    collection_id(dataset)
     return KIND_OF[dataset]
 
 

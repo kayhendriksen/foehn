@@ -1055,3 +1055,39 @@ def test_metadata_publishes_the_tables_column_names(fetcher):
 
     assert df.columns == list(METADATA_TABLES["stations"].columns.values())
     assert df["abbr"][0] == "BER"
+
+
+# --- one guard, not six ---
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: foehn.download("nope"), id="download"),
+        pytest.param(lambda: foehn.to_parquet("nope"), id="to_parquet"),
+        pytest.param(lambda: foehn.load("nope"), id="load"),
+        pytest.param(lambda: foehn.open_dataset("nope"), id="open_dataset"),
+        pytest.param(lambda: foehn.to_zarr("nope"), id="to_zarr"),
+        pytest.param(lambda: foehn.parameters("nope"), id="parameters"),
+    ],
+)
+def test_every_entry_point_refuses_an_unknown_dataset_the_same_way(call, tmp_path, monkeypatch):
+    """The message was written out at all six; it is collections.collection_id now."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match=r"Unknown dataset: 'nope'\. Use list_datasets\(\)"):
+        call()
+
+
+def test_load_leaves_query_validation_to_the_registry():
+    """api.load builds Filters and delegates; the row knows whether it can answer."""
+    from foehn import registry
+    from foehn.readers import Filters
+
+    with pytest.raises(ValueError, match="does not support frequency filtering"):
+        registry.validate_load("climate_scenarios", Filters.build(frequency="d"))
+    with pytest.raises(ValueError, match="nominal 30-year dates"):
+        registry.validate_load("climate_scenarios", Filters.build(year=2026))
+    with pytest.raises(ValueError, match="Invalid sort"):
+        registry.validate_load("smn", Filters.build(sort="sideways"))
+    with pytest.raises(ValueError, match="Invalid time_slice"):
+        registry.validate_load("smn", Filters.build(time_slice="yesterday"))

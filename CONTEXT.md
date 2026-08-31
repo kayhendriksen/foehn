@@ -214,6 +214,11 @@ _Avoid_: query, params, options
   it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
   it is a **Direct ZIP** **Dataset** like any other. What "download everything"
   means is now *not gridded* rather than *tabular*, which is what it always meant.
+- "Is this a known **Dataset**?" was answered by a bare `KeyError` below and
+  re-worded as a sentence at all six of `api`'s entry points, and `load()` carried
+  five more checks the **Dataset kind**'s row already answered. Resolved:
+  `collections.collection_id` raises the sentence, and `registry.validate_load`
+  refuses a query the row cannot answer.
 - The module holding the download adapters was called `client` — the word the
   **Fetcher** entry tells you to avoid — on the one module in the tree that makes
   no HTTP call itself. It also held **Run state** and the ZIP guards, so the load

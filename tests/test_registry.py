@@ -25,8 +25,9 @@ def test_every_dataset_resolves_to_a_spec():
         assert isinstance(registry.spec(dataset), registry.KindSpec)
 
 
-def test_unknown_dataset_raises():
-    with pytest.raises(KeyError):
+def test_unknown_dataset_raises_something_a_caller_can_act_on():
+    """It raised a bare KeyError, which is why api wrote this message six times."""
+    with pytest.raises(ValueError, match="Unknown dataset"):
         registry.spec("nonexistent")
 
 

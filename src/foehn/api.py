@@ -11,12 +11,7 @@ import polars as pl
 
 from foehn import registry
 from foehn.assets import collection_assets
-from foehn.collections import (
-    COLLECTION_META,
-    COLLECTIONS,
-    GRANULARITIES,
-    TIME_SLICES,
-)
+from foehn.collections import COLLECTION_META, COLLECTIONS, collection_id
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import sanitize_noncf_time_units, write_zarr
 from foehn.meteocsv import decode_meteoswiss_csv
@@ -83,9 +78,6 @@ def download(
         to gate expensive downstream processing and ``result.failed`` to detect
         partial failures.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-
     workspace = Workspace.resolve(data_dir)
     workspace.bronze().mkdir(parents=True, exist_ok=True)
     fetcher = default_fetcher()
@@ -120,9 +112,6 @@ def to_parquet(
             also printed to stdout. Mirrors the CLI's exit-1 semantics so
             Python callers can't accidentally treat partial output as success.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-
     failures = registry.convert(dataset, Workspace.resolve(data_dir))
     if failures:
         raise RuntimeError(
@@ -201,14 +190,12 @@ def metadata(dataset: str, table: str) -> pl.DataFrame:
     Returns:
         A Polars DataFrame with foehn's published column names.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
     if table not in METADATA_TABLES:
         raise ValueError(f"Unknown metadata table {table!r}. Valid options: {', '.join(METADATA_TABLES)}.")
 
     spec = METADATA_TABLES[table]
     fetcher = default_fetcher()
-    coll = fetcher.collection(COLLECTIONS[dataset])
+    coll = fetcher.collection(collection_id(dataset))
     for asset in collection_assets(coll, suffixes=(".csv",), contains=spec.suffix):
         content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
         df = pl.read_csv(content.encode("utf-8"), separator=";")
@@ -328,16 +315,6 @@ def load(
                         date_to="2025-08-31", columns=["tre200d0"],
                         sort="desc")
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-    spec = registry.spec(dataset)
-    if not spec.tabular:
-        raise ValueError(registry.unreadable_message(dataset))
-    if frequency is not None and not spec.supports_granularity:
-        raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
-    if sort is not None and sort not in ("asc", "desc"):
-        raise ValueError(f"Invalid sort {sort!r}. Valid options: asc, desc.")
-
     filters = Filters.build(
         station=station,
         frequency=frequency,
@@ -352,20 +329,9 @@ def load(
         limit=limit,
         workers=workers,
     )
-    # Reject a token outside the vocabulary rather than quietly matching no
-    # assets and reporting "no CSV files found" — a mistyped frequency is a
-    # caller error, and the MCP layer used to catch it with its own copy of
-    # these two sets.
-    if filters.granularities and (unknown := sorted(filters.granularities - GRANULARITIES)):
-        raise ValueError(f"Invalid frequency {unknown}. Valid options: {', '.join(sorted(GRANULARITIES))}.")
-    if unknown_slices := sorted(set(filters.time_slices) - TIME_SLICES):
-        raise ValueError(f"Invalid time_slice {unknown_slices}. Valid options: {', '.join(sorted(TIME_SLICES))}.")
-    if not spec.supports_calendar_filters and filters.has_calendar_filter:
-        raise ValueError(
-            f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
-            "year/month/date_from/date_to filters are not supported."
-        )
-
+    # Whether this dataset can answer that query — known, tabular, granularity,
+    # calendar filters, vocabulary — is every one of them a fact on its row, so
+    # registry.load checks them rather than restating them here.
     return registry.load(dataset, filters, fetcher=default_fetcher())
 
 
@@ -456,9 +422,6 @@ def open_dataset(
         # Radar: a single CombiPrecip composite (one 5-min timestep)
         ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
-
     return registry.open_grid(
         dataset,
         match=match,
@@ -519,8 +482,9 @@ def to_zarr(
     Returns:
         Path to the written ``.zarr`` store.
     """
-    if dataset not in COLLECTIONS:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
+    # Also the unknown-dataset guard: the row is what says whether this kind has
+    # a cube builder, and asking for it raises for a dataset that has no row.
+    grid = registry.spec(dataset).grid
     if stack and rechunk:
         raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
 
@@ -528,9 +492,8 @@ def to_zarr(
     store_path = _resolve_store(dataset, match, workspace, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Whether this kind has a cube builder is a fact on its row. NetCDF has none
-    # and needs none, so it falls through to the single-write path below.
-    grid = registry.spec(dataset).grid
+    # NetCDF has no cube builder and needs none, so it falls through to the
+    # single-write path below.
     if stack and grid is not None and grid.cube is not None:
         registry.write_cube(
             dataset,
