@@ -11,7 +11,7 @@ from pathlib import Path
 import polars as pl
 
 from foehn import registry
-from foehn.api import inventory, list_datasets, parameters, stations
+from foehn.api import METADATA_TABLES, list_datasets, metadata
 from foehn.collections import COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.state import load_last_run, save_last_run
@@ -169,21 +169,13 @@ def cmd_to_parquet(args: argparse.Namespace) -> None:
 
 
 def cmd_metadata(args: argparse.Namespace) -> None:
-    kind = args.kind
-    dataset = args.dataset
-
-    if kind == "parameters":
-        df = parameters(dataset)
-    elif kind == "stations":
-        df = stations(dataset)
-    elif kind == "inventory":
-        df = inventory(dataset)
-    else:
-        print(f"Unknown metadata kind: {kind!r}", file=sys.stderr)
-        sys.exit(1)
+    # Which tables exist is api.METADATA_TABLES, and so is what argparse accepts
+    # below — the ladder this replaced also carried an else branch that argparse's
+    # own ``choices`` made unreachable.
+    df = metadata(args.dataset, args.table)
 
     if df.is_empty():
-        print(f"No {kind} metadata found for {dataset!r}.")
+        print(f"No {args.table} metadata found for {args.dataset!r}.")
         return
 
     # Table output similar to foehn list
@@ -348,7 +340,7 @@ def main():
 
     # --- foehn metadata ---
     sub_meta = subparsers.add_parser("metadata", help="Show dataset metadata (parameters, stations, inventory)")
-    sub_meta.add_argument("kind", choices=["parameters", "stations", "inventory"], help="Type of metadata to show")
+    sub_meta.add_argument("table", choices=sorted(METADATA_TABLES), help="Which metadata table to show")
     sub_meta.add_argument("dataset", help="Dataset name (e.g. 'smn')")
     sub_meta.set_defaults(func=cmd_metadata)
 

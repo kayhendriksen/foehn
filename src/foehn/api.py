@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,10 +28,12 @@ if TYPE_CHECKING:
     import xarray as xr
 
 __all__ = [
+    "METADATA_TABLES",
     "download",
     "inventory",
     "list_datasets",
     "load",
+    "metadata",
     "open_dataset",
     "parameters",
     "stations",
@@ -127,28 +130,91 @@ def to_parquet(
         )
 
 
-def _fetch_metadata_csv(dataset: str, suffix: str) -> pl.DataFrame:
-    """Fetch a collection-level metadata CSV from the STAC API.
+@dataclass(frozen=True)
+class MetadataTable:
+    """One collection-level metadata file, and the columns foehn publishes from it.
+
+    The suffix is MeteoSwiss's; the renames are foehn's public column names, which
+    is why the table lives here rather than in :mod:`foehn.meteocsv`. Stating it
+    once means a fourth ``_meta_*`` file is a row — it used to be three implied
+    rename maps here, an if-ladder in the CLI, and three models in the MCP layer.
+    """
+
+    suffix: str
+    """Filename fragment identifying the file among a collection's assets."""
+
+    columns: dict[str, str]
+    """Source column → published name, in the order the frame comes back."""
+
+
+METADATA_TABLES: dict[str, MetadataTable] = {
+    "parameters": MetadataTable(
+        "_meta_parameters",
+        {
+            "parameter_shortname": "shortname",
+            "parameter_description_en": "description",
+            "parameter_unit": "unit",
+            "parameter_datatype": "type",
+            "parameter_granularity": "granularity",
+            "parameter_decimals": "decimals",
+            "parameter_group_en": "group",
+        },
+    ),
+    "stations": MetadataTable(
+        "_meta_stations",
+        {
+            "station_abbr": "abbr",
+            "station_name": "name",
+            "station_canton": "canton",
+            "station_height_masl": "altitude",
+            "station_coordinates_lv95_east": "lv95_east",
+            "station_coordinates_lv95_north": "lv95_north",
+            "station_coordinates_wgs84_lat": "lat",
+            "station_coordinates_wgs84_lon": "lon",
+            "station_data_since": "data_since",
+        },
+    ),
+    "inventory": MetadataTable(
+        "_meta_datainventory",
+        {
+            "station_abbr": "station",
+            "parameter_shortname": "parameter",
+            "data_since": "data_since",
+            "data_till": "data_till",
+            "owner": "owner",
+        },
+    ),
+}
+
+
+def metadata(dataset: str, table: str) -> pl.DataFrame:
+    """Fetch one of a dataset's metadata tables from the STAC API.
+
+    The single implementation behind :func:`parameters`, :func:`stations` and
+    :func:`inventory`; take it directly when the table is chosen at runtime, as
+    the CLI does.
 
     Args:
-        dataset: Dataset name (e.g. "smn").
-        suffix: Metadata file suffix (e.g. "_meta_parameters").
+        dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
+        table: One of ``METADATA_TABLES`` — "parameters", "stations", "inventory".
 
     Returns:
-        A Polars DataFrame with the parsed CSV contents.
+        A Polars DataFrame with foehn's published column names.
     """
     if dataset not in COLLECTIONS:
         raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.")
+    if table not in METADATA_TABLES:
+        raise ValueError(f"Unknown metadata table {table!r}. Valid options: {', '.join(METADATA_TABLES)}.")
 
-    collection_id = COLLECTIONS[dataset]
+    spec = METADATA_TABLES[table]
     fetcher = default_fetcher()
-
-    coll = fetcher.collection(collection_id)
-    for asset in collection_assets(coll, suffixes=(".csv",), contains=suffix):
+    coll = fetcher.collection(COLLECTIONS[dataset])
+    for asset in collection_assets(coll, suffixes=(".csv",), contains=spec.suffix):
         content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
-        return pl.read_csv(content.encode("utf-8"), separator=";")
+        df = pl.read_csv(content.encode("utf-8"), separator=";")
+        return df.select(pl.col(source).alias(published) for source, published in spec.columns.items())
 
-    raise ValueError(f"No {suffix} metadata found for dataset {dataset!r}.")
+    raise ValueError(f"No {spec.suffix} metadata found for dataset {dataset!r}.")
 
 
 def parameters(dataset: str) -> pl.DataFrame:
@@ -160,16 +226,7 @@ def parameters(dataset: str) -> pl.DataFrame:
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
     """
-    df = _fetch_metadata_csv(dataset, "_meta_parameters")
-    return df.select(
-        pl.col("parameter_shortname").alias("shortname"),
-        pl.col("parameter_description_en").alias("description"),
-        pl.col("parameter_unit").alias("unit"),
-        pl.col("parameter_datatype").alias("type"),
-        pl.col("parameter_granularity").alias("granularity"),
-        pl.col("parameter_decimals").alias("decimals"),
-        pl.col("parameter_group_en").alias("group"),
-    )
+    return metadata(dataset, "parameters")
 
 
 def stations(dataset: str) -> pl.DataFrame:
@@ -182,18 +239,7 @@ def stations(dataset: str) -> pl.DataFrame:
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
     """
-    df = _fetch_metadata_csv(dataset, "_meta_stations")
-    return df.select(
-        pl.col("station_abbr").alias("abbr"),
-        pl.col("station_name").alias("name"),
-        pl.col("station_canton").alias("canton"),
-        pl.col("station_height_masl").alias("altitude"),
-        pl.col("station_coordinates_lv95_east").alias("lv95_east"),
-        pl.col("station_coordinates_lv95_north").alias("lv95_north"),
-        pl.col("station_coordinates_wgs84_lat").alias("lat"),
-        pl.col("station_coordinates_wgs84_lon").alias("lon"),
-        pl.col("station_data_since").alias("data_since"),
-    )
+    return metadata(dataset, "stations")
 
 
 def inventory(dataset: str) -> pl.DataFrame:
@@ -205,14 +251,7 @@ def inventory(dataset: str) -> pl.DataFrame:
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
     """
-    df = _fetch_metadata_csv(dataset, "_meta_datainventory")
-    return df.select(
-        pl.col("station_abbr").alias("station"),
-        pl.col("parameter_shortname").alias("parameter"),
-        pl.col("data_since"),
-        pl.col("data_till"),
-        pl.col("owner"),
-    )
+    return metadata(dataset, "inventory")
 
 
 def load(

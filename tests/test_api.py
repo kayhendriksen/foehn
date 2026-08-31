@@ -1016,3 +1016,42 @@ def test_load_concurrent_fetch_multiple_files(fetcher):
     # 3 stations × 1 frequency = 3 fetches
     assert len(fetcher.gets) == 3
     assert len(df) == 3
+
+
+# --- metadata tables ---
+
+
+def test_the_three_metadata_functions_are_the_table(fetcher):
+    """Each is a name over one implementation; the table says suffix and columns."""
+    from foehn.api import METADATA_TABLES
+
+    assert set(METADATA_TABLES) == {"parameters", "stations", "inventory"}
+    for name, table in METADATA_TABLES.items():
+        assert table.suffix.startswith("_meta_")
+        assert table.columns, f"{name} publishes no columns"
+
+
+def test_metadata_rejects_an_unknown_table():
+    from foehn.api import metadata
+
+    with pytest.raises(ValueError, match="Unknown metadata table"):
+        metadata("smn", "nonexistent")
+
+
+def test_metadata_publishes_the_tables_column_names(fetcher):
+    """The rename map is foehn's public schema, applied in one place."""
+    from foehn.api import METADATA_TABLES, metadata
+
+    href = "https://data.geo.admin.ch/x/ogd-smn_meta_stations.csv"
+    fetcher.any_collection = {"assets": {"m": {"href": href}}}
+    fetcher.default_body = (
+        b"station_abbr;station_name;station_canton;station_height_masl;"
+        b"station_coordinates_lv95_east;station_coordinates_lv95_north;"
+        b"station_coordinates_wgs84_lat;station_coordinates_wgs84_lon;station_data_since\n"
+        b"BER;Bern;BE;553;2600000;1200000;46.9;7.4;01.01.1980\n"
+    )
+
+    df = metadata("smn", "stations")
+
+    assert df.columns == list(METADATA_TABLES["stations"].columns.values())
+    assert df["abbr"][0] == "BER"
