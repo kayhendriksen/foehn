@@ -26,7 +26,7 @@ from pathlib import Path
 
 import polars as pl
 
-from foehn.collections import COLLECTIONS, NO_GRANULARITY_KINDS, kind
+from foehn.collections import COLLECTIONS, DERIVED_TIMESTAMP_KINDS, NO_GRANULARITY_KINDS, kind
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,28 @@ def add_forecast_local_timestamp(frame):
     return frame.with_columns(
         pl.col("Date").cast(pl.Utf8).str.to_datetime("%Y%m%d%H%M", strict=False).alias("reference_timestamp")
     )
+
+
+def derive_timestamp(frame, dataset: str):
+    """Give *frame* a ``reference_timestamp`` if its kind has to derive one.
+
+    A no-op for every kind whose files carry the column already, so callers make
+    the call unconditionally instead of asking which dataset they hold. Works on
+    a LazyFrame or a DataFrame.
+    """
+    if kind(dataset) not in DERIVED_TIMESTAMP_KINDS:
+        return frame
+    return add_forecast_local_timestamp(frame)
+
+
+def source_columns_for(dataset: str) -> set[str]:
+    """Extra source columns :func:`derive_timestamp` needs, beyond what was asked for.
+
+    An explicit ``columns=`` narrows the parse to bound memory, so anything the
+    derivation reads has to survive that projection — dropping ``Date`` leaves a
+    forecast frame with no timestamp to filter or sort on.
+    """
+    return {"Date"} if kind(dataset) in DERIVED_TIMESTAMP_KINDS else set()
 
 
 def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...], list[Path]]:

@@ -1,5 +1,7 @@
 """Shared fixtures for foehn tests."""
 
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -52,3 +54,12 @@ def _clear_process_caches():
     _ICON_COORDS_CACHE.clear()
     yield
     _ICON_COORDS_CACHE.clear()
+
+
+def make_zip(files: dict[str, bytes]) -> bytes:
+    """An in-memory ZIP of *files*. Shared by the archive guards and the ZIP download paths."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()

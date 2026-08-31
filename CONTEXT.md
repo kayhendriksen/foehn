@@ -149,6 +149,13 @@ filename rules that carry station, **Granularity**, **Time slice** and
 the load path, the convert stage and the Databricks ingest script alike.
 _Avoid_: parsing, format (a **Format** is a value; this is the rules for one)
 
+**Run state**:
+What foehn remembers between runs, in the **Workspace**: the ETag store keyed by
+asset href, and the last-run cursor the CLI advances only after a fully clean
+run. Both reads are total — a corrupt file is treated as absent, because a lost
+cursor costs one redundant download and a raised exception costs the run.
+_Avoid_: cache (the **Fetcher**'s listing memo is a cache; this is not)
+
 **Reader**:
 How one **Dataset kind** becomes a Polars DataFrame — one per tabular kind,
 selected from the registry exactly as its download and convert paths are. Owns
@@ -207,6 +214,16 @@ _Avoid_: query, params, options
   it and `foehn.download("climate_normals")` raised "Unknown dataset". Resolved:
   it is a **Direct ZIP** **Dataset** like any other. What "download everything"
   means is now *not gridded* rather than *tabular*, which is what it always meant.
+- "Is this a known **Dataset**?" was answered by a bare `KeyError` below and
+  re-worded as a sentence at all six of `api`'s entry points, and `load()` carried
+  five more checks the **Dataset kind**'s row already answered. Resolved:
+  `collections.collection_id` raises the sentence, and `registry.validate_load`
+  refuses a query the row cannot answer.
+- The module holding the download adapters was called `client` — the word the
+  **Fetcher** entry tells you to avoid — on the one module in the tree that makes
+  no HTTP call itself. It also held **Run state** and the ZIP guards, so the load
+  path imported a download module to reach one of them. Resolved: `downloads`,
+  `state` and `archives`, each named for what it owns.
 - Upstream's CSV conventions and the Bronze → Parquet stage lived in one module,
   so `transfer` — the download engine — depended on the Parquet converter for one
   byte-level helper, and the gridded read path did too, through it. Five modules

@@ -50,9 +50,9 @@ foehn to-parquet smn        # single dataset
 
 ---
 
-## `foehn metadata KIND DATASET`
+## `foehn metadata TABLE DATASET`
 
-Show dataset metadata fetched live from the API. `KIND` is one of `parameters`, `stations`, or `inventory`.
+Show dataset metadata fetched live from the API. `TABLE` is one of `parameters`, `stations`, or `inventory`.
 
 ```bash
 foehn metadata parameters smn   # what each column name means

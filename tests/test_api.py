@@ -64,7 +64,7 @@ def test_download_unknown_dataset_raises():
 @patch("foehn.registry.download")
 def test_download_delegates_to_the_registry(mock_dl, dataset, tmp_path):
     """Whichever kind it is, download() hands it to the registry and returns the result."""
-    from foehn.client import DownloadResult
+    from foehn.transfer import DownloadResult
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
 
@@ -89,7 +89,7 @@ def _make_indoor_zip(data_names):
 
 @patch("foehn.registry.download")
 def test_download_passes_force_through(mock_dl, tmp_path):
-    from foehn.client import DownloadResult
+    from foehn.transfer import DownloadResult
 
     mock_dl.return_value = DownloadResult()
     download("climate_scenarios_indoor", data_dir=tmp_path, force=True)
@@ -168,6 +168,24 @@ def test_load_forecast_local_adds_reference_timestamp(fetcher):
     assert "reference_timestamp" in df.columns
     assert df["reference_timestamp"].dtype == pl.Datetime
     assert df["reference_timestamp"][0].year == 2026
+
+
+def test_load_forecast_local_keeps_its_timestamp_source_under_columns(fetcher):
+    """An explicit columns= narrows the parse; the derivation's source has to survive it.
+
+    Which column that is is a fact about the kind — it used to be a
+    ``dataset == "forecast_local"`` comparison inside the reader.
+    """
+    fetcher.any_collection = {"assets": {}}
+    href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
+    fetcher.any_items = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    fetcher.default_body = _FORECAST_LOCAL_CSV
+
+    df = load("forecast_local", columns=["dkl010h0"], sort="asc")
+
+    assert "reference_timestamp" in df.columns
+    assert df["reference_timestamp"].dtype == pl.Datetime
+    assert df["dkl010h0"].to_list() == [282, 315]
 
 
 def test_load_forecast_local_date_filter_applies(fetcher):
@@ -267,7 +285,7 @@ def test_load_forecast_local_fetches_only_latest_run(fetcher):
 
 @patch("foehn.registry.download")
 def test_download_passes_the_requested_time_slice(mock_dl, tmp_path):
-    from foehn.client import DownloadResult
+    from foehn.transfer import DownloadResult
 
     mock_dl.return_value = DownloadResult()
     download("smn", data_dir=tmp_path, time_slice=["historical"])
@@ -998,3 +1016,78 @@ def test_load_concurrent_fetch_multiple_files(fetcher):
     # 3 stations × 1 frequency = 3 fetches
     assert len(fetcher.gets) == 3
     assert len(df) == 3
+
+
+# --- metadata tables ---
+
+
+def test_the_three_metadata_functions_are_the_table(fetcher):
+    """Each is a name over one implementation; the table says suffix and columns."""
+    from foehn.api import METADATA_TABLES
+
+    assert set(METADATA_TABLES) == {"parameters", "stations", "inventory"}
+    for name, table in METADATA_TABLES.items():
+        assert table.suffix.startswith("_meta_")
+        assert table.columns, f"{name} publishes no columns"
+
+
+def test_metadata_rejects_an_unknown_table():
+    from foehn.api import metadata
+
+    with pytest.raises(ValueError, match="Unknown metadata table"):
+        metadata("smn", "nonexistent")
+
+
+def test_metadata_publishes_the_tables_column_names(fetcher):
+    """The rename map is foehn's public schema, applied in one place."""
+    from foehn.api import METADATA_TABLES, metadata
+
+    href = "https://data.geo.admin.ch/x/ogd-smn_meta_stations.csv"
+    fetcher.any_collection = {"assets": {"m": {"href": href}}}
+    fetcher.default_body = (
+        b"station_abbr;station_name;station_canton;station_height_masl;"
+        b"station_coordinates_lv95_east;station_coordinates_lv95_north;"
+        b"station_coordinates_wgs84_lat;station_coordinates_wgs84_lon;station_data_since\n"
+        b"BER;Bern;BE;553;2600000;1200000;46.9;7.4;01.01.1980\n"
+    )
+
+    df = metadata("smn", "stations")
+
+    assert df.columns == list(METADATA_TABLES["stations"].columns.values())
+    assert df["abbr"][0] == "BER"
+
+
+# --- one guard, not six ---
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: foehn.download("nope"), id="download"),
+        pytest.param(lambda: foehn.to_parquet("nope"), id="to_parquet"),
+        pytest.param(lambda: foehn.load("nope"), id="load"),
+        pytest.param(lambda: foehn.open_dataset("nope"), id="open_dataset"),
+        pytest.param(lambda: foehn.to_zarr("nope"), id="to_zarr"),
+        pytest.param(lambda: foehn.parameters("nope"), id="parameters"),
+    ],
+)
+def test_every_entry_point_refuses_an_unknown_dataset_the_same_way(call, tmp_path, monkeypatch):
+    """The message was written out at all six; it is collections.collection_id now."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match=r"Unknown dataset: 'nope'\. Use list_datasets\(\)"):
+        call()
+
+
+def test_load_leaves_query_validation_to_the_registry():
+    """api.load builds Filters and delegates; the row knows whether it can answer."""
+    from foehn import registry
+    from foehn.readers import Filters
+
+    with pytest.raises(ValueError, match="does not support frequency filtering"):
+        registry.validate_load("climate_scenarios", Filters.build(frequency="d"))
+    with pytest.raises(ValueError, match="nominal 30-year dates"):
+        registry.validate_load("climate_scenarios", Filters.build(year=2026))
+    with pytest.raises(ValueError, match="Invalid sort"):
+        registry.validate_load("smn", Filters.build(sort="sideways"))
+    with pytest.raises(ValueError, match="Invalid time_slice"):
+        registry.validate_load("smn", Filters.build(time_slice="yesterday"))

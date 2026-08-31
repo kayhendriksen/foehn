@@ -4,7 +4,7 @@ One table replacing the routing ladders that used to sit in ``api``, ``cli`` and
 the Databricks ingest script, each re-deriving from a different set of dataset
 keys. Callers ask the registry instead of testing membership.
 
-Layering: ``collections`` (dataset facts) → ``client``/``convert``/``readers``/
+Layering: ``collections`` (dataset facts) → ``downloads``/``convert``/``readers``/
 ``grids`` (adapters) → this module → ``api``/``cli``/``mcp_server``. All four
 pipeline stages route through the table: the load readers live in
 ``foehn.readers`` and the grid readers in ``foehn.grids``, both below this
@@ -19,18 +19,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from foehn.client import (
-    DownloadResult,
-    download_indoor_zip,
-    download_normals_zip,
-    stac_download,
+from foehn.collections import (
+    COLLECTION_META,
+    COLLECTIONS,
+    GRANULARITIES,
+    KIND_OF,
+    TIME_SLICES,
+    DatasetKind,
+    kind,
 )
-from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, kind
 from foehn.convert import (
     convert_indoor_to_parquet,
     convert_normals_to_parquet,
     convert_preamble_to_parquet,
     convert_to_parquet,
+)
+from foehn.downloads import (
+    download_indoor_zip,
+    download_normals_zip,
+    stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.grids import (
@@ -46,7 +53,7 @@ from foehn.grids import (
     require_radar,
     select_variables,
 )
-from foehn.transfer import already_current, csv_to_disk, exists
+from foehn.transfer import DownloadResult, already_current, csv_to_disk, exists
 
 if TYPE_CHECKING:
     import polars as pl
@@ -334,6 +341,39 @@ def unreadable_message(dataset: str) -> str:
     )
 
 
+def validate_load(dataset: str, filters: Filters) -> Reader:
+    """Refuse a query this dataset cannot answer, and return the reader for it.
+
+    Every one of these is a fact the row already holds, so they belong on this
+    side of the seam — ``api.load`` used to carry all six between its docstring
+    and its single call. The messages name public keywords because that is what
+    the caller typed; the registry already speaks that vocabulary in
+    :func:`unreadable_message` and :func:`open_grid`.
+    """
+    kind_spec = spec(dataset)
+    reader = kind_spec.load
+    if reader is None:
+        raise ValueError(unreadable_message(dataset))
+    if filters.granularities is not None and not kind_spec.supports_granularity:
+        raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
+    if filters.sort is not None and filters.sort not in ("asc", "desc"):
+        raise ValueError(f"Invalid sort {filters.sort!r}. Valid options: asc, desc.")
+    # Reject a token outside the vocabulary rather than quietly matching no
+    # assets and reporting "no CSV files found" — a mistyped frequency is a
+    # caller error, and the MCP layer used to catch it with its own copy of
+    # these two sets.
+    if filters.granularities and (unknown := sorted(filters.granularities - GRANULARITIES)):
+        raise ValueError(f"Invalid frequency {unknown}. Valid options: {', '.join(sorted(GRANULARITIES))}.")
+    if unknown_slices := sorted(set(filters.time_slices) - TIME_SLICES):
+        raise ValueError(f"Invalid time_slice {unknown_slices}. Valid options: {', '.join(sorted(TIME_SLICES))}.")
+    if not kind_spec.supports_calendar_filters and filters.has_calendar_filter:
+        raise ValueError(
+            f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
+            "year/month/date_from/date_to filters are not supported."
+        )
+    return reader
+
+
 def load(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
     """Load *dataset* by whichever reader its kind uses, filters applied.
 
@@ -342,9 +382,7 @@ def load(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
     frame comes back finished: the reader knows its own key columns and what
     ``sort`` orders by, so nothing above this seam restates them.
     """
-    reader = spec(dataset).load
-    if reader is None:
-        raise ValueError(unreadable_message(dataset))
+    reader = validate_load(dataset, filters)
     return reader.finish(reader.read(dataset, filters, fetcher=fetcher), filters)
 
 

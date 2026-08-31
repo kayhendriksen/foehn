@@ -457,12 +457,29 @@ KIND_OF: dict[str, DatasetKind] = {
 # which is what NO_GRANULARITY_COLLECTIONS used to be.
 NO_GRANULARITY_KINDS = frozenset({DatasetKind.PREAMBLE_CSV, DatasetKind.FORECAST_CSV})
 
+# Kinds whose files carry no ``reference_timestamp`` column and derive one from
+# something else in the row. Stated here because both the load path and the
+# convert stage need it and neither can ask the registry — it sits above them.
+# It was a ``dataset == "forecast_local"`` comparison at four sites, three of
+# them in a function that had already resolved the kind.
+DERIVED_TIMESTAMP_KINDS = frozenset({DatasetKind.FORECAST_CSV})
+
+
+def collection_id(dataset: str) -> str:
+    """Return a dataset's **Collection**, or raise the message every caller used to write.
+
+    ``api`` spelled this guard out at six entry points because the layers below
+    raised a bare ``KeyError``, which is not a sentence a caller can act on.
+    """
+    try:
+        return COLLECTIONS[dataset]
+    except KeyError:
+        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.") from None
+
 
 def kind(dataset: str) -> DatasetKind:
-    """Return a dataset's :class:`DatasetKind`.
-
-    Raises KeyError for an unknown dataset, same as ``COLLECTIONS[dataset]``.
-    """
+    """Return a dataset's :class:`DatasetKind`, or raise for an unknown dataset."""
+    collection_id(dataset)
     return KIND_OF[dataset]
 
 

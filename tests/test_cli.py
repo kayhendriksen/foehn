@@ -410,7 +410,7 @@ def test_load_forwards_limit_and_workers():
 def test_metadata_parameters(capsys):
     fake_df = pl.DataFrame({"shortname": ["tre200d0"], "description": ["Air temp"], "unit": ["°C"]})
     with (
-        patch("foehn.cli.parameters", return_value=fake_df),
+        patch("foehn.cli.metadata", return_value=fake_df),
         patch("sys.argv", ["foehn", "metadata", "parameters", "smn"]),
     ):
         main()
@@ -423,7 +423,7 @@ def test_metadata_parameters(capsys):
 def test_metadata_stations(capsys):
     fake_df = pl.DataFrame({"abbr": ["BER"], "name": ["Bern"], "canton": ["BE"]})
     with (
-        patch("foehn.cli.stations", return_value=fake_df),
+        patch("foehn.cli.metadata", return_value=fake_df),
         patch("sys.argv", ["foehn", "metadata", "stations", "smn"]),
     ):
         main()
@@ -435,7 +435,7 @@ def test_metadata_stations(capsys):
 def test_metadata_inventory(capsys):
     fake_df = pl.DataFrame({"station": ["BER"], "parameter": ["tre200d0"]})
     with (
-        patch("foehn.cli.inventory", return_value=fake_df),
+        patch("foehn.cli.metadata", return_value=fake_df),
         patch("sys.argv", ["foehn", "metadata", "inventory", "smn"]),
     ):
         main()
@@ -454,7 +454,7 @@ def test_metadata_column_width_matches_what_is_printed(capsys):
     """
     fake_df = pl.DataFrame({"when": [datetime(2026, 1, 1), None], "name": ["Bern", "Zurich"]})
     with (
-        patch("foehn.cli.stations", return_value=fake_df),
+        patch("foehn.cli.metadata", return_value=fake_df),
         patch("sys.argv", ["foehn", "metadata", "stations", "smn"]),
     ):
         main()
@@ -471,7 +471,7 @@ def test_metadata_column_width_matches_what_is_printed(capsys):
 def test_metadata_empty(capsys):
     fake_df = pl.DataFrame({"shortname": [], "description": [], "unit": []})
     with (
-        patch("foehn.cli.parameters", return_value=fake_df),
+        patch("foehn.cli.metadata", return_value=fake_df),
         patch("sys.argv", ["foehn", "metadata", "parameters", "smn"]),
     ):
         main()

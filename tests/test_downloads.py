@@ -1,30 +1,18 @@
-"""Tests for state management and the download functions.
+"""Tests for the download adapters — the STAC engine and the two ZIP paths.
 
 These cross the network port with an :class:`InMemoryFetcher` and assert on what
 lands on disk and in ``DownloadResult`` — not on which HTTP calls were made. The
 few that do check traffic are the ones where traffic *is* the behaviour: an ETag
-skip, a ``since`` filter, first-page-only listing. Session lifetime and retry
-policy are the adapter's, and are tested in tests/test_fetch.py.
+skip, a ``since`` filter, first-page-only listing.
 """
 
-import io
-import zipfile
-from datetime import UTC, datetime
-
-import pytest
+from conftest import make_zip
 
 from foehn import registry
-from foehn.client import (
-    DownloadResult,
-    _safe_extract_zip,
-    download_metadata,
-    download_normals_zip,
-    load_etags,
-    load_last_run,
-    save_etags,
-    save_last_run,
-)
+from foehn.downloads import download_metadata, download_normals_zip
 from foehn.fetch import FetchError
+from foehn.state import load_etags, save_etags
+from foehn.transfer import DownloadResult
 from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
 
@@ -61,63 +49,6 @@ def _serve(fake, content=b"a;b\n1;2\n", etag=None, status_code=200):
 
 def _stac_item(asset_url, updated="2026-01-01T00:00:00Z"):
     return {"id": "item-1", "assets": {"data": {"href": asset_url}}, "properties": {"updated": updated}}
-
-
-# --- State management ---
-
-
-def test_load_etags_missing_file_returns_empty(tmp_path):
-    assert load_etags(Workspace(tmp_path)) == {}
-
-
-def test_save_and_load_etags_roundtrip(tmp_path):
-    etags = {"https://data.geo.admin.ch/file.csv": '"abc123"'}
-    save_etags(Workspace(tmp_path), etags)
-    assert load_etags(Workspace(tmp_path)) == etags
-
-
-def test_save_etags_creates_parent_dirs(tmp_path):
-    nested = Workspace(tmp_path / "a" / "b")
-    save_etags(nested, {"k": "v"})
-    assert nested.etags.exists()
-
-
-def test_save_etags_overwrites_existing(tmp_path):
-    save_etags(Workspace(tmp_path), {"k": "old"})
-    save_etags(Workspace(tmp_path), {"k": "new"})
-    assert load_etags(Workspace(tmp_path)) == {"k": "new"}
-
-
-def test_load_etags_corrupt_file_returns_empty(tmp_path):
-    """A torn write must not brick subsequent runs — treat as empty state."""
-    (tmp_path / "_etags.json").write_text('{"truncated": ')
-    assert load_etags(Workspace(tmp_path)) == {}
-
-
-def test_load_last_run_corrupt_file_returns_none(tmp_path):
-    (tmp_path / "_last_run.json").write_text("not json")
-    assert load_last_run(Workspace(tmp_path)) is None
-
-
-def test_load_last_run_missing_file_returns_none(tmp_path):
-    assert load_last_run(Workspace(tmp_path)) is None
-
-
-def test_save_and_load_last_run_roundtrip(tmp_path):
-    save_last_run(Workspace(tmp_path))
-    timestamp = load_last_run(Workspace(tmp_path))
-    assert timestamp is not None
-    dt = datetime.fromisoformat(timestamp)
-    assert dt.tzinfo is not None
-
-
-def test_save_last_run_is_recent(tmp_path):
-    before = datetime.now(UTC)
-    save_last_run(Workspace(tmp_path))
-    after = datetime.now(UTC)
-
-    saved = datetime.fromisoformat(load_last_run(Workspace(tmp_path)))
-    assert before <= saved <= after
 
 
 # --- the CSV listing path (registry: STANDARD_CSV / PREAMBLE_CSV) ---
@@ -349,16 +280,8 @@ def test_download_metadata_skips_non_csv_assets(tmp_path):
 # --- download_climate_normals_zip ---
 
 
-def _make_zip(files: dict[str, bytes]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        for name, content in files.items():
-            zf.writestr(name, content)
-    return buf.getvalue()
-
-
 def test_normals_zip_extracts_files(tmp_path):
-    zip_bytes = _make_zip({"sample.txt": b"data"})
+    zip_bytes = make_zip({"sample.txt": b"data"})
     fake = _fake(body=zip_bytes)
 
     download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=fake)
@@ -368,7 +291,7 @@ def test_normals_zip_extracts_files(tmp_path):
 
 
 def test_normals_zip_skips_if_extracted(tmp_path):
-    fake = _fake(body=_make_zip({"sample.txt": b"data"}))
+    fake = _fake(body=make_zip({"sample.txt": b"data"}))
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "sample.txt").write_bytes(b"extracted")
@@ -384,7 +307,7 @@ def test_normals_zip_redownloads_if_not_extracted(tmp_path):
     out_dir.mkdir(parents=True)
     (out_dir / "normwerte.zip").write_bytes(b"partial-or-unextracted")
 
-    zip_bytes = _make_zip({"sample.txt": b"data"})
+    zip_bytes = make_zip({"sample.txt": b"data"})
     fake = _fake(body=zip_bytes)
 
     download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=fake)
@@ -393,53 +316,12 @@ def test_normals_zip_redownloads_if_not_extracted(tmp_path):
     assert (out_dir / "sample.txt").exists()
 
 
-def test_normals_zip_rejects_decompression_bomb(tmp_path, monkeypatch):
-    """An archive declaring more decompressed bytes than the cap must not extract."""
-    monkeypatch.setattr("foehn.client._MAX_ZIP_EXTRACT_BYTES", 10)
-    zip_bytes = _make_zip({"sample.txt": b"x" * 1024})
-    fake = _fake(body=zip_bytes)
-
-    with pytest.raises(ValueError, match="decompressed"):
-        download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=fake)
-
-    assert not (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
-
-
-def test_safe_extract_zip_accepts_nested_members(tmp_path):
-    """Legitimate nested members must extract.
-
-    The guard used to compare strings against ``str(out_dir) + "/"``, which no
-    resolved path matches on Windows (separator is "\\") — so every member of
-    every archive was rejected there, including the C6 climate normals that
-    bare ``foehn download`` always fetches.
-    """
-    zip_path = tmp_path / "ok.zip"
-    zip_path.write_bytes(_make_zip({"nested/dir/sample.txt": b"data"}))
-
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    assert _safe_extract_zip(zip_path, out_dir) == 1
-    assert (out_dir / "nested" / "dir" / "sample.txt").read_bytes() == b"data"
-
-
-def test_safe_extract_zip_rejects_path_traversal(tmp_path):
-    zip_path = tmp_path / "evil.zip"
-    zip_path.write_bytes(_make_zip({"../evil.txt": b"x"}))
-
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    with pytest.raises(ValueError, match="Unsafe path"):
-        _safe_extract_zip(zip_path, out_dir)
-
-    assert not (tmp_path / "evil.txt").exists()
-
-
 def test_normals_zip_force_redownloads(tmp_path):
     out_dir = tmp_path / "bronze" / "climate_normals"
     out_dir.mkdir(parents=True)
     (out_dir / "old.txt").write_bytes(b"stale")
 
-    zip_bytes = _make_zip({"new.txt": b"fresh"})
+    zip_bytes = make_zip({"new.txt": b"fresh"})
     fake = _fake(body=zip_bytes)
 
     download_normals_zip("climate_normals", Workspace(tmp_path), force=True, fetcher=fake)

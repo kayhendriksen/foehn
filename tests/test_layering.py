@@ -61,9 +61,21 @@ def test_the_convert_stage_has_exactly_one_consumer():
     assert importers == {"registry"}
 
 
-@pytest.mark.parametrize("module", ["transfer", "grids", "readers", "api", "client"])
+@pytest.mark.parametrize("module", ["transfer", "grids", "readers", "api", "downloads"])
 def test_nothing_but_the_registry_depends_on_parquet(module):
     assert "convert" not in _imports(module)
+
+
+def test_the_load_path_does_not_import_a_download_module():
+    """``readers`` needed one ZIP guard and imported the whole download module for it."""
+    assert "downloads" not in _imports("readers")
+    assert "archives" in _imports("readers")
+
+
+def test_the_download_adapters_have_one_consumer():
+    """Like ``convert``: reached through the registry row, not called directly."""
+    importers = {module for module, deps in _graph().items() if "downloads" in deps}
+    assert importers == {"registry"}
 
 
 def test_meteocsv_is_the_bottom_of_the_read_stack():
@@ -71,7 +83,7 @@ def test_meteocsv_is_the_bottom_of_the_read_stack():
     assert _imports("meteocsv") <= {"collections"}
 
 
-@pytest.mark.parametrize("module", ["collections", "workspace", "_urls"])
+@pytest.mark.parametrize("module", ["collections", "workspace", "_urls", "archives"])
 def test_the_leaf_modules_import_no_foehn(module):
-    """Dataset facts, the layout and URL validation sit under everything."""
+    """Dataset facts, the layout, URL validation and the ZIP guards sit under everything."""
     assert _imports(module) == set()
