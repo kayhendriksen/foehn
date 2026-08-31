@@ -9,8 +9,7 @@ import polars as pl
 
 from foehn import registry
 from foehn.collections import (
-    COLLECTION_META,
-    COLLECTIONS,
+    DATASETS,
     DEFAULT_TIME_SLICE,
     GRANULARITY_LABELS,
     TIME_SLICE_LABELS,
@@ -59,7 +58,7 @@ def list_datasets() -> list[dict]:
     Each dict has keys: ``dataset``, ``collection_id``, ``category``, ``subcategory``,
     ``description``, ``format``, ``frequencies``, ``time_slices``.
     """
-    return [{"dataset": key, "collection_id": cid, **COLLECTION_META[key]} for key, cid in COLLECTIONS.items()]
+    return [{"dataset": key, "collection_id": row.collection, **row.published()} for key, row in DATASETS.items()]
 
 
 @renders(**_VOCABULARY)

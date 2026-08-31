@@ -23,8 +23,7 @@ def _fake(items=None, *, body=b"x"):
     return fake
 
 
-def test_ensure_constants_file_uses_cache(tmp_path):
-    """A cached horizontal-constants file is returned without a metadata call."""
+def test_ensure_constants_file_falls_back_to_cache_when_metadata_is_unreachable(tmp_path):
     out = tmp_path / "bronze" / "forecast_icon_ch1"
     out.mkdir(parents=True)
     f = out / "horizontal_constants_icon-ch1-eps.grib2"
@@ -33,7 +32,7 @@ def test_ensure_constants_file_uses_cache(tmp_path):
     fake = _fake()
     result = constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
-    assert fake.collection_calls == []  # the cached file short-circuits the lookup
+    assert len(fake.collection_calls) == 1
     assert result == f
 
 
@@ -52,14 +51,13 @@ def test_ensure_constants_file_downloads_when_missing(tmp_path):
         Path(filepath).write_bytes(b"x")
 
     fake = _fake()
-    fake.any_collection = {
-        "assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": "https://data.geo.admin.ch/x/hc.grib2"}}
-    }
+    href = "https://data.geo.admin.ch/x/horizontal_constants_icon-ch1-eps.grib2"
+    fake.any_collection = {"assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": href}}}
     fake.stream_hook = fake_download
     path = constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
     assert len(fake.streams) == 1
-    assert path.name == "hc.grib2"
+    assert path.name == "horizontal_constants_icon-ch1-eps.grib2"
     assert path.exists()
 
 
@@ -256,11 +254,41 @@ def test_a_constants_file_already_on_disk_under_its_real_name_is_not_refetched(t
     (out_dir / "horizontal_constants_icon-ch1-eps.grib2").write_bytes(b"x")
 
     fake = _fake()
-    fake.any_collection = {
-        "assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": "https://data.geo.admin.ch/x/hc.grib2"}}
-    }
+    href = "https://data.geo.admin.ch/x/horizontal_constants_icon-ch1-eps.grib2"
+    fake.any_collection = {"assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": href}}}
 
     path = constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
     assert fake.streams == []
     assert path.name == "horizontal_constants_icon-ch1-eps.grib2"
+
+
+def test_a_restated_constants_asset_is_refreshed(tmp_path):
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    path = out_dir / "horizontal_constants_icon-ch1-eps.grib2"
+    path.write_bytes(b"old")
+
+    href = f"https://data.geo.admin.ch/x/{path.name}"
+    fake = _fake(body=b"new")
+    fake.any_collection = {"assets": {path.name: {"href": href, "updated": "2100-01-01T00:00:00+00:00"}}}
+
+    assert constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake) == path
+    assert path.read_bytes() == b"new"
+
+
+def test_a_failed_constants_refresh_falls_back_to_the_complete_cache(tmp_path):
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    path = out_dir / "horizontal_constants_icon-ch1-eps.grib2"
+    path.write_bytes(b"old but complete")
+    href = f"https://data.geo.admin.ch/x/{path.name}"
+    fake = _fake()
+    fake.any_collection = {"assets": {path.name: {"href": href, "updated": "2100-01-01T00:00:00+00:00"}}}
+    fake.fail(href)
+
+    with pytest.warns(UserWarning, match="using the local cache"):
+        result = constants_file("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
+
+    assert result == path
+    assert path.read_bytes() == b"old but complete"

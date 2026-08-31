@@ -307,13 +307,8 @@ def test_convert_passes_the_directories_through(tmp_path):
     assert (tmp_path / "parquet" / "smn" / "smn_d_recent.parquet").exists()
 
 
-def test_a_stack_of_a_kind_with_no_cube_builder_falls_through_to_one_write():
-    """NetCDF combines a multi-file match on read, so ``stack`` is a no-op rather than an error.
-
-    ``api.to_zarr`` used to carry this as a branch of its own; it is the row's
-    ``cube`` that says which method writes the store.
-    """
-    with patch("foehn.registry._write_cube") as cube, patch("foehn.registry.open_grid") as opened:
+def test_registry_delegates_the_complete_zarr_recipe_to_the_grid_reader():
+    with patch("foehn.grids.GridReader.write_store") as write_store:
         registry.write_zarr(
             "surface_derived_grid",
             Path("unused.zarr"),
@@ -323,8 +318,7 @@ def test_a_stack_of_a_kind_with_no_cube_builder_falls_through_to_one_write():
             fetcher=InMemoryFetcher(),
         )
 
-    assert cube.call_count == 0
-    assert opened.call_count == 1
+    assert write_store.call_count == 1
 
 
 def test_write_zarr_refuses_a_tabular_dataset():

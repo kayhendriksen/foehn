@@ -23,6 +23,7 @@ from foehn.meteocsv import (
     group_csv_files,
     indoor_station,
     load_metadata_types,
+    read_normals_txt,
     scan_climate_scenarios_csv,
     scan_indoor_csv,
     scan_standard_csv,
@@ -260,15 +261,7 @@ def convert_normals_to_parquet(dataset: str, workspace: Workspace) -> int:
 
     def convert_one(group: ConversionGroup) -> int:
         source = group.sources[0]
-        df = pl.read_csv(
-            source,
-            separator="\t",
-            skip_rows=8,
-            encoding="latin1",
-            infer_schema_length=None,
-            try_parse_dates=True,
-            truncate_ragged_lines=True,
-        )
+        df = read_normals_txt(source)
         _write_parquet_atomic(df, group.out_path, compression="snappy")
         logger.info("  %s... Converted", source.name)
         return 0

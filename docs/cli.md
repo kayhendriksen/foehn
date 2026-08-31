@@ -16,10 +16,12 @@ foehn list
 
 ## `foehn download [DATASET...]`
 
-Download datasets. Without arguments, downloads all CSV collections. Specify one or more datasets to download specific ones.
+Download datasets. Without arguments, downloads every non-grid dataset. Specify
+one or more datasets to download only those; a named grid dataset works without
+`--grids`.
 
 ```bash
-foehn download              # all CSV collections
+foehn download              # all non-grid datasets
 foehn download smn pollen   # specific datasets only
 ```
 
@@ -29,15 +31,17 @@ foehn download smn pollen   # specific datasets only
 | `--now` | Include realtime "now" time slice |
 | `--all` | Include all time slices (historical + recent + now) |
 | `--full-refresh` | Ignore incremental tracking, re-download everything |
-| `--grids` | Include grid/binary datasets (GRIB2, NetCDF) |
+| `--grids` | Include NetCDF, GRIB2, and HDF5/radar datasets when no datasets are named |
 | `--no-parquet` | Skip CSV to Parquet conversion |
+| `--workers` | Concurrent downloads per dataset; must be positive (default: 8) |
 | `--data-dir PATH` | Output root (default: `./data/meteoswiss`) |
 
 ---
 
 ## `foehn to-parquet [DATASET...]`
 
-Convert downloaded CSVs to Parquet. Without arguments, converts all collections.
+Convert downloaded tabular files to Parquet. Without arguments, visits all
+non-grid datasets and converts the kinds that publish a Parquet representation.
 
 ```bash
 foehn to-parquet            # all collections

@@ -1,31 +1,24 @@
 """Tests for the Polars-based Delta ingestion script."""
 
 import shutil
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
 from conftest import FIXTURES_DIR
 
 from foehn import registry
-
-# We can't import the script directly (it has a top-level pyspark import),
-# so we patch pyspark before importing.
-pyspark_mock = MagicMock()
-with patch.dict("sys.modules", {"pyspark": pyspark_mock, "pyspark.sql": pyspark_mock.sql}):
-    from scripts.ingest_delta import (
-        INGESTED_COLLECTIONS,
-        _apply_column_comments,
-        _build_schema_overrides,
-        _ingest_climate_normals,
-        _ingest_collection,
-        _ingest_metadata,
-        _scan_and_collect,
-        _table_suffix,
-        _validate_identifier,
-        _write_to_delta,
-    )
-
+from scripts.ingest_delta import (
+    INGESTED_DATASETS,
+    _apply_column_comments,
+    _ingest_climate_normals,
+    _ingest_collection,
+    _ingest_metadata,
+    _scan_and_collect,
+    _table_suffix,
+    _validate_identifier,
+    _write_to_delta,
+)
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -87,23 +80,6 @@ def test_table_suffix():
     assert _table_suffix(()) == ""
 
 
-# ── _build_schema_overrides ──────────────────────────────────────────────────
-
-
-def test_build_schema_overrides(smn_bronze_dir):
-    files = sorted((smn_bronze_dir / "smn").glob("ogd-smn_*_d_recent.csv"))
-    metadata_types = {"tre200d0": pl.Float64, "ure200d0": pl.Int64, "nonexistent": pl.Float64}
-    overrides = _build_schema_overrides(files, metadata_types)
-    assert overrides is not None
-    assert overrides["tre200d0"] == pl.Float64
-    assert overrides["ure200d0"] == pl.Int64
-    assert "nonexistent" not in overrides
-
-
-def test_build_schema_overrides_no_metadata():
-    assert _build_schema_overrides([], {}) is None
-
-
 # ── _scan_and_collect ────────────────────────────────────────────────────────
 
 
@@ -114,7 +90,7 @@ def test_scan_and_collect(smn_bronze_dir):
     files = sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))
     metadata_types = load_metadata_types(csv_dir)
 
-    df = _scan_and_collect(files, metadata_types)
+    df = _scan_and_collect("smn", files, metadata_types)
 
     assert isinstance(df, pl.DataFrame)
     assert len(df) == 6  # 2 files × 3 rows
@@ -130,7 +106,7 @@ def test_scan_and_collect_parses_timestamps(smn_bronze_dir):
     files = sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))
     metadata_types = load_metadata_types(csv_dir)
 
-    df = _scan_and_collect(files, metadata_types)
+    df = _scan_and_collect("smn", files, metadata_types)
     assert df["reference_timestamp"].dtype == pl.Datetime
 
 
@@ -141,8 +117,38 @@ def test_scan_and_collect_single_file(smn_bronze_dir):
     files = [sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))[0]]
     metadata_types = load_metadata_types(csv_dir)
 
-    df = _scan_and_collect(files, metadata_types)
+    df = _scan_and_collect("smn", files, metadata_types)
     assert len(df) == 3
+
+
+def test_scan_and_collect_normalizes_preamble_csv(tmp_path):
+    from conftest import CLIMATE_SCENARIOS_CSV
+
+    path = tmp_path / "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv"
+    path.write_text(CLIMATE_SCENARIOS_CSV)
+
+    df = _scan_and_collect("climate_scenarios", [path], {})
+
+    assert df.columns[:4] == ["station_abbr", "variable", "gwl", "date"]
+
+
+def test_scan_and_collect_normalizes_forecast_csv(tmp_path):
+    path = tmp_path / "vnut12.lssw.202605210000.dkl010h0.csv"
+    path.write_text("point_id;point_type_id;Date;dkl010h0\n1;1;202605202100;282\n")
+
+    df = _scan_and_collect("forecast_local", [path], {})
+
+    assert df["reference_timestamp"].dtype == pl.Datetime
+
+
+def test_scan_and_collect_normalizes_archive_csv(tmp_path):
+    path = tmp_path / "ABE_2035_RCP85_DRY.csv"
+    path.write_text("time.yy,time.mm,time.dd,time.hh,tre200h0\n2035,1,1,0,0.3\n")
+
+    df = _scan_and_collect("climate_scenarios_indoor", [path], {})
+
+    assert df["station_abbr"].to_list() == ["ABE"]
+    assert df["reference_timestamp"].dtype == pl.Datetime
 
 
 # ── _write_to_delta ──────────────────────────────────────────────────────────
@@ -163,7 +169,7 @@ def test_write_to_delta(mock_spark):
     mock_spark.createDataFrame.assert_called_once()
     writer = mock_spark.createDataFrame.return_value.write
     writer.mode.assert_called_with("overwrite")
-    writer.mode.return_value.option.assert_called_with("mergeSchema", "true")
+    writer.mode.return_value.option.assert_called_with("overwriteSchema", "true")
 
 
 def test_write_to_delta_append_mode(mock_spark):
@@ -173,6 +179,7 @@ def test_write_to_delta_append_mode(mock_spark):
 
     writer = mock_spark.createDataFrame.return_value.write
     writer.mode.assert_called_with("append")
+    writer.mode.return_value.option.assert_called_with("mergeSchema", "true")
 
 
 # ── _apply_column_comments ───────────────────────────────────────────────────
@@ -341,7 +348,7 @@ def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
 def test_tabular_collections_excludes_binary():
     from foehn import registry
 
-    for key in INGESTED_COLLECTIONS:
+    for key in INGESTED_DATASETS:
         # climate_normals is a ZIP from opendata.swiss, not a STAC collection,
         # so it has no kind — everything else must be a tabular one.
         if key != "climate_normals":
@@ -350,5 +357,5 @@ def test_tabular_collections_excludes_binary():
 
 def test_ingested_collections_includes_climate_normals():
     """It used to be appended by hand; it is a row in the registry now."""
-    assert "climate_normals" in INGESTED_COLLECTIONS
-    assert registry.non_grid_datasets() == INGESTED_COLLECTIONS
+    assert "climate_normals" in INGESTED_DATASETS
+    assert registry.non_grid_datasets() == INGESTED_DATASETS

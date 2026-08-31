@@ -22,7 +22,7 @@ from pathlib import Path
 from foehn.assets import Asset, assets_of, other_extensions
 from foehn.collections import COLLECTIONS
 from foehn.fetch import Fetcher, FetchError
-from foehn.transfer import exists, fetch_all
+from foehn.transfer import already_current, fetch_all
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,8 @@ def ensure_grid_files(
     verify a single-file (GRIB2/radar) match resolves to exactly one file in the
     *collection* — not merely one file in a sparse local cache — and (b) avoid
     handing back a partial multi-file cache left by an interrupted download. Only
-    files missing from disk are actually downloaded. If the listing is
+    files missing or older than their Asset's STAC ``updated`` value are
+    downloaded. If the listing is
     unreachable, it falls back to the cache (with a warning), still enforcing the
     per-format file cap on whatever is cached.
     """
@@ -168,14 +169,24 @@ def ensure_grid_files(
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
     # grid read cannot proceed on a partial set, so the first failure is fatal.
     # Destination de-duplication and the worker pool are the transfer module's.
-    fetch_all(
-        matched,
-        out_dir,
-        fetcher=fetcher,
-        skip=exists,
-        on_error="raise",
-        label="grid file",
-    )
+    try:
+        fetch_all(
+            matched,
+            out_dir,
+            fetcher=fetcher,
+            skip=already_current,
+            on_error="raise",
+            label="grid file",
+        )
+    except FetchError as exc:
+        cached = [out_dir / asset.name for asset in matched]
+        if all(path.exists() for path in cached):
+            warnings.warn(
+                f"Could not refresh {dataset!r} ({type(exc).__name__}); using the complete local cache.",
+                stacklevel=2,
+            )
+            return sorted(cached)
+        raise
     return sorted({out_dir / asset.name for asset in matched})
 
 

@@ -56,6 +56,15 @@ def test_list_datasets_categories():
     assert rows["forecast_local"]["format"] == "CSV"
 
 
+def test_list_datasets_returns_detached_rows():
+    rows = list_datasets()
+    smn = next(row for row in rows if row["dataset"] == "smn")
+    smn["frequencies"].append("made-up")
+
+    fresh = next(row for row in list_datasets() if row["dataset"] == "smn")
+    assert "made-up" not in fresh["frequencies"]
+
+
 def test_download_unknown_dataset_raises():
     with pytest.raises(ValueError, match="Unknown dataset"):
         download("nonexistent")
@@ -355,6 +364,16 @@ def test_load_frequency_on_unsupported_dataset_raises():
 
     with pytest.raises(ValueError, match="does not support frequency"):
         load("forecast_local", frequency="h")
+
+
+def test_load_rejects_a_granularity_not_published_by_the_dataset():
+    with pytest.raises(ValueError, match="does not publish frequency"):
+        load("pollen", frequency="t")
+
+
+def test_load_rejects_a_time_slice_not_published_by_the_dataset():
+    with pytest.raises(ValueError, match="does not publish time_slice"):
+        load("nime", frequency="d", time_slice="now")
 
 
 def _mock_response(content, status_code=200):

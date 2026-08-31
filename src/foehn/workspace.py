@@ -90,5 +90,10 @@ class Workspace:
         """The incremental cursor the CLI advances only after a fully clean run."""
         return self.root / "_last_run.json"
 
+    @property
+    def state_lock(self) -> Path:
+        """The short-lived lock serializing Run state transitions."""
+        return self.root / ".foehn-state.lock"
+
 
 __all__ = ["DATA_DIR_ENV", "DEFAULT_ROOT", "Workspace"]

@@ -21,6 +21,7 @@ one meaning, and ``downloaded + skipped + failed == total_assets`` holds.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Literal
 
 from foehn import atomicwrite
+from foehn.archives import safe_extract
 from foehn.assets import Asset
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import utf8_meteoswiss_csv
@@ -127,8 +129,9 @@ def already_current(asset: Asset, filepath: Path) -> bool:
 
 
 def stream_to_disk(fetcher: Fetcher, asset: Asset, path: Path, etag: str | None) -> WriteResult:
-    """Stream a binary asset straight to disk. Used for GRIB2, HDF5, NetCDF and ZIP."""
-    fetcher.stream(asset.href, path)
+    """Stream a binary Asset through Staging, independent of its Fetcher Adapter."""
+    with atomicwrite.staged(path, suffix=".transfer") as staged:
+        fetcher.stream(asset.href, staged)
     return WriteResult(downloaded=True)
 
 
@@ -148,6 +151,55 @@ def csv_to_disk(fetcher: Fetcher, asset: Asset, path: Path, etag: str | None) ->
         return WriteResult(downloaded=False)
     atomicwrite.write_bytes(path, utf8_meteoswiss_csv(fetched.body))
     return WriteResult(downloaded=True, etag=fetched.etag)
+
+
+_MATERIALIZATION_MARKER = ".foehn-complete.json"
+
+
+def materialization_current(asset: Asset, out_dir: Path) -> bool:
+    """Whether ``out_dir`` is a complete materialization of this Archive Asset."""
+    marker = out_dir / _MATERIALIZATION_MARKER
+    try:
+        recorded = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(recorded, dict) or recorded.get("href") != asset.href:
+        return False
+    return not asset.updated or recorded.get("updated") == asset.updated
+
+
+def materialize_archive(
+    asset: Asset,
+    out_dir: Path,
+    *,
+    fetcher: Fetcher,
+    force: bool = False,
+    timeout: int = 120,
+) -> DownloadResult:
+    """Fetch and extract one Archive Asset as a staged, complete Bronze directory."""
+    if not force and materialization_current(asset, out_dir):
+        return DownloadResult(total_assets=1, skipped=1)
+
+    def write(fetcher: Fetcher, asset: Asset, path: Path, _etag: str | None) -> WriteResult:
+        with atomicwrite.staged(path, suffix=".transfer") as staged:
+            fetcher.stream(asset.href, staged, timeout=timeout)
+        return WriteResult(downloaded=True)
+
+    with atomicwrite.staged_directory(out_dir) as staged_dir:
+        result = fetch_all(
+            [asset],
+            staged_dir,
+            fetcher=fetcher,
+            write=write,
+            on_error="raise",
+            label="archive",
+        )
+        safe_extract(staged_dir / asset.name, staged_dir)
+        atomicwrite.write_text(
+            staged_dir / _MATERIALIZATION_MARKER,
+            json.dumps({"href": asset.href, "updated": asset.updated}, sort_keys=True),
+        )
+    return result
 
 
 # --- The engine ---
@@ -210,6 +262,9 @@ def fetch_all(
     Returns:
         A :class:`DownloadResult` whose four counts sum to ``total_assets``.
     """
+    if workers <= 0:
+        raise ValueError("workers must be a positive integer")
+
     assets = list(assets)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -289,5 +344,7 @@ __all__ = [
     "csv_to_disk",
     "exists",
     "fetch_all",
+    "materialization_current",
+    "materialize_archive",
     "stream_to_disk",
 ]

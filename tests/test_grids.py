@@ -533,8 +533,9 @@ def test_to_zarr_with_noncf_time_reopens_cleanly(fetcher, tmp_path):
     )
     out_dir = tmp_path / "bronze" / "climate_normals_grid"
     out_dir.mkdir(parents=True)
-    # netcdf4 engine preserves the non-CF units attribute on the time axis
-    ds.to_netcdf(out_dir / "normals_yearly.nc", engine="netcdf4")
+    # h5netcdf preserves the non-CF units without netCDF4's deprecated NumPy
+    # shape assignment during synthetic fixture creation.
+    ds.to_netcdf(out_dir / "normals_yearly.nc", engine="h5netcdf")
 
     store = to_zarr("climate_normals_grid", data_dir=tmp_path)
     roundtrip = xr.open_zarr(store)  # default CF decode must not throw
@@ -570,9 +571,15 @@ def test_radar_cube_refuses_a_composite_with_no_time(fetcher, tmp_path):
     fetcher.any_items = _items_for("cpc2613000000_00060.001.h5")
     base = tmp_path / "bronze" / "radar_precip"
     write_odim_composite(base / "cpc2613000000_00060.001.h5", date="", time="")
+    store = Workspace(tmp_path).zarr("radar_precip", "cpc26130")
+    store.mkdir(parents=True)
+    (store / "complete").write_text("previous")
 
     with pytest.raises(ValueError, match="no time coordinate"):
         to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
+
+    assert (store / "complete").read_text() == "previous"
+    assert not (store / "zarr.json").exists()
 
 
 def test_radar_cube_keeps_only_the_requested_variables(fetcher, tmp_path):
@@ -606,8 +613,10 @@ def test_netcdf_open_points_at_match_when_files_will_not_combine(fetcher, tmp_pa
     base = tmp_path / "bronze" / "surface_derived_grid"
     base.mkdir(parents=True)
     # Same variable, incompatible shapes on the same dim: combine_by_coords cannot merge them.
-    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(base / "a.nc")
-    xr.Dataset({"v": (("x", "y"), np.zeros((3, 2)))}, coords={"x": [0, 1, 2], "y": [0, 1]}).to_netcdf(base / "b.nc")
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(base / "a.nc", engine="h5netcdf")
+    xr.Dataset({"v": (("x", "y"), np.zeros((3, 2)))}, coords={"x": [0, 1, 2], "y": [0, 1]}).to_netcdf(
+        base / "b.nc", engine="h5netcdf"
+    )
 
     with pytest.raises(ValueError, match="narrow to a coherent set with match="):
         open_dataset("surface_derived_grid", data_dir=tmp_path)

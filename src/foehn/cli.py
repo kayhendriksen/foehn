@@ -14,7 +14,7 @@ from foehn import registry
 from foehn.api import METADATA_TABLES, list_datasets, metadata
 from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS, DEFAULT_TIME_SLICE
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
-from foehn.state import load_last_run, save_last_run
+from foehn.state import load_last_run, run_watermark, save_last_run
 from foehn.workspace import Workspace
 
 
@@ -105,6 +105,7 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
     fetcher = default_fetcher()
+    watermark = run_watermark()
 
     workers = args.workers
     failures = 0
@@ -123,7 +124,7 @@ def cmd_download(args: argparse.Namespace) -> None:
             failures += registry.convert(ds, workspace)
 
     if failures == download_failures == 0:
-        save_last_run(workspace)
+        save_last_run(workspace, watermark)
     else:
         # Don't advance the incremental cursor if anything failed — otherwise the
         # next run filters out the still-broken items as "already seen". A failed
@@ -302,7 +303,7 @@ def main():
     # --- foehn list ---
     sub_list = subparsers.add_parser("list", help="List available datasets")
     sub_list.add_argument("--category", "-c", help=f"Filter by category ({', '.join(sorted(CATEGORIES))})")
-    sub_list.add_argument("--format", "-f", help="Filter by format (CSV, GRIB2, NetCDF)")
+    sub_list.add_argument("--format", "-f", help="Filter by format (CSV, TXT, NetCDF, GRIB2, HDF5)")
     _add_common_args(sub_list)
     sub_list.set_defaults(func=cmd_list)
 
@@ -314,7 +315,7 @@ def main():
     sub_dl.add_argument("--now", action="store_true", help="Include realtime 'now' time slice")
     sub_dl.add_argument("--all", action="store_true", help="Include all time slices (historical + recent + now)")
     sub_dl.add_argument("--full-refresh", action="store_true", help="Ignore incremental tracking, re-download all")
-    sub_dl.add_argument("--grids", action="store_true", help="Include grid/binary datasets (GRIB2, NetCDF)")
+    sub_dl.add_argument("--grids", action="store_true", help="Include grid datasets (NetCDF, GRIB2, HDF5/radar)")
     sub_dl.add_argument("--no-parquet", action="store_true", help="Skip CSV → Parquet conversion")
     sub_dl.add_argument(
         "--workers",

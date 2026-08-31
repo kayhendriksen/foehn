@@ -18,7 +18,8 @@ from pathlib import Path
 
 from foehn.assets import collection_assets
 from foehn.collections import COLLECTIONS
-from foehn.fetch import Fetcher
+from foehn.fetch import Fetcher, FetchError
+from foehn.transfer import already_current, fetch_all
 from foehn.workspace import Workspace
 
 # Parsed ICON/KENDA cell lat/lon — the constants GRIB is ~11 MB and the same grid
@@ -37,19 +38,36 @@ def constants_file(dataset: str, workspace: Workspace, *, fetcher: Fetcher) -> P
     """
     out_dir = workspace.bronze(dataset)
     cached = sorted(out_dir.glob("horizontal_constants*.grib2"))
-    if cached:
-        return cached[0]
-
-    meta = fetcher.collection(COLLECTIONS[dataset])
+    try:
+        meta = fetcher.collection(COLLECTIONS[dataset])
+    except FetchError:
+        if cached:
+            return cached[0]
+        raise
     constants = collection_assets(meta, key_contains="horizontal_constants")
     if not constants:
-        return None
+        return cached[0] if cached else None
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    href = constants[0].href
-    path = out_dir / constants[0].name
-    if not path.exists():
-        fetcher.stream(href, path)
+    asset = constants[0]
+    path = out_dir / asset.name
+    try:
+        fetch_all(
+            [asset],
+            out_dir,
+            fetcher=fetcher,
+            skip=already_current,
+            on_error="raise",
+            label="ICON constants",
+        )
+    except FetchError as exc:
+        if cached:
+            warnings.warn(
+                f"Could not refresh ICON constants for {dataset!r} ({type(exc).__name__}); using the local cache.",
+                stacklevel=2,
+            )
+            return cached[0]
+        raise
     return path
 
 

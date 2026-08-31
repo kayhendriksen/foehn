@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from foehn.atomicwrite import staged, write_bytes, write_text
+from foehn.atomicwrite import staged, staged_directory, write_bytes, write_text
 
 
 def test_bytes_land_at_the_target(tmp_path):
@@ -71,5 +71,47 @@ def test_the_staged_file_sits_beside_the_target_under_the_given_suffix(tmp_path)
         tmp.write_bytes(b"x")
         seen = sorted(p.name for p in tmp_path.iterdir())
 
-    assert seen == ["grid.grib2.part"]
+    assert len(seen) == 1
+    assert seen[0].startswith(".grid.grib2.")
+    assert seen[0].endswith(".part")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["grid.grib2"]
+
+
+def test_staged_directory_replaces_the_complete_member_set(tmp_path):
+    target = tmp_path / "cube.zarr"
+    target.mkdir()
+    (target / "obsolete").write_text("old")
+
+    with staged_directory(target) as staged_dir:
+        (staged_dir / "fresh").write_text("new")
+        assert (target / "obsolete").exists()
+
+    assert not (target / "obsolete").exists()
+    assert (target / "fresh").read_text() == "new"
+
+
+def test_staged_directory_failure_preserves_the_previous_version(tmp_path):
+    target = tmp_path / "cube.zarr"
+    target.mkdir()
+    (target / "complete").write_text("old")
+
+    with pytest.raises(OSError, match="disk full"), staged_directory(target) as staged_dir:
+        (staged_dir / "partial").write_text("new")
+        raise OSError("disk full")
+
+    assert (target / "complete").read_text() == "old"
+    assert not (target / "partial").exists()
+
+
+def test_overlapping_directory_builds_never_share_staging(tmp_path):
+    target = tmp_path / "cube.zarr"
+
+    with staged_directory(target) as first:
+        (first / "first").write_text("complete")
+        with staged_directory(target) as second:
+            (second / "second").write_text("complete")
+            assert first != second
+        assert (target / "second").exists()
+
+    assert (target / "first").exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["cube.zarr"]

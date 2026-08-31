@@ -27,7 +27,7 @@ from typing import TypedDict
 
 import polars as pl
 
-from foehn.collections import COLLECTIONS, DERIVED_TIMESTAMP_KINDS, NO_GRANULARITY_KINDS, kind
+from foehn.collections import COLLECTIONS, DERIVED_TIMESTAMP_KINDS, NO_GRANULARITY_KINDS, DatasetKind, kind
 
 logger = logging.getLogger(__name__)
 
@@ -259,12 +259,37 @@ def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataTyp
     inferred rows once per file rather than holding the file, and the converter's
     groups are whole historical series.
     """
+    overrides = schema_overrides
+    if overrides:
+        try:
+            header = pl.read_csv(path, separator=";", n_rows=0, infer_schema_length=0).columns
+            overrides = {column: dtype for column, dtype in overrides.items() if column in header}
+        except Exception:
+            overrides = None
     return pl.scan_csv(
         path,
         separator=";",
         try_parse_dates=True,
-        schema_overrides=schema_overrides or None,
+        schema_overrides=overrides or None,
         infer_schema_length=10_000,
+    )
+
+
+def read_metadata_csv(path: Path) -> pl.DataFrame:
+    """Read one Collection Metadata table with the shared CSV conventions."""
+    return pl.read_csv(path, separator=";", infer_schema_length=10_000, try_parse_dates=True)
+
+
+def read_normals_txt(path: Path) -> pl.DataFrame:
+    """Read one Direct ZIP climate-normal table from Bronze."""
+    return pl.read_csv(
+        path,
+        separator="\t",
+        skip_rows=8,
+        encoding="latin1",
+        infer_schema_length=None,
+        try_parse_dates=True,
+        truncate_ragged_lines=True,
     )
 
 
@@ -320,6 +345,8 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     are upstream naming rules, and two copies of them drift.
     """
     csv_files = [f for f in sorted(csv_dir.glob("*.csv")) if "_meta_" not in f.name]
+    if kind(collection_key) is DatasetKind.ARCHIVE_CSV:
+        csv_files = [path for path in csv_files if indoor_station(path.name) is not None]
     groups: dict[tuple[str, ...], list[Path]] = {}
 
     # No granularity in the filename at all (forecast_local's vnut12.lssw.* names,
@@ -524,3 +551,38 @@ def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
         truncate_ragged_lines=True,
     )
     return _add_climate_scenarios_columns(lf, station, variable, gwl)
+
+
+def scan_dataset_csv(
+    path: Path,
+    dataset: str,
+    *,
+    metadata_types: dict[str, type[pl.DataType]] | None = None,
+) -> pl.LazyFrame:
+    """Lazily normalize one Bronze CSV according to its Dataset kind."""
+    dataset_kind = kind(dataset)
+    if dataset_kind is DatasetKind.PREAMBLE_CSV:
+        return scan_climate_scenarios_csv(path)
+    if dataset_kind is DatasetKind.ARCHIVE_CSV:
+        return scan_indoor_csv(path)
+    if dataset_kind in (DatasetKind.STANDARD_CSV, DatasetKind.FORECAST_CSV):
+        return derive_timestamp(scan_standard_csv(path, schema_overrides=metadata_types), dataset)
+    raise ValueError(f"Dataset {dataset!r} does not contain CSV data.")
+
+
+def read_dataset_csv(
+    path: Path,
+    dataset: str,
+    *,
+    metadata_types: dict[str, type[pl.DataType]] | None = None,
+) -> pl.DataFrame:
+    """Eager fallback matching :func:`scan_dataset_csv`'s normalized frame."""
+    dataset_kind = kind(dataset)
+    if dataset_kind is DatasetKind.PREAMBLE_CSV:
+        return parse_climate_scenarios_csv(path.read_bytes(), path.name)
+    if dataset_kind is DatasetKind.ARCHIVE_CSV:
+        return parse_indoor_csv(path.read_bytes(), path.name)
+    if dataset_kind in (DatasetKind.STANDARD_CSV, DatasetKind.FORECAST_CSV):
+        frame = parse_csv_bytes(utf8_meteoswiss_csv(path.read_bytes()), metadata_types)
+        return derive_timestamp(frame, dataset)
+    raise ValueError(f"Dataset {dataset!r} does not contain CSV data.")

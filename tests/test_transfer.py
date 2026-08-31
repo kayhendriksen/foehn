@@ -94,6 +94,23 @@ def test_on_error_raise_surfaces_the_first_failure(tmp_path):
         fetch_all([asset("bad.nc")], tmp_path, fetcher=fetcher, on_error="raise")
 
 
+def test_stream_writer_stages_even_when_the_fetcher_adapter_does_not(tmp_path):
+    target = tmp_path / "grid.nc"
+    target.write_bytes(b"complete")
+    fetcher = InMemoryFetcher()
+
+    def fail_mid_stream(_url, path):
+        path.write_bytes(b"partial")
+        raise OSError("connection dropped")
+
+    fetcher.stream_hook = fail_mid_stream
+    result = fetch_all([asset("grid.nc")], tmp_path, fetcher=fetcher)
+
+    assert result.failed == 1
+    assert target.read_bytes() == b"complete"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["grid.nc"]
+
+
 # --- ETag bookkeeping ---
 
 
@@ -159,6 +176,11 @@ def test_results_add(tmp_path):
 def test_empty_input_is_a_noop(tmp_path):
     result = fetch_all([], tmp_path, fetcher=InMemoryFetcher(), write=stream_to_disk)
     assert result == DownloadResult()
+
+
+def test_workers_must_be_positive_even_for_empty_input(tmp_path):
+    with pytest.raises(ValueError, match="workers must be a positive integer"):
+        fetch_all([], tmp_path, fetcher=InMemoryFetcher(), workers=0)
 
 
 # --- already_current ---
