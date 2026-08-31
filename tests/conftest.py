@@ -44,16 +44,16 @@ def fetcher(monkeypatch):
 def _clear_process_caches():
     """Reset foehn's process-level memoisation between tests.
 
-    ``grids`` memoises parsed ICON coordinates for the life of the process. Left
+    ``icon`` memoises parsed cell coordinates for the life of the process. Left
     alone, one test's cached value is served to the next, which makes results
     depend on test order. (Listings are memoised on the fetcher itself, so a
     fresh fetcher per test already starts cold.)
     """
-    from foehn.grids import _ICON_COORDS_CACHE
+    from foehn import icon
 
-    _ICON_COORDS_CACHE.clear()
+    icon.clear_cache()
     yield
-    _ICON_COORDS_CACHE.clear()
+    icon.clear_cache()
 
 
 def make_zip(files: dict[str, bytes]) -> bytes:

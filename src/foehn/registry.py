@@ -40,11 +40,11 @@ from foehn.downloads import (
     stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.gridfiles import ensure_grid_files
 from foehn.grids import (
     GridReader,
     cube_grib2,
     cube_radar,
-    ensure_grid_files,
     open_grib2,
     open_netcdf,
     open_radar,

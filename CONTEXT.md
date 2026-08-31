@@ -256,3 +256,12 @@ _Avoid_: query, params, options
   `load()` loaded it. Resolved: a tool docstring is an interface, so it is
   rendered from the same tables the guide uses. Placeholders are `$name`, filled
   by `_renders` under the `@mcp.tool` decorator.
+- The gridded read path was one 800-line module: the STAC listing and fetch that
+  puts a match's files in **Bronze**, upstream's ODIM and ICON file conventions,
+  and the **Grid readers** themselves. So the code that parses a radar composite
+  imported the download engine, and the ICON coordinate cache — the one piece of
+  process state in the path — was a private global the test suite reached into
+  by name. Resolved: `gridfiles` fetches (what **Transfer** is to the download
+  paths), `odim` and `icon` carry upstream's conventions (what **MeteoSwiss
+  CSV** is to the tabular path), and `grids` is the **Grid readers**. The same
+  four-way split the tabular path already had.
