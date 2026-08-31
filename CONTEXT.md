@@ -285,6 +285,20 @@ _Avoid_: query, params, options
   state** reached into **Transfer**, the download engine, for a filesystem
   primitive that was never the download path's to own. Resolved: `atomicwrite` is
   a leaf and `test_layering` fails a module that hand-rolls the move itself.
+- The Zarr store's name — `<dataset>` unfiltered, `<dataset>__<match>` otherwise —
+  was derived in `api` and handed to `Workspace.zarr()` as a finished string, so
+  that method documented the encoding as its caller's job. The one path foehn
+  spelled out above the seam. Resolved: `Workspace.zarr(dataset, match)` takes
+  the two facts the name is made of, and the **Workspace** owns this rule like
+  every other one about the layout.
+- `registry.write_zarr` routed to the right writer and then performed the write
+  itself: move the non-CF time units aside, check for dask, rechunk, call
+  `grids.write_zarr`. So the routing table knew the recipe, three names existed
+  in `grids`' interface only so it could sequence them, and `cube_grib2` stated
+  half the same recipe a second time inside `grids` on its own way out.
+  Resolved: `grids.write_zarr` takes `rechunk=` and owns every step; `sanitize`
+  and the dask check are private to it, and the registry picks the method.
+
 - `api` — the public surface — held one stage outright rather than delegating:
   the **Metadata tables** were fetched, decoded and renamed inline, so it was the
   one entry point taking no **Fetcher** and reachable only through the

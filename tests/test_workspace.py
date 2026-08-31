@@ -93,6 +93,20 @@ def test_to_zarr_store_lands_in_the_workspace(tmp_path, monkeypatch):
     with patch("foehn.registry.write_zarr") as mock:
         store = foehn.to_zarr("surface_derived_grid", match="rhiresd")
 
-    assert store == Workspace(tmp_path).zarr("surface_derived_grid__rhiresd")
+    assert store == Workspace(tmp_path).zarr("surface_derived_grid", "rhiresd")
     assert mock.call_args.args[1] == store
     assert mock.call_args.kwargs["workspace"] == Workspace(tmp_path)
+
+
+def test_a_match_narrows_the_store_name(tmp_path):
+    """Two filtered slices of one collection must not overwrite each other.
+
+    ``api`` derived this name and handed the result to :meth:`Workspace.zarr` —
+    the one path foehn spelled out above the seam rather than here, and the
+    reason that method used to document the encoding as its caller's job.
+    """
+    workspace = Workspace(tmp_path)
+    assert workspace.zarr("radar_precip") == tmp_path / "zarr" / "radar_precip.zarr"
+    assert workspace.zarr("radar_precip", "cpc2613/00") == tmp_path / "zarr" / "radar_precip__cpc2613_00.zarr"
+    # A match of nothing but separators still has to name a directory.
+    assert workspace.zarr("radar_precip", "//") == tmp_path / "zarr" / "radar_precip__match.zarr"

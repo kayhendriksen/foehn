@@ -49,11 +49,9 @@ from foehn.grids import (
     open_grib2,
     open_netcdf,
     open_radar,
-    require_dask,
     require_grib2,
     require_netcdf,
     require_radar,
-    sanitize_noncf_time_units,
     select_variables,
 )
 from foehn.grids import write_zarr as grids_write_zarr
@@ -500,7 +498,8 @@ def write_zarr(
     ``stack`` asks for a cube; whether the kind *has* a cube builder is the row's
     to say. NetCDF has none and needs none — a multi-file ``match`` combines on
     read — so it falls through to the single write rather than raising, and
-    ``api.to_zarr`` no longer has to know that.
+    ``api.to_zarr`` no longer has to know that. Which method, not how: what a
+    Dataset needs doing to it on the way to a store is ``grids.write_zarr``'s.
     """
     reader = _grid_reader(dataset)
     if stack and rechunk:
@@ -521,13 +520,12 @@ def write_zarr(
         )
         return
 
-    ds = sanitize_noncf_time_units(
-        open_grid(dataset, match=match, variables=variables, workspace=workspace, fetcher=fetcher)
+    grids_write_zarr(
+        open_grid(dataset, match=match, variables=variables, workspace=workspace, fetcher=fetcher),
+        store,
+        mode,
+        rechunk=rechunk,
     )
-    if rechunk:
-        require_dask()
-        ds = ds.chunk(rechunk)
-    grids_write_zarr(ds, store, mode)
 
 
 def convert(dataset: str, workspace: Workspace) -> int:
