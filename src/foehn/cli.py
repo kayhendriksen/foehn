@@ -12,7 +12,7 @@ import polars as pl
 
 from foehn import registry
 from foehn.api import METADATA_TABLES, list_datasets, metadata
-from foehn.collections import COLLECTIONS
+from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.state import load_last_run, save_last_run
 from foehn.workspace import Workspace
@@ -66,21 +66,13 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("No datasets match the given filters.")
         return
 
-    # Group by category
-    categories = {
-        "A": "Ground-based measurements",
-        "C": "Climate data",
-        "D": "Radar data",
-        "E": "Forecast data",
-    }
-
     current_cat = None
     for row in rows:
         cat = row["category"]
         if cat != current_cat:
             if current_cat is not None:
                 print()
-            label = categories.get(cat, cat)
+            label = CATEGORY_LABELS.get(cat, cat)
             print(f"── {cat}: {label} ──")
             print(f"  {'Dataset':<32} {'Format':<8} {'Frequency':<16} Description")
             current_cat = cat
@@ -309,7 +301,7 @@ def main():
 
     # --- foehn list ---
     sub_list = subparsers.add_parser("list", help="List available datasets")
-    sub_list.add_argument("--category", "-c", help="Filter by category (A, C, D, E)")
+    sub_list.add_argument("--category", "-c", help=f"Filter by category ({', '.join(sorted(CATEGORIES))})")
     sub_list.add_argument("--format", "-f", help="Filter by format (CSV, GRIB2, NetCDF)")
     _add_common_args(sub_list)
     sub_list.set_defaults(func=cmd_list)

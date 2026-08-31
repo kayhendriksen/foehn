@@ -57,11 +57,13 @@ CSV FORMAT
 
 DATA CATEGORIES (per MeteoSwiss documentation)
 ----------------------------------------------
-  A  Ground-based measurements       — CSV, time-sliced (historical/recent/now)
-  B  Atmosphere measurements         — NOT YET RELEASED (radio soundings etc.)
-  C  Climate data                    — CSV + NetCDF + TXT (varies by sub-type)
-  D  Radar data                      — HDF5 (binary grid data)
-  E  Forecast data                   — GRIB2 (ICON models + KENDA analysis) + CSV (local forecasts)
+Named in CATEGORY_LABELS below — the four foehn carries. What each ships:
+  A  CSV, time-sliced (historical/recent/now)
+  C  CSV + NetCDF + TXT (varies by sub-type)
+  D  HDF5 (binary grid data)
+  E  GRIB2 (ICON models + KENDA analysis) + CSV (local forecasts)
+  B  Atmosphere measurements — NOT YET RELEASED (radio soundings etc.), so it has
+     no CATEGORY_LABELS row and nothing offers it as a filter.
 
 WHERE COLLECTION METADATA LIVES (by format)
 -------------------------------------------
@@ -522,6 +524,21 @@ GRANULARITY_LABELS: dict[str, str] = {
 }
 
 GRANULARITIES = frozenset(GRANULARITY_LABELS)
+
+# MeteoSwiss's own A–E classification, and what each letter is called. foehn
+# reports a category and filters on one but never routes on it — which is why
+# this is a label table and not a :class:`DatasetKind`. Category B exists
+# upstream but is unreleased, so it has no row: a letter here is a letter
+# ``foehn list --category`` and the MCP catalogue will offer. Both used to keep
+# their own copy, one as a dict and one as a set.
+CATEGORY_LABELS: dict[str, str] = {
+    "A": "Ground-based measurements",
+    "C": "Climate data",
+    "D": "Radar data",
+    "E": "Forecast data",
+}
+
+CATEGORIES = frozenset(CATEGORY_LABELS)
 
 
 # MeteoSwiss chunks the high-frequency historical series by decade, so the slice
