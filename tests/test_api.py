@@ -170,6 +170,24 @@ def test_load_forecast_local_adds_reference_timestamp(fetcher):
     assert df["reference_timestamp"][0].year == 2026
 
 
+def test_load_forecast_local_keeps_its_timestamp_source_under_columns(fetcher):
+    """An explicit columns= narrows the parse; the derivation's source has to survive it.
+
+    Which column that is is a fact about the kind — it used to be a
+    ``dataset == "forecast_local"`` comparison inside the reader.
+    """
+    fetcher.any_collection = {"assets": {}}
+    href = "https://data.geo.admin.ch/x/vnut12.lssw.202605210000.dkl010h0.csv"
+    fetcher.any_items = [{"id": "x", "properties": {"datetime": "2026-05-21"}, "assets": {"d": {"href": href}}}]
+    fetcher.default_body = _FORECAST_LOCAL_CSV
+
+    df = load("forecast_local", columns=["dkl010h0"], sort="asc")
+
+    assert "reference_timestamp" in df.columns
+    assert df["reference_timestamp"].dtype == pl.Datetime
+    assert df["dkl010h0"].to_list() == [282, 315]
+
+
 def test_load_forecast_local_date_filter_applies(fetcher):
     """forecast_local rows are filtered by date even though its timestamp is derived.
 

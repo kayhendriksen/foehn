@@ -35,13 +35,14 @@ from foehn.client import check_zip_size
 from foehn.collections import COLLECTIONS, DatasetKind, kind
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import (
-    add_forecast_local_timestamp,
     add_indoor_columns,
     decode_meteoswiss_csv,
+    derive_timestamp,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
     parse_indoor_filename,
     parse_metadata_types,
+    source_columns_for,
     utf8_meteoswiss_csv,
 )
 
@@ -317,8 +318,8 @@ def read_standard(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Dat
         wanted_columns = {"station_abbr", "reference_timestamp", *filters.columns}
         if filters.drop_null:
             wanted_columns.add(filters.drop_null)
-        if dataset == "forecast_local":
-            wanted_columns.add("Date")  # reference_timestamp is derived from it
+        # Whatever this kind derives its timestamp from has to survive the projection.
+        wanted_columns |= source_columns_for(dataset)
 
     def _fetch(href: str) -> pl.DataFrame:
         # Zero-copy when the payload is already UTF-8 (the usual case): these are
@@ -328,20 +329,18 @@ def read_standard(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Dat
         # Drop the rows this call can never return *before* they reach the
         # concat. Every frame is otherwise held in full until the whole matched
         # set is materialised, so a narrow year= over many stations peaked at the
-        # size of the entire time slice. forecast_local has no reference_timestamp
-        # of its own — derive it here so its frames can be narrowed too.
-        if dataset == "forecast_local":
-            frame = add_forecast_local_timestamp(frame)
+        # size of the entire time slice. A kind that derives its timestamp gets
+        # it here, so its frames can be narrowed too.
+        frame = derive_timestamp(frame, dataset)
         if "reference_timestamp" in frame.columns:
             frame = apply_time_filters(frame, filters)
         return frame
 
     df = pl.concat(_fetch_frames(_fetch, csv_hrefs, filters.workers), how="diagonal_relaxed")
 
-    # forecast_local has no reference_timestamp; derive it from the compact Date column.
-    if dataset == "forecast_local":
-        df = add_forecast_local_timestamp(df)
-    return df
+    # Again on the concatenation: a station whose file was empty contributes no
+    # rows above, and the diagonal concat can still leave the column absent.
+    return derive_timestamp(df, dataset)
 
 
 def read_preamble(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:

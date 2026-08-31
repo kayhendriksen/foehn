@@ -14,12 +14,14 @@ from conftest import CLIMATE_SCENARIOS_CSV
 from foehn.meteocsv import (
     add_forecast_local_timestamp,
     decode_meteoswiss_csv,
+    derive_timestamp,
     group_csv_files,
     load_metadata_types,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
     parse_metadata_types,
     scan_climate_scenarios_csv,
+    source_columns_for,
 )
 from foehn.workspace import Workspace
 
@@ -218,3 +220,29 @@ def test_add_forecast_local_timestamp():
 def test_add_forecast_local_timestamp_noop_without_date():
     df = pl.DataFrame({"a": [1]})
     assert add_forecast_local_timestamp(df).columns == ["a"]
+
+
+# --- which kinds derive a timestamp, and from what ---
+
+
+def test_derive_timestamp_is_a_no_op_for_kinds_that_ship_one():
+    """Callers derive unconditionally; the kind decides whether anything happens."""
+    frame = pl.DataFrame({"Date": [202605202100], "v": [1]})
+    assert derive_timestamp(frame, "smn").equals(frame)
+    assert "reference_timestamp" in derive_timestamp(frame, "forecast_local").columns
+
+
+def test_derive_timestamp_leaves_an_existing_column_alone():
+    frame = pl.DataFrame({"Date": [202605202100], "reference_timestamp": [None]})
+    assert derive_timestamp(frame, "forecast_local").equals(frame)
+
+
+def test_only_the_deriving_kinds_need_extra_source_columns():
+    """The two facts agree: a kind needs a source column exactly when it derives."""
+    from foehn import registry
+    from foehn.collections import DERIVED_TIMESTAMP_KINDS, kind
+
+    for dataset in registry.tabular_datasets():
+        needs = source_columns_for(dataset)
+        assert bool(needs) is (kind(dataset) in DERIVED_TIMESTAMP_KINDS), dataset
+    assert source_columns_for("forecast_local") == {"Date"}

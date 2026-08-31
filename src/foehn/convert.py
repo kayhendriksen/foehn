@@ -17,9 +17,9 @@ from typing import Literal
 import polars as pl
 
 from foehn.meteocsv import (
-    add_forecast_local_timestamp,
     add_indoor_columns,
     column_from_dtype_error,
+    derive_timestamp,
     group_csv_files,
     load_metadata_types,
     parse_indoor_filename,
@@ -147,8 +147,7 @@ def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[
                     for f in group.sources
                 ]
                 combined = pl.concat(lazy_frames, how="diagonal_relaxed")
-                if collection_key == "forecast_local":
-                    combined = add_forecast_local_timestamp(combined)
+                combined = derive_timestamp(combined, collection_key)
                 _write_parquet_atomic(combined, group.out_path)
                 break
             except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:

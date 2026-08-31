@@ -457,6 +457,13 @@ KIND_OF: dict[str, DatasetKind] = {
 # which is what NO_GRANULARITY_COLLECTIONS used to be.
 NO_GRANULARITY_KINDS = frozenset({DatasetKind.PREAMBLE_CSV, DatasetKind.FORECAST_CSV})
 
+# Kinds whose files carry no ``reference_timestamp`` column and derive one from
+# something else in the row. Stated here because both the load path and the
+# convert stage need it and neither can ask the registry — it sits above them.
+# It was a ``dataset == "forecast_local"`` comparison at four sites, three of
+# them in a function that had already resolved the kind.
+DERIVED_TIMESTAMP_KINDS = frozenset({DatasetKind.FORECAST_CSV})
+
 
 def kind(dataset: str) -> DatasetKind:
     """Return a dataset's :class:`DatasetKind`.
