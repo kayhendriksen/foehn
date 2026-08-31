@@ -16,13 +16,21 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "foehn"
 
 
 def _imports(module: str) -> set[str]:
-    """Sibling modules *module* imports from ``foehn``."""
+    """Sibling modules *module* imports from ``foehn``.
+
+    Both spellings count: ``from foehn.icon import attach_lonlat`` names the
+    module in ``node.module``, ``from foehn import icon`` names it in the alias.
+    Reading only the first would have let the second open any edge it liked.
+    """
     tree = ast.parse((SRC / f"{module}.py").read_text(encoding="utf-8"))
-    found = {
-        node.module.split(".")[1]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("foehn.")
-    }
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if node.module.startswith("foehn."):
+            found.add(node.module.split(".")[1])
+        elif node.module == "foehn":
+            found |= {alias.name for alias in node.names}
     return found - {module}
 
 
@@ -83,7 +91,37 @@ def test_meteocsv_is_the_bottom_of_the_read_stack():
     assert _imports("meteocsv") <= {"collections"}
 
 
-@pytest.mark.parametrize("module", ["collections", "workspace", "_urls", "archives"])
+@pytest.mark.parametrize("module", ["collections", "workspace", "_urls", "archives", "odim"])
 def test_the_leaf_modules_import_no_foehn(module):
-    """Dataset facts, the layout, URL validation and the ZIP guards sit under everything."""
+    """Dataset facts, the layout, URL validation, the ZIP guards and ODIM sit under everything.
+
+    ``odim`` is upstream's radar file format and nothing else: one path in, one
+    Dataset out. It takes ``xr`` as an argument rather than importing it, so it
+    does not even reach the optional-dependency guard.
+    """
     assert _imports(module) == set()
+
+
+def test_the_grid_readers_do_not_know_how_files_arrive():
+    """``grids`` opens what it is handed; listing and fetching are ``gridfiles``.
+
+    All three used to be one module, so the reader that parses an ODIM composite
+    imported the download engine.
+    """
+    deps = _imports("grids")
+    assert "transfer" not in deps
+    assert "assets" not in deps
+    assert "gridfiles" not in deps
+
+
+def test_the_grid_fetching_has_one_consumer():
+    """Like ``convert`` and ``downloads``: reached through the registry, not called directly."""
+    importers = {module for module, deps in _graph().items() if "gridfiles" in deps}
+    assert importers == {"registry"}
+
+
+def test_upstreams_grid_conventions_have_one_consumer_each():
+    """ODIM's scaling and ICON's cell coordinates are read by the grid readers, and nothing else."""
+    graph = _graph()
+    for module in ("odim", "icon"):
+        assert {m for m, deps in graph.items() if module in deps} == {"grids"}

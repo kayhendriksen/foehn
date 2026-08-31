@@ -243,3 +243,25 @@ _Avoid_: query, params, options
   beside the kind enum, and again as the keys of the grid path's own reader table.
   Resolved: a kind is gridded iff its registry row carries a **Grid reader**;
   `GRID_KINDS` and `is_grid` are gone.
+- The **Category** letters and their labels were written out in three modules —
+  prose in `collections`, a dict in `cli.cmd_list`, a set in the MCP layer — plus
+  a fourth time in the MCP catalogue's field description. Resolved:
+  `collections.CATEGORY_LABELS` is the vocabulary and `CATEGORIES` its keys, the
+  way `GRANULARITY_LABELS` and `TIME_SLICE_LABELS` already were. Category B is
+  MeteoSwiss's and unreleased, so it has no row: a letter in the table is a
+  letter something will offer as a filter.
+- Which **Datasets** are loadable was rendered from the registry in the MCP
+  guide but hand-typed in `load_data`'s docstring, which had fallen a dataset
+  behind — it told an LLM `climate_scenarios_indoor` was not loadable while
+  `load()` loaded it. Resolved: a tool docstring is an interface, so it is
+  rendered from the same tables the guide uses. Placeholders are `$name`, filled
+  by `_renders` under the `@mcp.tool` decorator.
+- The gridded read path was one 800-line module: the STAC listing and fetch that
+  puts a match's files in **Bronze**, upstream's ODIM and ICON file conventions,
+  and the **Grid readers** themselves. So the code that parses a radar composite
+  imported the download engine, and the ICON coordinate cache — the one piece of
+  process state in the path — was a private global the test suite reached into
+  by name. Resolved: `gridfiles` fetches (what **Transfer** is to the download
+  paths), `odim` and `icon` carry upstream's conventions (what **MeteoSwiss
+  CSV** is to the tabular path), and `grids` is the **Grid readers**. The same
+  four-way split the tabular path already had.

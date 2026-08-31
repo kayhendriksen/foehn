@@ -15,7 +15,6 @@ from foehn.collections import COLLECTIONS
 from foehn.mcp_server import (
     _INSPECTABLE_GRIDS,
     _LOADABLE_DATASETS,
-    _VALID_CATEGORIES,
     Dataset,
     DataSummary,
     GridSummary,
@@ -56,8 +55,20 @@ class TestConstants:
     def test_inspectable_grids_are_all_gridded(self):
         assert sorted(registry.grid_datasets()) == _INSPECTABLE_GRIDS
 
-    def test_valid_categories(self):
-        assert {"A", "C", "D", "E"} == _VALID_CATEGORIES
+    def test_load_data_names_every_loadable_dataset(self):
+        """The tool docstring is the interface a model reads, so it is rendered, not typed.
+
+        It used to be typed, and had fallen a dataset behind: it told callers
+        ``climate_scenarios_indoor`` was not loadable while ``load_data`` loaded it.
+        """
+        doc = load_data.__doc__
+        for dataset in registry.tabular_datasets():
+            assert dataset in doc
+
+    def test_no_tool_docstring_is_left_holding_a_placeholder(self):
+        """A ``$name`` that survives import is a fragment nobody rendered."""
+        for tool in (list_datasets, load_data):
+            assert "$" not in tool.__doc__
 
 
 # ── Pydantic models ─────────────────────────────────────────────────────────

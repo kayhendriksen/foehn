@@ -477,3 +477,63 @@ def test_metadata_empty(capsys):
         main()
     out = capsys.readouterr().out
     assert "No parameters metadata found" in out
+
+
+# --- The grid subcommands ---
+
+
+def test_open_prints_the_dataset_summary(tmp_path, capsys):
+    """``foehn open`` is a thin front for open_dataset — it prints what xarray reprs."""
+    with (
+        patch("foehn.api.open_dataset", return_value="<xarray summary>") as opened,
+        patch("sys.argv", ["foehn", "open", "surface_derived_grid", "--match", "rhiresd", "--data-dir", str(tmp_path)]),
+    ):
+        main()
+
+    assert opened.call_args.kwargs["match"] == "rhiresd"
+    assert opened.call_args.kwargs["variables"] is None
+    assert "<xarray summary>" in capsys.readouterr().out
+
+
+def test_to_zarr_prints_the_store_path(tmp_path, capsys):
+    store = tmp_path / "zarr" / "surface_derived_grid__rhiresd.zarr"
+    with (
+        patch("foehn.api.to_zarr", return_value=store) as written,
+        patch(
+            "sys.argv",
+            [
+                "foehn",
+                "to-zarr",
+                "surface_derived_grid",
+                "--match",
+                "rhiresd",
+                "--variables",
+                "rhiresd",
+                "--stack",
+                "--data-dir",
+                str(tmp_path),
+            ],
+        ),
+    ):
+        main()
+
+    assert written.call_args.kwargs["stack"] is True
+    assert written.call_args.kwargs["variables"] == ["rhiresd"]
+    assert str(store) in capsys.readouterr().out
+
+
+def test_mcp_starts_the_server_on_the_requested_transport():
+    with (
+        patch("foehn.mcp_server.run") as run,
+        patch("sys.argv", ["foehn", "mcp", "--transport", "sse"]),
+    ):
+        main()
+
+    run.assert_called_once_with(transport="sse")
+
+
+def test_named_datasets_are_used_as_given(tmp_path):
+    """An explicit list skips the default resolution — including the grid opt-out."""
+    mocks = _run("to-parquet", ["smn", "radar_precip"], tmp_path)
+
+    assert _converted(mocks) == ["smn", "radar_precip"]

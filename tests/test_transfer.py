@@ -8,11 +8,21 @@ bookkeeping, and destination collisions.
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from foehn.assets import Asset
 from foehn.fetch import FetchError
-from foehn.transfer import DownloadResult, csv_to_disk, fetch_all, stream_to_disk
+from foehn.transfer import (
+    DownloadResult,
+    already_current,
+    atomic_write_bytes,
+    csv_to_disk,
+    fetch_all,
+    stream_to_disk,
+)
 from tests.fakes import InMemoryFetcher
 
 
@@ -159,3 +169,38 @@ def test_results_add(tmp_path):
 def test_empty_input_is_a_noop(tmp_path):
     result = fetch_all([], tmp_path, fetcher=InMemoryFetcher(), write=stream_to_disk)
     assert result == DownloadResult()
+
+
+# --- Atomic writes ---
+
+
+def test_a_failed_write_leaves_no_temp_file_behind(tmp_path):
+    """The sibling .tmp is the whole point: a crash must not leave one to be mistaken for data."""
+    target = tmp_path / "asset.csv"
+    with patch.object(Path, "replace", side_effect=OSError("disk full")), pytest.raises(OSError):
+        atomic_write_bytes(target, b"payload")
+
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+# --- already_current ---
+
+
+def test_an_asset_with_no_updated_stamp_counts_as_current(tmp_path):
+    """Nothing to compare against, and the file is there — re-fetching would be a guess."""
+    path = tmp_path / "f.h5"
+    path.write_bytes(b"x")
+    assert already_current(Asset.from_stac("d", {"href": "https://x/f.h5"}), path) is True
+
+
+def test_an_unparseable_updated_stamp_counts_as_current(tmp_path):
+    """Upstream sending a malformed timestamp must not re-download the collection every run."""
+    path = tmp_path / "f.h5"
+    path.write_bytes(b"x")
+    assert already_current(Asset.from_stac("d", {"href": "https://x/f.h5", "updated": "not-a-date"}), path) is True
+
+
+def test_a_missing_file_is_never_current(tmp_path):
+    asset = Asset.from_stac("d", {"href": "https://x/f.h5", "updated": "2026-01-01T00:00:00+00:00"})
+    assert already_current(asset, tmp_path / "absent.h5") is False

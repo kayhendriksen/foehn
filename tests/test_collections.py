@@ -2,6 +2,7 @@
 
 from foehn.api import list_datasets
 from foehn.collections import (
+    CATEGORIES,
     COLLECTION_META,
     COLLECTIONS,
     GRANULARITIES,
@@ -186,6 +187,15 @@ def test_time_slice_vocabulary():
 
 def test_granularity_vocabulary():
     assert {"t", "h", "d", "m", "y"} == set(GRANULARITIES)
+
+
+def test_the_category_vocabulary_is_exactly_what_the_table_carries():
+    """Every letter offered as a filter has datasets, and every dataset's letter is offered.
+
+    B is MeteoSwiss's and unreleased, so it is deliberately absent from both
+    sides. The CLI and the MCP catalogue used to keep their own copies of this.
+    """
+    assert set(CATEGORIES) == {meta["category"] for meta in COLLECTION_META.values()}
 
 
 def test_every_advertised_frequency_is_in_the_vocabulary():

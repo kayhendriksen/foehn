@@ -10,6 +10,7 @@ GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``
 from __future__ import annotations
 
 import logging
+from string import Template
 from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -18,21 +19,19 @@ from pydantic import BaseModel, Field
 
 import foehn
 from foehn import registry
-from foehn.collections import COLLECTION_META, COLLECTIONS, GRANULARITY_LABELS, TIME_SLICE_LABELS
+from foehn.collections import (
+    CATEGORIES,
+    CATEGORY_LABELS,
+    COLLECTION_META,
+    COLLECTIONS,
+    GRANULARITY_LABELS,
+    TIME_SLICE_LABELS,
+)
 
 logger = logging.getLogger(__name__)
 
 # Datasets that can be loaded as tabular data (CSV-backed).
 _LOADABLE_DATASETS = sorted(registry.tabular_datasets())
-
-# Categories are this layer's own: ``list_datasets`` filters the catalogue here
-# rather than in foehn, so nothing below validates the value. The dataset,
-# frequency, time-slice and sort vocabularies are *not* — they belong to
-# ``foehn.load``'s contract, and a second copy of them at this seam could only
-# ever agree with it or drift from it. The guide below renders them from
-# ``collections`` for the same reason; it used to retype them as prose, and had
-# already drifted into telling callers that ``sort`` defaults to "asc".
-_VALID_CATEGORIES = {"A", "C", "D", "E"}
 
 # The tabular query tools are read-only against the MeteoSwiss API (describe_grid
 # is the exception — it caches to disk, see _GRID_INSPECT below).
@@ -57,6 +56,37 @@ _GRID_INSPECT = ToolAnnotations(
 # dataset. GRIB2/radar additionally require a single-file match=, enforced by
 # open_dataset.
 _INSPECTABLE_GRIDS = sorted(registry.grid_datasets())
+
+# Filtering by category is this layer's own: ``list_datasets`` narrows the
+# catalogue here rather than in foehn, so nothing below validates the value. The
+# *vocabulary* is not — the letters and their labels are ``collections``', and
+# the dataset, frequency, time-slice and sort vocabularies belong to
+# ``foehn.load``'s contract. A second copy of any of them at this seam could only
+# ever agree with it or drift from it.
+#
+# So a tool's docstring — the interface a model actually reads — gets the same
+# treatment as the guide: rendered from the tables, never retyped beside them.
+# Both had already drifted. The guide told callers ``sort`` defaults to "asc";
+# ``load_data`` named twelve loadable datasets when the registry had thirteen.
+_LOADABLE_LIST = ", ".join(_LOADABLE_DATASETS)
+_CATEGORY_OPTIONS = ", ".join(f'"{code}" ({label.lower()})' for code, label in CATEGORY_LABELS.items())
+_CATEGORY_CODES = ", ".join(sorted(CATEGORIES))
+
+
+def _renders(**fragments: str):
+    """Fill a tool docstring's placeholders before the server reads it.
+
+    Spelled ``$name`` rather than ``{name}`` so a docstring stays free to contain
+    a brace. Sits *below* ``@mcp.tool`` so the finished text is what registers.
+    """
+
+    def apply(fn):
+        if fn.__doc__:  # python -OO strips docstrings
+            fn.__doc__ = Template(fn.__doc__).safe_substitute(**fragments)
+        return fn
+
+    return apply
+
 
 mcp = MCPServer(
     "foehn",
@@ -90,7 +120,7 @@ mcp = MCPServer(
 class Dataset(BaseModel):
     dataset: str = Field(description="Short name used in API calls (e.g. 'smn')")
     collection_id: str = Field(description="STAC collection ID")
-    category: str = Field(description="MeteoSwiss category: A (ground), C (climate), D (radar), E (forecast)")
+    category: str = Field(description=f"MeteoSwiss category: {_CATEGORY_OPTIONS}")
     subcategory: str = Field(description="Subcategory code (e.g. 'A1')")
     description: str = Field(description="Human-readable description")
     format: str = Field(description="Data format (CSV, GRIB2, NetCDF, etc.)")
@@ -168,6 +198,7 @@ class GridSummary(BaseModel):
 
 
 @mcp.tool(title="List datasets", annotations=_READ_ONLY)
+@_renders(categories=_CATEGORY_OPTIONS)
 def list_datasets(category: str | None = None) -> list[Dataset]:
     """List all available MeteoSwiss datasets.
 
@@ -175,11 +206,10 @@ def list_datasets(category: str | None = None) -> list[Dataset]:
     supported frequencies, and available time slices for each dataset.
 
     Args:
-        category: Filter by category. Options: "A" (ground-based measurements),
-            "C" (climate), "D" (radar), "E" (forecasts). If omitted, returns all.
+        category: Filter by category. Options: $categories. If omitted, returns all.
     """
-    if category and category.upper() not in _VALID_CATEGORIES:
-        raise ValueError(f"Invalid category {category!r}. Valid options: A, C, D, E.")
+    if category and category.upper() not in CATEGORIES:
+        raise ValueError(f"Invalid category {category!r}. Valid options: {_CATEGORY_CODES}.")
 
     datasets = foehn.list_datasets()
     if category:
@@ -188,6 +218,7 @@ def list_datasets(category: str | None = None) -> list[Dataset]:
 
 
 @mcp.tool(title="Load data", annotations=_READ_ONLY)
+@_renders(loadable=_LOADABLE_LIST)
 def load_data(
     dataset: str,
     station: list[str] | None = None,
@@ -204,9 +235,9 @@ def load_data(
 ) -> list[dict]:
     """Load weather measurements and return rows as a list of dicts.
 
-    Fetches live data from MeteoSwiss. Only works with CSV-backed datasets
-    (categories A, C1/C2, C8, E4). Binary/grid datasets (GRIB2, NetCDF)
-    are not supported.
+    Fetches live data from MeteoSwiss. Only works with the CSV-backed datasets
+    named below. Binary/grid datasets (GRIB2, NetCDF, radar) are not supported —
+    inspect those with describe_grid().
 
     **Tip:** For historical data, always combine time filters (year, month,
     date_from/date_to) to avoid hitting the row limit. Use describe_data()
@@ -214,8 +245,7 @@ def load_data(
 
     Args:
         dataset: Dataset name (e.g. "smn" for SwissMetNet).
-            Loadable datasets: smn, smn_precip, smn_tower, nime, tot, obs,
-            pollen, phenology, nbcn, nbcn_precip, climate_scenarios, forecast_local.
+            Loadable datasets: $loadable.
         station: Station abbreviation(s) (e.g. ["BER"] for Bern, or ["BER", "ZUR"]).
             Case-insensitive. Use get_stations() to find abbreviations.
             If omitted, returns all stations (may be large).

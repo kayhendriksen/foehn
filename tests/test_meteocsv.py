@@ -4,8 +4,10 @@ Split out of test_convert alongside the module: these describe how upstream
 writes a file, and hold whether or not foehn ever produces a Parquet one.
 """
 
+import re
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import polars as pl
 import pytest
@@ -22,6 +24,7 @@ from foehn.meteocsv import (
     parse_metadata_types,
     scan_climate_scenarios_csv,
     source_columns_for,
+    utf8_meteoswiss_csv,
 )
 from foehn.workspace import Workspace
 
@@ -246,3 +249,96 @@ def test_only_the_deriving_kinds_need_extra_source_columns():
         needs = source_columns_for(dataset)
         assert bool(needs) is (kind(dataset) in DERIVED_TIMESTAMP_KINDS), dataset
     assert source_columns_for("forecast_local") == {"Date"}
+
+
+# --- What upstream can send that must not raise ---
+
+
+def test_a_utf8_bom_is_skipped_without_copying_the_file():
+    """MeteoSwiss ships some CSVs BOM-first; polars would read it into the first column name."""
+    content = b"\xef\xbb\xbfstation_abbr;tre200d0\nBER;12.5\n"
+
+    out = utf8_meteoswiss_csv(content)
+
+    assert bytes(out).startswith(b"station_abbr")
+    assert pl.read_csv(bytes(out), separator=";").columns == ["station_abbr", "tre200d0"]
+
+
+def test_unreadable_metadata_yields_no_dtypes_rather_than_raising():
+    """A truncated _meta_parameters.csv must cost inferred dtypes, not the whole load."""
+    assert parse_metadata_types(b"\x00\x01\x02 not a csv") == {}
+
+
+def test_metadata_without_the_expected_columns_yields_no_dtypes():
+    assert parse_metadata_types(b"something;else\n1;2\n") == {}
+
+
+def test_an_unreadable_metadata_file_yields_no_dtypes(tmp_path, monkeypatch):
+    """The file-based counterpart: an I/O failure is the same non-event."""
+    (tmp_path / "ogd-smn_meta_parameters.csv").write_bytes(b"x")
+
+    def boom(_self, *args, **kwargs):
+        raise OSError("device error")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    assert load_metadata_types(tmp_path) == {}
+
+
+def test_no_metadata_file_yields_no_dtypes(tmp_path):
+    assert load_metadata_types(tmp_path) == {}
+
+
+def test_an_unreadable_header_falls_back_to_parsing_every_column():
+    """The header probe is an optimisation; losing it must not lose the data."""
+    data = b"station_abbr;tre200d0\nBER;12.5\n"
+    with patch.object(pl, "read_csv", side_effect=[ValueError("no header for you"), pl.DataFrame({"a": [1]})]):
+        df = parse_csv_bytes(data, metadata_types={"tre200d0": pl.Float64})
+    assert df.columns == ["a"]
+
+
+def test_a_scenarios_csv_with_no_data_header_names_the_file():
+    """The preamble runs until 'DATE;'; without it there is nothing to parse."""
+    with pytest.raises(ValueError, match=re.escape("ch2025_abe_pr_gwl1.5.csv")):
+        parse_climate_scenarios_csv("TITLE;Climate\nVARIABLE;pr\n", "ch2025_abe_pr_gwl1.5.csv")
+
+
+def test_a_filename_without_a_time_slice_groups_by_granularity_alone(tmp_path):
+    """A name carrying a granularity and no slice groups on the granularity alone."""
+    for name in ("ogd-nbcn_ber_d.csv", "ogd-nbcn_zur_d.csv"):
+        (tmp_path / name).write_text("station_abbr;x\nBER;1\n")
+
+    groups = group_csv_files(tmp_path, "nbcn")
+
+    assert list(groups) == [("d",)]
+    assert len(groups[("d",)]) == 2
+
+
+def test_empty_metadata_content_yields_no_dtypes():
+    """A zero-byte _meta_parameters.csv is what a truncated download leaves behind."""
+    assert parse_metadata_types(b"") == {}
+
+
+def test_a_dtype_error_outside_the_projection_is_not_retried():
+    """Widening a column the projection excluded is rejected by polars — re-raise instead."""
+    data = b"station_abbr;wanted;other\nBER;1;2\n"
+    err = pl.exceptions.ComputeError("could not parse at column 'other'")
+
+    with (
+        patch.object(pl, "read_csv", side_effect=[pl.DataFrame({"wanted": ["x"]}), err]),
+        pytest.raises(pl.exceptions.ComputeError, match="at column 'other'"),
+    ):
+        parse_csv_bytes(data, metadata_types={"wanted": pl.Int64}, wanted_columns={"station_abbr", "wanted"})
+
+
+def test_a_non_dtype_failure_on_retry_is_raised_as_itself():
+    """Only dtype drift is recoverable; anything else must surface unchanged."""
+    data = b"station_abbr;tre200d0\nBER;12.5\n"
+    header = pl.DataFrame({"station_abbr": ["x"], "tre200d0": ["y"]})
+    attempts = [
+        header,
+        pl.exceptions.ComputeError("could not parse at column 'tre200d0'"),
+        MemoryError("out of memory"),
+    ]
+
+    with patch.object(pl, "read_csv", side_effect=attempts), pytest.raises(MemoryError):
+        parse_csv_bytes(data, metadata_types={"tre200d0": pl.Int64})

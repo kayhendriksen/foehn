@@ -6,6 +6,8 @@ call the grib2 handler?" — one assertion per caller per kind, which is the
 duplication the registry removes.
 """
 
+from pathlib import Path
+
 import pytest
 
 from foehn import registry
@@ -301,3 +303,15 @@ def test_convert_passes_the_directories_through(tmp_path):
 
     assert failures == 0
     assert (tmp_path / "parquet" / "smn" / "smn_d_recent.parquet").exists()
+
+
+def test_write_cube_refuses_a_kind_with_no_cube_builder():
+    """NetCDF combines a multi-file match on read, so ``stack`` has nothing to assemble."""
+    with pytest.raises(ValueError, match="already combines on read"):
+        registry.write_cube(
+            "surface_derived_grid",
+            Path("unused.zarr"),
+            match="rhiresd",
+            workspace=Workspace(Path("unused")),
+            fetcher=InMemoryFetcher(),
+        )

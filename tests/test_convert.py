@@ -17,6 +17,7 @@ from foehn.convert import (
     convert_normals_to_parquet,
     convert_preamble_to_parquet,
     convert_to_parquet,
+    run_conversions,
 )
 from foehn.workspace import Workspace
 
@@ -315,3 +316,113 @@ def test_convert_preamble_to_parquet_counts_bad_file(tmp_path):
 
     df = pl.read_parquet(parquet_dir / "climate_scenarios" / "climate_scenarios.parquet")
     assert set(df["station_abbr"].unique()) == {"abe"}
+
+
+# --- Nothing to convert ---
+
+
+@pytest.mark.parametrize(
+    ("convert", "dataset"),
+    [
+        (convert_to_parquet, "smn"),
+        (convert_indoor_to_parquet, "climate_scenarios_indoor"),
+        (convert_preamble_to_parquet, "climate_scenarios"),
+        (convert_normals_to_parquet, "climate_normals"),
+    ],
+)
+def test_an_empty_bronze_directory_is_not_a_failure(convert, dataset, tmp_path):
+    """``foehn to-parquet`` before any download must exit 0, not report a failure."""
+    workspace = Workspace(tmp_path)
+    workspace.bronze(dataset).mkdir(parents=True)
+
+    assert convert(dataset, workspace) == 0
+    assert not workspace.parquet(dataset).exists()
+
+
+def test_run_conversions_reports_nothing_for_an_empty_group_list():
+    calls = []
+    assert run_conversions([], lambda g: calls.append(g) or 0, label="smn") == 0
+    assert calls == []
+
+
+def test_the_indoor_metadata_csv_is_skipped_without_failing(tmp_path):
+    """The archive ships a metadata CSV beside the data; it is not a conversion failure."""
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("climate_scenarios_indoor")
+    bronze.mkdir(parents=True)
+    (bronze / "metadata.csv").write_text("not,data\n1,2\n")
+    (bronze / "ABE_2020_RCP26_a.csv").write_text("time.yy,time.mm,time.dd,time.hh,top\n2020,1,1,0,21.5\n")
+
+    assert convert_indoor_to_parquet("climate_scenarios_indoor", workspace) == 0
+
+    out = pl.read_parquet(workspace.parquet("climate_scenarios_indoor") / "climate_scenarios_indoor.parquet")
+    assert out["station_abbr"].unique().to_list() == ["ABE"]
+
+
+def test_an_archive_of_only_non_data_files_writes_nothing_and_fails_nothing(tmp_path):
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("climate_scenarios_indoor")
+    bronze.mkdir(parents=True)
+    (bronze / "metadata.csv").write_text("not,data\n1,2\n")
+
+    assert convert_indoor_to_parquet("climate_scenarios_indoor", workspace) == 0
+    assert not (workspace.parquet("climate_scenarios_indoor") / "climate_scenarios_indoor.parquet").exists()
+
+
+def test_a_scenarios_file_that_will_not_parse_is_counted_and_the_rest_written(tmp_path):
+    """One unreadable file must not cost the collection — but it must reach the exit code."""
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("climate_scenarios")
+    bronze.mkdir(parents=True)
+    (bronze / "ogd-climate-scenarios-ch2025_ABE_pr_GWL1.5.csv").write_text(CLIMATE_SCENARIOS_CSV)
+    (bronze / "ogd-climate-scenarios-ch2025_BER_pr_GWL1.5.csv").write_text("no data header here\n")
+
+    assert convert_preamble_to_parquet("climate_scenarios", workspace) == 1
+
+    out = pl.read_parquet(workspace.parquet("climate_scenarios") / "climate_scenarios.parquet")
+    assert out["station_abbr"].unique().to_list() == ["ABE"]
+
+
+def test_a_collection_where_every_file_fails_writes_nothing(tmp_path):
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("climate_scenarios")
+    bronze.mkdir(parents=True)
+    (bronze / "ogd-climate-scenarios-ch2025_ABE_pr_GWL1.5.csv").write_text("no data header here\n")
+
+    assert convert_preamble_to_parquet("climate_scenarios", workspace) == 1
+    assert not (workspace.parquet("climate_scenarios") / "climate_scenarios.parquet").exists()
+
+
+# --- When dtype widening cannot recover ---
+
+
+def _smn_bronze(tmp_path):
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("smn")
+    bronze.mkdir(parents=True)
+    (bronze / "ogd-smn_ber_d_recent.csv").write_text("station_abbr;reference_timestamp;tre200d0\nBER;01.01.2026;1\n")
+    return workspace
+
+
+def test_a_failure_naming_no_column_is_counted_not_retried(tmp_path, monkeypatch):
+    """Without a column to widen there is nothing to try differently."""
+    workspace = _smn_bronze(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise pl.exceptions.ComputeError("the file is truncated")
+
+    monkeypatch.setattr(pl.LazyFrame, "sink_parquet", boom)
+
+    assert convert_to_parquet("smn", workspace) == 1
+
+
+def test_a_column_that_stays_broken_after_widening_is_counted_not_retried_forever(tmp_path, monkeypatch):
+    """Float64 is as wide as it goes; retrying the same parse would not terminate."""
+    workspace = _smn_bronze(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise pl.exceptions.ComputeError("could not parse at column 'tre200d0'")
+
+    monkeypatch.setattr(pl.LazyFrame, "sink_parquet", boom)
+
+    assert convert_to_parquet("smn", workspace) == 1
