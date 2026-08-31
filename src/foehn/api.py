@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -273,18 +272,6 @@ def load(
 # --- Gridded datasets --------------------------------------------------------
 
 
-def _store_slug(match: str) -> str:
-    """Filesystem-safe fragment derived from a ``match`` filter for store names."""
-    return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
-
-
-def _resolve_store(dataset: str, match: str | None, workspace: Workspace, store) -> Path:
-    """Resolve the .zarr output path: explicit ``store`` wins, else the workspace's."""
-    if store is not None:
-        return Path(store)
-    return workspace.zarr(dataset if match is None else f"{dataset}__{_store_slug(match)}")
-
-
 def open_dataset(
     dataset: str,
     *,
@@ -418,7 +405,9 @@ def to_zarr(
         Path to the written ``.zarr`` store.
     """
     workspace = Workspace.resolve(data_dir)
-    store_path = _resolve_store(dataset, match, workspace, store)
+    # Where the default store lands, and how ``match`` is spelled into its name,
+    # are the workspace's layout rather than facts stated here.
+    store_path = Path(store) if store is not None else workspace.zarr(dataset, match)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Which method writes it — cube or single — is the kind's row, not a branch

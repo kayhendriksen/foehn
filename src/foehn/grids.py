@@ -99,12 +99,13 @@ def require_grib2() -> None:
         ) from exc
 
 
-def require_dask() -> None:
-    """A :data:`Require` for ``rechunk=``: dask is *not* part of the 'grids' extra.
+def _require_dask() -> None:
+    """dask is *not* part of the 'grids' extra, and ``rechunk=`` needs it.
 
     Named here with the other three so every optional-import message foehn can
-    raise sits in one place, even though nothing in ``KINDS`` carries this one —
-    rechunking is a caller's request, not a property of a kind.
+    raise sits in one place. Private, unlike them: nothing in ``KINDS`` carries
+    it — rechunking is a caller's request, not a property of a kind — so it is
+    checked inside :func:`write_zarr`, where the rechunk happens.
     """
     import importlib.util
 
@@ -252,7 +253,7 @@ _CF_TIME_UNITS = frozenset(
 )
 
 
-def sanitize_noncf_time_units(ds):
+def _sanitize_noncf_time_units(ds):
     """Rename non-CF temporal unit attrs so the dataset can be re-decoded later.
 
     A store written with a ``years since ...`` units attribute throws on every
@@ -272,8 +273,22 @@ def sanitize_noncf_time_units(ds):
     return ds
 
 
-def write_zarr(ds, store: Path, mode: str, append_dim: str | None = None) -> None:
-    """Write a Dataset to a Zarr store, suppressing only zarr's consolidated-metadata notice."""
+def write_zarr(
+    ds, store: Path, mode: str = "w", *, rechunk: dict[str, int] | None = None, append_dim: str | None = None
+) -> None:
+    """Write a Dataset to a Zarr store: sanitised, optionally rechunked, quietly.
+
+    Everything a Dataset needs on its way to a store, so a caller learns one
+    call rather than three. The non-CF time units have to be moved aside or the
+    store throws on every later ``open_zarr``; ``rechunk`` needs dask, which the
+    'grids' extra does not install. Both used to be the registry's to sequence —
+    which meant the routing table knew the recipe, and ``cube_grib2`` stated
+    half of it a second time on its own way out.
+    """
+    ds = _sanitize_noncf_time_units(ds)
+    if rechunk:
+        _require_dask()
+        ds = ds.chunk(rechunk)
     with warnings.catch_warnings():
         # xarray writes consolidated metadata by default. zarr-python 3 warns that
         # this is outside the Zarr v3 spec, but we keep it on purpose: it's purely
@@ -410,18 +425,14 @@ def cube_radar(
     """
     xr = _require_xarray()
 
-    wanted = None
-    if variables is not None:
-        wanted = [variables] if isinstance(variables, str) else list(variables)
-
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
     for i, path in enumerate(sorted(files)):
         ds = odim.open_composite(xr, path)
         if "time" not in ds.coords:
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
-        if wanted is not None:
-            ds = ds[wanted]
-        ds = sanitize_noncf_time_units(ds).expand_dims("time")
+        # Narrowed per file rather than once at the end: only one timestep is ever
+        # in memory. Same rule as everywhere else, hence the same call.
+        ds = select_variables(ds, variables).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
         write_zarr(ds, store, mode if i == 0 else "a", append_dim=None if i == 0 else "time")
 
@@ -472,7 +483,7 @@ def cube_grib2(
         fetcher=fetcher,
         what="the cube is on the bare unstructured grid.",
     )
-    write_zarr(sanitize_noncf_time_units(cube), store, mode)
+    write_zarr(cube, store, mode)
 
 
 __all__ = [
@@ -485,11 +496,9 @@ __all__ = [
     "open_grib2",
     "open_netcdf",
     "open_radar",
-    "require_dask",
     "require_grib2",
     "require_netcdf",
     "require_radar",
-    "sanitize_noncf_time_units",
     "select_variables",
     "write_zarr",
 ]

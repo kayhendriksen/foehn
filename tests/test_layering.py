@@ -166,3 +166,18 @@ def test_upstreams_grid_conventions_have_one_consumer_each():
     graph = _graph()
     for module in ("odim", "icon"):
         assert {m for m, deps in graph.items() if module in deps} == {"grids"}
+
+
+def test_the_registry_routes_a_zarr_write_without_knowing_the_recipe():
+    """Which writer is the registry's; what a Dataset needs on the way is ``grids``'.
+
+    ``sanitize_noncf_time_units`` and ``require_dask`` were exported only so the
+    routing table could sequence them around the write — and ``cube_grib2``
+    stated the same steps a second time inside ``grids`` on its own way out.
+    Guards the rule rather than the imports: restating either step above the
+    seam is the regression, however it is spelled.
+    """
+    source = (SRC / "registry.py").read_text(encoding="utf-8")
+    assert "sanitize" not in source
+    assert "require_dask" not in source
+    assert ".chunk(" not in source

@@ -471,37 +471,49 @@ def test_to_zarr_rechunk_without_dask_raises(fetcher, tmp_path):
         to_zarr("surface_derived_grid", data_dir=tmp_path, rechunk={"x": 1})
 
 
-def test_sanitize_noncf_time_units_moves_bad_units():
-    """'years since ...' units must be renamed so the store can be re-decoded."""
+def test_a_written_store_carries_no_noncf_time_units(tmp_path):
+    """'years since ...' throws on every later ``open_zarr``, calendar included.
+
+    Asserted through ``write_zarr`` rather than the renaming step: moving the
+    units aside is something a store *has done to it*, not a call a caller makes.
+    """
     xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
     import numpy as np
 
-    from foehn.grids import sanitize_noncf_time_units
+    from foehn.grids import write_zarr
 
     ds = xr.Dataset(
         {"v": (("time",), np.array([1.0]))},
         coords={"time": ("time", np.array([0.0]), {"units": "years since 1991-01-01", "calendar": "standard"})},
     )
-    out = sanitize_noncf_time_units(ds)
-    assert "units" not in out["time"].attrs
-    assert out["time"].attrs["units_noncf"] == "years since 1991-01-01"
-    assert out["time"].attrs["calendar_noncf"] == "standard"
+    store = tmp_path / "noncf.zarr"
+    write_zarr(ds, store)
+
+    written = xr.open_zarr(store)
+    assert "units" not in written["time"].attrs and "calendar" not in written["time"].attrs
+    assert written["time"].attrs["units_noncf"] == "years since 1991-01-01"
+    assert written["time"].attrs["calendar_noncf"] == "standard"
 
 
-def test_sanitize_keeps_valid_cf_time_units():
-    """Well-formed CF units (e.g. 'days since ...') must be left untouched."""
+def test_a_written_store_keeps_valid_cf_time_units(tmp_path):
+    """Well-formed CF units must survive, decoded, rather than being moved aside too."""
     xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
     import numpy as np
 
-    from foehn.grids import sanitize_noncf_time_units
+    from foehn.grids import write_zarr
 
     ds = xr.Dataset(
         {"v": (("time",), np.array([1.0]))},
         coords={"time": ("time", np.array([0.0]), {"units": "days since 2000-01-01"})},
     )
-    out = sanitize_noncf_time_units(ds)
-    assert out["time"].attrs["units"] == "days since 2000-01-01"
-    assert "units_noncf" not in out["time"].attrs
+    store = tmp_path / "cf.zarr"
+    write_zarr(ds, store)
+
+    written = xr.open_zarr(store)
+    assert "units_noncf" not in written["time"].attrs
+    assert written["time"].values[0] == np.datetime64("2000-01-01")
 
 
 def test_to_zarr_with_noncf_time_reopens_cleanly(fetcher, tmp_path):
@@ -640,23 +652,6 @@ def test_a_source_that_cannot_be_read_at_all_reports_the_original_failure(tmp_pa
 
     with pytest.raises(Exception, match=r"(?i)broken|netcdf|magic|unable"):
         open_netcdf([corrupt], dataset="surface_derived_grid")
-
-
-def test_a_noncf_calendar_is_moved_aside_with_its_units(tmp_path):
-    """A store keeping 'years since ...' throws on every later open_zarr — so does its calendar."""
-    xr = pytest.importorskip("xarray")
-    import numpy as np
-
-    from foehn.grids import sanitize_noncf_time_units
-
-    ds = xr.Dataset({"v": ("time", np.zeros(2))}, coords={"time": [0, 1]})
-    ds["time"].attrs.update({"units": "years since 1991-01-01", "calendar": "365_day"})
-
-    sanitize_noncf_time_units(ds)
-
-    assert ds["time"].attrs["units_noncf"] == "years since 1991-01-01"
-    assert ds["time"].attrs["calendar_noncf"] == "365_day"
-    assert "units" not in ds["time"].attrs and "calendar" not in ds["time"].attrs
 
 
 def test_a_grib2_cube_recomputes_valid_time_after_combining(fetcher, tmp_path):

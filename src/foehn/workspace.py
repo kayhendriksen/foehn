@@ -21,6 +21,7 @@ another path.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,11 @@ DATA_DIR_ENV = "FOEHN_DATA_DIR"
 
 DEFAULT_ROOT = ("data", "meteoswiss")
 """Relative to the current working directory, when nothing else says otherwise."""
+
+
+def _slug(match: str) -> str:
+    """A ``match`` filter as a filesystem-safe fragment of a store name."""
+    return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
 
 
 @dataclass(frozen=True)
@@ -62,8 +68,16 @@ class Workspace:
         base = self.root / "parquet"
         return base if dataset is None else base / dataset
 
-    def zarr(self, name: str) -> Path:
-        """The store path for *name*, which already encodes any ``match`` filter."""
+    def zarr(self, dataset: str, match: str | None = None) -> Path:
+        """The store path for *dataset*, narrowed by *match* where there is one.
+
+        The name encodes the match so two filtered slices of one collection do
+        not overwrite each other. Deriving it was ``api``'s — the one path rule
+        foehn stated above this seam, and the reason this method used to ask its
+        caller for a name that "already encodes any ``match`` filter" rather
+        than for the two facts the name is made of.
+        """
+        name = dataset if match is None else f"{dataset}__{_slug(match)}"
         return self.root / "zarr" / f"{name}.zarr"
 
     @property
