@@ -23,6 +23,7 @@ import io
 import logging
 import re
 from pathlib import Path
+from typing import TypedDict
 
 import polars as pl
 
@@ -345,11 +346,28 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
 
 _INDOOR_TIME_COLS = ["time.yy", "time.mm", "time.dd", "time.hh"]
 
-# How MeteoSwiss writes the indoor archive's member CSVs: comma-separated, with
-# the timestamp split across four integer columns. Stated once, for both the
-# eager read and the lazy scan — the load path and the convert stage each used
-# to spell them out.
-_INDOOR_CSV_OPTIONS = {"separator": ",", "infer_schema_length": 10_000, "truncate_ragged_lines": True}
+
+class _IndoorCsvOptions(TypedDict):
+    """How MeteoSwiss writes the indoor archive's member CSVs.
+
+    A TypedDict rather than a plain dict so the two ``**`` unpackings below stay
+    checked: a plain one widens every value to the union of all of them, and
+    ``separator=`` then looks like it might be handed an ``int``.
+    """
+
+    separator: str
+    infer_schema_length: int
+    truncate_ragged_lines: bool
+
+
+# Comma-separated, with the timestamp split across four integer columns. Stated
+# once, for both the eager read and the lazy scan — the load path and the convert
+# stage each used to spell them out.
+_INDOOR_CSV_OPTIONS: _IndoorCsvOptions = {
+    "separator": ",",
+    "infer_schema_length": 10_000,
+    "truncate_ragged_lines": True,
+}
 
 
 def indoor_station(filename: str) -> str | None:
