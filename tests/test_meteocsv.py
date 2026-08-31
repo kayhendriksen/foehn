@@ -342,3 +342,27 @@ def test_a_non_dtype_failure_on_retry_is_raised_as_itself():
 
     with patch.object(pl, "read_csv", side_effect=attempts), pytest.raises(MemoryError):
         parse_csv_bytes(data, metadata_types={"tre200d0": pl.Int64})
+
+
+# --- The indoor archive's members ---
+
+
+def test_the_archives_metadata_csv_has_no_station():
+    """The one member that is not data, and the question both pipelines ask of a name."""
+    from foehn.meteocsv import indoor_station
+
+    assert indoor_station("ABO_2035_RCP85_DRY.csv") == "ABO"
+    assert indoor_station("indoor/AIG_2060_RCP26_DRY_v2.csv") == "AIG"
+    assert indoor_station("metadata.csv") is None
+
+
+def test_reading_a_non_data_member_says_to_ask_first():
+    """Whether a member is data is ``indoor_station``'s answer, asked before the read.
+
+    The readers take a member the caller has already accepted, so reaching one
+    of them with the metadata CSV is a caller error rather than a row to skip.
+    """
+    from foehn.meteocsv import parse_indoor_csv
+
+    with pytest.raises(ValueError, match="indoor_station"):
+        parse_indoor_csv(b"a,b\n1,2\n", "metadata.csv")

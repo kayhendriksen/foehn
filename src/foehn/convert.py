@@ -18,13 +18,13 @@ import polars as pl
 
 from foehn.atomicwrite import staged
 from foehn.meteocsv import (
-    add_indoor_columns,
     column_from_dtype_error,
     derive_timestamp,
     group_csv_files,
+    indoor_station,
     load_metadata_types,
-    parse_indoor_filename,
     scan_climate_scenarios_csv,
+    scan_indoor_csv,
 )
 from foehn.workspace import Workspace
 
@@ -212,22 +212,12 @@ def convert_indoor_to_parquet(dataset: str, workspace: Workspace) -> int:
         frames: list[pl.LazyFrame] = []
         skipped = 0
         for f in group.sources:
-            parsed = parse_indoor_filename(f.stem)
-            if parsed is None:
+            if indoor_station(f.name) is None:
                 # The archive ships a metadata CSV alongside the data; not a failure.
                 skipped += 1
                 logger.info("  Skipping non-data file: %s", f.name)
                 continue
-            station, period, scenario, variant = parsed
-            frames.append(
-                add_indoor_columns(
-                    pl.scan_csv(f, separator=",", infer_schema_length=10_000, truncate_ragged_lines=True),
-                    station,
-                    period,
-                    scenario,
-                    variant,
-                )
-            )
+            frames.append(scan_indoor_csv(f))
         if not frames:
             return 0
         _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path)

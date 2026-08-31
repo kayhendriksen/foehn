@@ -285,6 +285,14 @@ _Avoid_: query, params, options
   state** reached into **Transfer**, the download engine, for a filesystem
   primitive that was never the download path's to own. Resolved: `atomicwrite` is
   a leaf and `test_layering` fails a module that hand-rolls the move itself.
+- The **Archive CSV** kind's member files were read in two places — `readers`
+  for the load path, `convert` for the Parquet stage — each spelling out
+  upstream's separator and schema window and then calling the two `meteocsv`
+  helpers in the right order. Every other kind already had its eager reader and
+  its lazy scanner in **MeteoSwiss CSV**, each owning its own read options.
+  Resolved: `indoor_station` answers whether a member is data and whose, and
+  `parse_indoor_csv`/`scan_indoor_csv` read one. The load path now spells out no
+  CSV convention at all.
 - The Zarr store's name — `<dataset>` unfiltered, `<dataset>__<match>` otherwise —
   was derived in `api` and handed to `Workspace.zarr()` as a finished string, so
   that method documented the encoding as its caller's job. The one path foehn

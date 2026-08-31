@@ -181,3 +181,23 @@ def test_the_registry_routes_a_zarr_write_without_knowing_the_recipe():
     assert "sanitize" not in source
     assert "require_dask" not in source
     assert ".chunk(" not in source
+
+
+def test_the_load_path_reads_no_csv_itself():
+    """Every CSV the load path parses is parsed by ``meteocsv``.
+
+    The indoor archive's members were the exception: their separator and schema
+    window were spelled out in ``readers`` and again in ``convert``, above the
+    module that owns upstream's conventions, while every other kind already had
+    an eager reader and a lazy scanner down there.
+    """
+    source = (SRC / "readers.py").read_text(encoding="utf-8")
+    assert "separator=" not in source
+    assert "read_csv" not in source
+
+
+def test_the_convert_stage_states_no_indoor_csv_conventions():
+    """The other half of the same duplication. Its remaining ``separator=`` literals
+    are the standard kind's, wrapped in the dtype-drift retry, and the normals TXT.
+    """
+    assert 'separator=","' not in (SRC / "convert.py").read_text(encoding="utf-8")

@@ -24,7 +24,6 @@ import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 import polars as pl
@@ -35,12 +34,12 @@ from foehn.assets import assets_of, collection_assets, hrefs, select
 from foehn.collections import COLLECTIONS, DatasetKind, kind
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import (
-    add_indoor_columns,
     decode_meteoswiss_csv,
     derive_timestamp,
+    indoor_station,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
-    parse_indoor_filename,
+    parse_indoor_csv,
     parse_metadata_types,
     source_columns_for,
     utf8_meteoswiss_csv,
@@ -387,15 +386,15 @@ def read_archive(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Data
         for name in zf.namelist():
             if not name.endswith(".csv"):
                 continue
-            parsed = parse_indoor_filename(Path(name).stem)
-            if parsed is None:
+            # Asked of the name, before the member is read: an unwanted station's
+            # CSV is never parsed, and the archive's metadata CSV has no station.
+            station = indoor_station(name)
+            if station is None:
                 continue
-            st, period, scenario, variant = parsed
-            if filters.stations is not None and st.lower() not in filters.stations:
+            if filters.stations is not None and station.lower() not in filters.stations:
                 continue
             with zf.open(name) as fh:
-                frame = pl.read_csv(fh.read(), separator=",", infer_schema_length=10_000, truncate_ragged_lines=True)
-            frames.append(add_indoor_columns(frame, st, period, scenario, variant))
+                frames.append(parse_indoor_csv(fh.read(), name))
 
     if not frames:
         stations = sorted(filters.stations) if filters.stations else None
