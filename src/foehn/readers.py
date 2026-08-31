@@ -31,7 +31,7 @@ import polars as pl
 from foehn._urls import asset_filename
 from foehn.archives import check_zip_size
 from foehn.assets import assets_of, collection_assets, hrefs, select
-from foehn.collections import COLLECTIONS, DatasetKind, kind
+from foehn.collections import COLLECTIONS, DEFAULT_TIME_SLICE, DatasetKind, kind
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import (
     decode_meteoswiss_csv,
@@ -67,7 +67,7 @@ class Filters:
     granularities: frozenset[str] | None = None
     """Lowercased granularity codes, or None for no filter."""
 
-    time_slices: tuple[str, ...] = ("recent",)
+    time_slices: tuple[str, ...] = (DEFAULT_TIME_SLICE,)
     year: tuple[int, ...] | None = None
     month: tuple[int, ...] | None = None
     date_from: str | None = None
@@ -105,7 +105,7 @@ class Filters:
         return cls(
             stations=_lower_set(station),
             granularities=_lower_set(frequency),
-            time_slices=_as_tuple(time_slice) or ("recent",),
+            time_slices=_as_tuple(time_slice) or (DEFAULT_TIME_SLICE,),
             year=_as_tuple(year),
             month=_as_tuple(month),
             date_from=date_from,

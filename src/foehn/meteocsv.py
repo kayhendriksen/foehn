@@ -245,6 +245,28 @@ def parse_csv_bytes(
         raise last_err from None
 
 
+def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataType]] | None = None):
+    """Lazily scan one standard MeteoSwiss CSV, without reading it.
+
+    The lazy half of :func:`parse_csv_bytes`, which is the eager one. The convert
+    stage used to spell these options out itself — the last kind whose conventions
+    were stated above this module — because the dtype-drift retry is wrapped
+    around the scan. That retry is the convert stage's: it re-runs the sink, and
+    passes the widened types back in through *schema_overrides*.
+
+    A wider schema window than the eager path's, on purpose: a scan pays for the
+    inferred rows once per file rather than holding the file, and the converter's
+    groups are whole historical series.
+    """
+    return pl.scan_csv(
+        path,
+        separator=";",
+        try_parse_dates=True,
+        schema_overrides=schema_overrides or None,
+        infer_schema_length=10_000,
+    )
+
+
 def add_forecast_local_timestamp(frame):
     """Add a parsed reference_timestamp from forecast_local's compact Date column.
 

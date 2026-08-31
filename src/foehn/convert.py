@@ -25,6 +25,7 @@ from foehn.meteocsv import (
     load_metadata_types,
     scan_climate_scenarios_csv,
     scan_indoor_csv,
+    scan_standard_csv,
 )
 from foehn.workspace import Workspace
 
@@ -132,16 +133,7 @@ def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[
         recovered: list[str] = []
         while True:
             try:
-                lazy_frames = [
-                    pl.scan_csv(
-                        f,
-                        separator=";",
-                        try_parse_dates=True,
-                        schema_overrides=overrides or None,
-                        infer_schema_length=10_000,
-                    )
-                    for f in group.sources
-                ]
+                lazy_frames = [scan_standard_csv(f, schema_overrides=overrides) for f in group.sources]
                 combined = pl.concat(lazy_frames, how="diagonal_relaxed")
                 combined = derive_timestamp(combined, collection_key)
                 _write_parquet_atomic(combined, group.out_path)

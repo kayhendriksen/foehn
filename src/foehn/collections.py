@@ -503,12 +503,21 @@ CLIMATE_NORMALS_ZIP_URL = "https://data.geo.admin.ch/ch.meteoschweiz.klima/normw
 # added here has to reach the LLM-facing documentation, and prose cannot be
 # checked against a set.
 TIME_SLICE_LABELS: dict[str, str] = {
-    "now": "last ~24 hours, updated every 10 minutes (t, h only)",
-    "recent": "this calendar year through yesterday, updated daily (the default)",
+    "now": "last ~24 hours, updated every 10 minutes — t and h only",
+    "recent": "this calendar year through yesterday, updated daily",
     "historical": "start of measurements through Dec 31 of last year",
 }
 
 TIME_SLICES = frozenset(TIME_SLICE_LABELS)
+
+DEFAULT_TIME_SLICE = "recent"
+"""What a caller who names no time slice gets.
+
+The token was written at four code sites — the :class:`~foehn.readers.Filters`
+field, its builder, ``registry.download`` and the CLI — and again as prose in
+four docstrings. One of them is the whole vocabulary's default; the rest were
+copies of it.
+"""
 
 # The granularity segment's vocabulary — the ``_t``/``_h``/``_d``/``_m``/``_y``
 # documented at the top of this module. Which of them a given dataset actually
@@ -516,7 +525,7 @@ TIME_SLICES = frozenset(TIME_SLICE_LABELS)
 # the single source for it (the MCP layer used to carry its own copy of the
 # tokens, and then its own prose gloss of them).
 GRANULARITY_LABELS: dict[str, str] = {
-    "t": "10-minute (near real-time measurements)",
+    "t": "10-minute, near real-time",
     "h": "hourly",
     "d": "daily",
     "m": "monthly",
@@ -539,6 +548,16 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 CATEGORIES = frozenset(CATEGORY_LABELS)
+
+
+def options(labels: dict[str, str]) -> str:
+    """One of the label tables as inline prose: ``"t" (10-minute, near real-time), …``.
+
+    What a docstring's Args block wants, where the MCP guide wants bullets. Both
+    are rendered from the table; neither is retyped beside it, which is the only
+    way prose and a set can be checked against each other.
+    """
+    return ", ".join(f'"{token}" ({label})' for token, label in labels.items())
 
 
 # MeteoSwiss chunks the high-frequency historical series by decade, so the slice

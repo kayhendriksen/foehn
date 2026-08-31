@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 from foehn import registry
-from foehn.collections import COLLECTION_META, COLLECTIONS
+from foehn.collections import (
+    COLLECTION_META,
+    COLLECTIONS,
+    DEFAULT_TIME_SLICE,
+    GRANULARITY_LABELS,
+    TIME_SLICE_LABELS,
+    options,
+)
+from foehn.docstrings import renders
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.metadata import TABLES as metadata_tables
 from foehn.metadata import fetch_table
@@ -18,6 +26,17 @@ from foehn.workspace import Workspace
 
 if TYPE_CHECKING:
     import xarray as xr
+
+# A vocabulary or a default named in a docstring is rendered from the table that
+# defines it, never retyped beside it — the argument ``mcp_server`` already makes
+# for its tool descriptions, and ``help(foehn.load)`` is the same kind of surface.
+_VOCABULARY = {
+    "granularities": options(GRANULARITY_LABELS),
+    "time_slices": options(TIME_SLICE_LABELS),
+    "default_time_slice": DEFAULT_TIME_SLICE,
+    "default_workers": str(DEFAULT_WORKERS),
+}
+
 
 __all__ = [
     "METADATA_TABLES",
@@ -43,6 +62,7 @@ def list_datasets() -> list[dict]:
     return [{"dataset": key, "collection_id": cid, **COLLECTION_META[key]} for key, cid in COLLECTIONS.items()]
 
 
+@renders(**_VOCABULARY)
 def download(
     dataset: str,
     *,
@@ -57,14 +77,15 @@ def download(
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
-        time_slice: Time slices to download. Defaults to ["recent"]. Ignored for
-            binary/grid datasets (GRIB2/NetCDF), which fetch the latest assets.
+        time_slice: Time slices to download. Options: $time_slices.
+            Defaults to ["$default_time_slice"]. Ignored for binary/grid datasets
+            (GRIB2/NetCDF), which fetch the latest assets.
         since: ISO timestamp for incremental updates — only assets updated after
             it are fetched. This function does not track state itself: pass the
             previous run's timestamp, or use the ``foehn download`` CLI, which
             persists one in ``_last_run.json`` and only advances it when the run
             fully succeeds.
-        workers: Concurrent HTTP downloads (default 8).
+        workers: Concurrent HTTP downloads (default $default_workers).
         force: Re-download even when local files look up to date. Currently
             only affects ZIP-shipped datasets (e.g. climate_scenarios_indoor),
             which otherwise skip when already extracted; other formats refresh
@@ -175,6 +196,7 @@ def inventory(dataset: str) -> pl.DataFrame:
     return metadata(dataset, "inventory")
 
 
+@renders(**_VOCABULARY)
 def load(
     dataset: str,
     *,
@@ -201,11 +223,10 @@ def load(
         station: Station abbreviation(s) to include (e.g. "BER" or ["BER", "ZUR"]).
             Filters at the STAC item level so unmatched stations are never downloaded.
             Case-insensitive. If None, all stations are included.
-        frequency: Time frequency filter(s). Options: "t" (10-min), "h" (hourly),
-            "d" (daily), "m" (monthly), "y" (yearly). Can be a single string or list.
-            If None, all frequencies are included.
-        time_slice: Time slice(s) to include. Defaults to ["recent"].
-            Options: "historical", "recent", "now". Can be a single string or list.
+        frequency: Granularity filter(s). Options: $granularities.
+            Can be a single string or list. If None, all are included.
+        time_slice: Time slice(s) to include. Options: $time_slices.
+            Defaults to ["$default_time_slice"]. Can be a single string or list.
         year: Filter to specific year(s) (e.g. 2025 or [2020, 2021, 2022]).
         month: Filter to specific month(s) (1-12, e.g. 7 or [6, 7, 8] for summer).
         date_from: Start date (inclusive), ISO format "YYYY-MM-DD".
@@ -220,7 +241,7 @@ def load(
             network bytes, since CSVs are per-station and not pre-bucketed by
             row count. To reduce wire volume, narrow with ``time_slice="now"``,
             ``year``, or ``date_from/date_to``.
-        workers: Concurrent CSV downloads (default 8). The CSV fetches are
+        workers: Concurrent CSV downloads (default $default_workers). The CSV fetches are
             parallelised via a ThreadPoolExecutor; metadata fetch stays serial.
 
     Returns:

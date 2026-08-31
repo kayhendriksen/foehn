@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
+    DEFAULT_TIME_SLICE,
     GRANULARITIES,
     KIND_OF,
     TIME_SLICES,
@@ -318,7 +319,7 @@ def download(
     return spec(dataset).download(
         dataset,
         workspace,
-        time_slice=time_slice or ["recent"],
+        time_slice=time_slice or [DEFAULT_TIME_SLICE],
         since=since,
         workers=workers,
         force=force,
