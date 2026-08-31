@@ -2,6 +2,7 @@
 
 import io
 import zipfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -1091,3 +1092,28 @@ def test_load_leaves_query_validation_to_the_registry():
         registry.validate_load("smn", Filters.build(sort="sideways"))
     with pytest.raises(ValueError, match="Invalid time_slice"):
         registry.validate_load("smn", Filters.build(time_slice="yesterday"))
+
+
+def test_a_polars_that_cannot_run_here_names_the_databricks_build():
+    """The AVX2 failure is an import-time crash with an unrelated message ("Illegal
+    instruction"), so foehn smoke-tests polars itself and names the fix.
+
+    The guard's source is executed in a fresh namespace rather than reloaded: it
+    runs once per process, and the suite has long since imported the package.
+    """
+    source = (Path(foehn.__file__)).read_text(encoding="utf-8")
+    guard = source[: source.index("from foehn.api import")]
+
+    with (
+        patch("polars.DataFrame", side_effect=RuntimeError("Illegal instruction")),
+        pytest.raises(ImportError, match=r"foehn\[databricks\]"),
+    ):
+        # S102: deliberate — this executes foehn's own guard source in an isolated
+        # namespace, which is the only way to reach an import-time branch.
+        exec(compile(guard, "foehn/__init__.py", "exec"), {"__name__": "probe"})  # noqa: S102
+
+
+def test_to_zarr_refuses_rechunk_together_with_stack():
+    """The cube is written straight to the store, so there is no Dataset left to chunk."""
+    with pytest.raises(ValueError, match="rechunk= is not supported with stack="):
+        foehn.to_zarr("radar_precip", stack=True, rechunk={"time": 24})

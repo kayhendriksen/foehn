@@ -3,9 +3,11 @@
 from unittest.mock import patch
 
 import pytest
+from conftest import write_odim_composite
 
 import foehn
 from foehn.api import open_dataset, to_zarr
+from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
 
 
@@ -221,36 +223,6 @@ def test_to_zarr_netcdf_stack_writes_combined(fetcher, tmp_path):
     assert "anom" in ds.data_vars  # both files combined into one store
 
 
-_SWISS_PROJ = (
-    "+proj=somerc +lat_0=46.95240555555556 +lon_0=7.439583333333333 +k_0=1 "
-    "+x_0=2600000 +y_0=1200000 +ellps=bessel +towgs84=674.374,15.056,405.346,0,0,0,0 +units=m +no_defs"
-)
-
-
-def _write_odim_composite(
-    path, quantity="ACRR", nodata=float("nan"), undetect=float("inf"), date="20260510", time="000000"
-):
-    """Write a tiny ODIM-H5 Cartesian COMP composite (offline radar fixture)."""
-    import h5py
-    import numpy as np
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = np.array([[0.0, 1.5, nodata], [undetect, 2.0, 3.0]], dtype="float64")
-    with h5py.File(path, "w") as f:
-        f.attrs["Conventions"] = "ODIM_H5/V2_4"
-        what = f.create_group("what")
-        what.attrs["object"] = "COMP"
-        what.attrs["date"] = date
-        what.attrs["time"] = time
-        where = f.create_group("where")
-        where.attrs.update({"xsize": 3, "ysize": 2, "xscale": 1000.0, "yscale": 1000.0, "projdef": _SWISS_PROJ})
-        where.attrs.update({"UL_lon": 2.68942, "UL_lat": 49.3744})
-        d1 = f.create_group("dataset1").create_group("data1")
-        d1.create_dataset("data", data=data)
-        dwhat = d1.create_group("what")
-        dwhat.attrs.update({"gain": 1.0, "offset": 0.0, "nodata": nodata, "undetect": undetect, "quantity": quantity})
-
-
 def test_open_dataset_reads_radar(fetcher, tmp_path):
     """End-to-end: read an ODIM COMP composite — scaling, masking, LV95 coords."""
     fetcher.any_items = _items_for("cpc2613000000_00060.001.h5")
@@ -260,7 +232,7 @@ def test_open_dataset_reads_radar(fetcher, tmp_path):
     import numpy as np
 
     base = tmp_path / "bronze" / "radar_precip"
-    _write_odim_composite(base / "cpc2613000000_00060.001.h5")
+    write_odim_composite(base / "cpc2613000000_00060.001.h5")
 
     ds = open_dataset("radar_precip", data_dir=tmp_path, match="cpc2613000000")
     assert "acrr" in ds.data_vars
@@ -289,7 +261,7 @@ def test_to_zarr_radar_writes_store(fetcher, tmp_path):
     import xarray as xr
 
     base = tmp_path / "bronze" / "radar_precip"
-    _write_odim_composite(base / "cpc2613000000_00060.001.h5")
+    write_odim_composite(base / "cpc2613000000_00060.001.h5")
 
     store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc2613000000")
     assert store.name == "radar_precip__cpc2613000000.zarr"
@@ -308,9 +280,9 @@ def test_to_zarr_radar_stacked_time_cube(fetcher, tmp_path):
     import xarray as xr
 
     base = tmp_path / "bronze" / "radar_precip"
-    _write_odim_composite(base / "cpc26130000000.h5", time="000000")
-    _write_odim_composite(base / "cpc26130000500.h5", time="000500")
-    _write_odim_composite(base / "cpc26130001000.h5", time="001000")
+    write_odim_composite(base / "cpc26130000000.h5", time="000000")
+    write_odim_composite(base / "cpc26130000500.h5", time="000500")
+    write_odim_composite(base / "cpc26130001000.h5", time="001000")
 
     store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
     ds = xr.open_zarr(store)
@@ -555,3 +527,160 @@ def test_to_zarr_with_noncf_time_reopens_cleanly(fetcher, tmp_path):
     store = to_zarr("climate_normals_grid", data_dir=tmp_path)
     roundtrip = xr.open_zarr(store)  # default CF decode must not throw
     assert "TnormY" in roundtrip.data_vars
+
+
+# --- What a cube builder refuses ---
+
+
+def test_grib2_cube_refuses_a_match_whose_files_do_not_differ(fetcher, tmp_path):
+    """Two identical fields have no axis to promote — there is no cube to build."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+    fetcher.any_items = _items_for(
+        "icon-ch1-eps-202605230000-0-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202605230000-0-t_2m-ctrl-copy.grib2",
+    )
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    for name in ("icon-ch1-eps-202605230000-0-t_2m-ctrl", "icon-ch1-eps-202605230000-0-t_2m-ctrl-copy"):
+        _write_grib2(base / f"{name}.grib2", step=0, datatime=0)
+
+    with pytest.raises(ValueError, match="nothing to assemble into a cube"):
+        to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
+
+
+def test_radar_cube_refuses_a_composite_with_no_time(fetcher, tmp_path):
+    """Without a stamp there is no axis to append along, and appending anyway would misdate it."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    fetcher.any_items = _items_for("cpc2613000000_00060.001.h5")
+    base = tmp_path / "bronze" / "radar_precip"
+    write_odim_composite(base / "cpc2613000000_00060.001.h5", date="", time="")
+
+    with pytest.raises(ValueError, match="no time coordinate"):
+        to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
+
+
+def test_radar_cube_keeps_only_the_requested_variables(fetcher, tmp_path):
+    """``variables=`` is applied per timestep, before the append."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    fetcher.any_items = _items_for("cpc2613000000_00060.001.h5", "cpc2613000500_00060.001.h5")
+    base = tmp_path / "bronze" / "radar_precip"
+    write_odim_composite(base / "cpc2613000000_00060.001.h5", time="000000")
+    write_odim_composite(base / "cpc2613000500_00060.001.h5", time="000500")
+
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True, variables="acrr")
+    cube = xr.open_zarr(store)
+
+    assert list(cube.data_vars) == ["acrr"]
+    assert cube.sizes["time"] == 2
+
+
+# --- What a NetCDF open refuses ---
+
+
+def test_netcdf_open_points_at_match_when_files_will_not_combine(fetcher, tmp_path):
+    """A heterogeneous multi-file set is the common mistake; the error has to name the fix."""
+    xr = pytest.importorskip("xarray")
+    import numpy as np
+
+    fetcher.any_items = _items_for("a.nc", "b.nc")
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+    # Same variable, incompatible shapes on the same dim: combine_by_coords cannot merge them.
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(base / "a.nc")
+    xr.Dataset({"v": (("x", "y"), np.zeros((3, 2)))}, coords={"x": [0, 1, 2], "y": [0, 1]}).to_netcdf(base / "b.nc")
+
+    with pytest.raises(ValueError, match="narrow to a coherent set with match="):
+        open_dataset("surface_derived_grid", data_dir=tmp_path)
+
+
+# --- The optional-dependency guards ---
+
+
+@pytest.mark.parametrize(
+    ("require", "missing"),
+    [
+        ("require_netcdf", "xarray"),
+        ("require_grib2", "cfgrib"),
+        ("require_radar", "h5py"),
+        ("require_radar", "pyproj"),
+    ],
+)
+def test_a_missing_grid_dependency_names_the_extra(require, missing):
+    """Checked before anything is fetched, so the message has to be the whole fix."""
+    import builtins
+
+    import foehn.grids as grids_mod
+
+    real_import = builtins.__import__
+
+    def refuse(name, *args, **kwargs):
+        if name == missing:
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    with patch.object(builtins, "__import__", refuse), pytest.raises(ImportError, match=r"foehn\[grids\]"):
+        getattr(grids_mod, require)()
+
+
+def test_a_source_that_cannot_be_read_at_all_reports_the_original_failure(tmp_path):
+    """The decode_times=False retry is for non-CF units; it must not mask an unrelated error."""
+    pytest.importorskip("xarray")
+    from foehn.grids import open_netcdf
+
+    corrupt = tmp_path / "broken.nc"
+    corrupt.write_bytes(b"not a netcdf file at all")
+
+    with pytest.raises(Exception, match=r"(?i)broken|netcdf|magic|unable"):
+        open_netcdf([corrupt], dataset="surface_derived_grid")
+
+
+def test_a_noncf_calendar_is_moved_aside_with_its_units(tmp_path):
+    """A store keeping 'years since ...' throws on every later open_zarr — so does its calendar."""
+    xr = pytest.importorskip("xarray")
+    import numpy as np
+
+    from foehn.grids import sanitize_noncf_time_units
+
+    ds = xr.Dataset({"v": ("time", np.zeros(2))}, coords={"time": [0, 1]})
+    ds["time"].attrs.update({"units": "years since 1991-01-01", "calendar": "365_day"})
+
+    sanitize_noncf_time_units(ds)
+
+    assert ds["time"].attrs["units_noncf"] == "years since 1991-01-01"
+    assert ds["time"].attrs["calendar_noncf"] == "365_day"
+    assert "units" not in ds["time"].attrs and "calendar" not in ds["time"].attrs
+
+
+def test_a_grib2_cube_recomputes_valid_time_after_combining(fetcher, tmp_path):
+    """valid_time conflicts on concat, so it is dropped before the merge and rebuilt after."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+
+    from foehn.grids import cube_grib2
+
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    files = []
+    for step in (0, 6):
+        path = base / f"icon-ch1-eps-202605230000-{step}-t_2m-ctrl.grib2"
+        _write_grib2(path, step=step, datatime=0)
+        files.append(path)
+
+    store = tmp_path / "cube.zarr"
+    with patch("foehn.grids.icon.attach_lonlat", side_effect=lambda ds, *a, **k: ds):
+        cube_grib2(files, store, dataset="forecast_icon_ch1", workspace=Workspace(tmp_path), fetcher=fetcher)
+
+    cube = xr.open_zarr(store)
+
+    assert "step" in cube.dims
+    assert (cube["valid_time"] == cube["time"] + cube["step"]).all()

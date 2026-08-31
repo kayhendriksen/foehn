@@ -9,12 +9,12 @@ skip, a ``since`` filter, first-page-only listing.
 from conftest import make_zip
 
 from foehn import registry
-from foehn.downloads import download_metadata, download_normals_zip
+from foehn.downloads import download_indoor_zip, download_metadata, download_normals_zip
 from foehn.fetch import FetchError
 from foehn.state import load_etags, save_etags
 from foehn.transfer import DownloadResult
 from foehn.workspace import Workspace
-from tests.fakes import InMemoryFetcher
+from tests.fakes import InMemoryFetcher, stac_item
 
 # --- Helpers ---
 
@@ -411,3 +411,57 @@ def test_static_download_since_filter(tmp_path):
     assert fake.gets == [] and fake.streams == []
     assert result.downloaded == 0
     assert result.filenames == []
+
+
+# --- The indoor scenarios ZIP ---
+
+
+def test_indoor_zip_downloads_and_extracts(tmp_path):
+    """The collection ships one .csv.zip rather than per-station assets."""
+    zip_bytes = make_zip({"ABE_2020_RCP26_a.csv": b"time.yy,x\n2020,1\n"})
+    fake = _fake(items=[stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")], body=zip_bytes)
+
+    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=fake)
+
+    out_dir = tmp_path / "bronze" / "climate_scenarios_indoor"
+    assert (out_dir / "indoor.zip").exists()
+    assert (out_dir / "ABE_2020_RCP26_a.csv").exists()
+    assert (result.total_assets, result.downloaded, result.skipped) == (1, 1, 0)
+    assert result.filenames == ["indoor.zip"]
+
+
+def test_indoor_zip_skips_when_already_extracted(tmp_path):
+    """The skip rule is a property of the output directory, not of one asset."""
+    out_dir = tmp_path / "bronze" / "climate_scenarios_indoor"
+    out_dir.mkdir(parents=True)
+    (out_dir / "ABE_2020_RCP26_a.csv").write_bytes(b"extracted")
+    fake = _fake(items=[stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")])
+
+    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=fake)
+
+    assert fake.streams == [] and fake.listings == []
+    assert (result.total_assets, result.downloaded, result.skipped) == (1, 0, 1)
+
+
+def test_indoor_zip_force_redownloads_over_an_extracted_directory(tmp_path):
+    """``force`` is what the CLI's --full-refresh reaches for; it must beat the skip."""
+    out_dir = tmp_path / "bronze" / "climate_scenarios_indoor"
+    out_dir.mkdir(parents=True)
+    (out_dir / "ABE_2020_RCP26_a.csv").write_bytes(b"stale")
+    zip_bytes = make_zip({"ABE_2020_RCP26_a.csv": b"fresh"})
+    fake = _fake(items=[stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")], body=zip_bytes)
+
+    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.downloaded == 1
+    assert (out_dir / "ABE_2020_RCP26_a.csv").read_bytes() == b"fresh"
+
+
+def test_indoor_zip_reports_nothing_when_the_collection_has_no_archive(tmp_path):
+    """An empty result rather than an exception: the run reports it and carries on."""
+    fake = _fake(items=[stac_item("i", "https://data.geo.admin.ch/x/notes.txt")])
+
+    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=fake)
+
+    assert result == DownloadResult()
+    assert fake.streams == []

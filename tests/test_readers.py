@@ -8,9 +8,12 @@ readers take — the normalisation that used to be written out once per reader.
 from __future__ import annotations
 
 import polars as pl
+import pytest
+from conftest import CLIMATE_SCENARIOS_CSV, make_zip
 
 from foehn.fetch import DEFAULT_WORKERS
-from foehn.readers import Filters, apply_time_filters
+from foehn.readers import Filters, apply_time_filters, read_archive, read_preamble
+from tests.fakes import InMemoryFetcher, stac_item
 
 # --- Normalisation ---
 
@@ -79,3 +82,67 @@ def test_year_and_month_combine():
     df = _frame(["2025-06-01 00:00", "2025-07-01 00:00", "2026-07-01 00:00"])
     out = apply_time_filters(df, Filters.build(year=2025, month=7))
     assert len(out) == 1
+
+
+# --- What a reader refuses ---
+
+
+def _fetcher(items, *, body=b""):
+    fake = InMemoryFetcher()
+    fake.any_items = items
+    fake.default_body = body
+    return fake
+
+
+def test_preamble_reader_narrows_items_to_the_requested_stations():
+    """The station filter runs at the item level, so an unmatched station is never fetched."""
+    fake = _fetcher(
+        [
+            stac_item("ABE", "https://data.geo.admin.ch/x/CH2025_ABE_pr_GWL1.5.csv"),
+            stac_item("BER", "https://data.geo.admin.ch/x/CH2025_BER_pr_GWL1.5.csv"),
+        ],
+        body=CLIMATE_SCENARIOS_CSV.encode(),
+    )
+
+    df = read_preamble("climate_scenarios", Filters.build(station="abe"), fetcher=fake)
+
+    assert fake.gets == ["https://data.geo.admin.ch/x/CH2025_ABE_pr_GWL1.5.csv"]
+    assert df["station_abbr"].unique().to_list() == ["ABE"]
+
+
+def test_preamble_reader_names_the_station_when_nothing_matches():
+    """ "No CSVs found" without the station is a message that cannot be acted on."""
+    fake = _fetcher([stac_item("ABE", "https://data.geo.admin.ch/x/CH2025_ABE_pr_GWL1.5.csv")])
+
+    with pytest.raises(ValueError, match=r"station=\['zzz'\]"):
+        read_preamble("climate_scenarios", Filters.build(station="ZZZ"), fetcher=fake)
+
+
+def test_archive_reader_refuses_a_collection_with_no_zip():
+    fake = _fetcher([stac_item("i", "https://data.geo.admin.ch/x/readme.txt")])
+
+    with pytest.raises(ValueError, match=r"No \.zip asset"):
+        read_archive("climate_scenarios_indoor", Filters.build(), fetcher=fake)
+
+
+def test_archive_reader_ignores_non_csv_members():
+    """A ZIP carries a licence and a readme alongside the data."""
+    zip_bytes = make_zip(
+        {
+            "README.txt": b"not data",
+            "ABE_2020_RCP26_a.csv": b"time.yy,time.mm,time.dd,time.hh,top\n2020,1,1,0,21.5\n",
+        }
+    )
+    fake = _fetcher([stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")], body=zip_bytes)
+
+    df = read_archive("climate_scenarios_indoor", Filters.build(), fetcher=fake)
+
+    assert df["station_abbr"].to_list() == ["ABE"]
+
+
+def test_archive_reader_names_the_station_when_nothing_matches():
+    zip_bytes = make_zip({"ABE_2020_RCP26_a.csv": b"time.yy,top\n2020,21.5\n"})
+    fake = _fetcher([stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")], body=zip_bytes)
+
+    with pytest.raises(ValueError, match=r"station=\['zzz'\]"):
+        read_archive("climate_scenarios_indoor", Filters.build(station="ZZZ"), fetcher=fake)

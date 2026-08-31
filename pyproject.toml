@@ -134,9 +134,13 @@ source = ["foehn"]
 branch = true
 
 [tool.coverage.report]
-# Branch coverage currently sits at ~89%. Kept a couple of points below so
-# ordinary churn doesn't go red, but a real regression does.
-fail_under = 87
+# Branch coverage sits at ~99%. What is left is three kinds of unreachable: an
+# import-time guard (foehn/__init__.py's polars smoke test, exercised by
+# executing its source rather than re-importing the package), a branch needing an
+# optional dependency the suite does not install (to_zarr's dask rechunk), and a
+# handful of defensive branches on library output. Kept a couple of points below
+# so ordinary churn doesn't go red, but a real regression does.
+fail_under = 97
 show_missing = true
 
 [tool.pytest.ini_options]
