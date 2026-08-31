@@ -42,6 +42,7 @@ from foehn.downloads import (
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.gridfiles import ensure_grid_files
 from foehn.grids import (
+    CubeAdapter,
     GridReader,
     cube_grib2,
     cube_radar,
@@ -442,6 +443,7 @@ def _write_cube(
     dataset: str,
     store: Path,
     reader: GridReader,
+    cube: CubeAdapter,
     *,
     match: str | None = None,
     variables: str | list[str] | None = None,
@@ -451,8 +453,10 @@ def _write_cube(
 ) -> None:
     """Assemble *dataset*'s matched files into one Zarr store at *store*.
 
-    Takes the reader rather than looking it up: :func:`write_zarr` has already
-    resolved it, and has already established that this kind has a cube builder.
+    Takes the reader *and* the cube adapter :func:`write_zarr` picked off it.
+    A kind with no cube builder cannot reach here, and saying that in the
+    signature is what makes it true — the runtime guard this replaces could only
+    check it after the fact.
     """
     if match is None:
         raise ValueError(
@@ -468,7 +472,7 @@ def _write_cube(
         run_datetime=reader.run_datetime,
         fetcher=fetcher,
     )
-    reader.cube(
+    cube(
         files,
         store,
         dataset=dataset,
@@ -502,9 +506,18 @@ def write_zarr(
     if stack and rechunk:
         raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
 
-    if stack and reader.cube is not None:
+    cube = reader.cube
+    if stack and cube is not None:
         _write_cube(
-            dataset, store, reader, match=match, variables=variables, mode=mode, workspace=workspace, fetcher=fetcher
+            dataset,
+            store,
+            reader,
+            cube,
+            match=match,
+            variables=variables,
+            mode=mode,
+            workspace=workspace,
+            fetcher=fetcher,
         )
         return
 
