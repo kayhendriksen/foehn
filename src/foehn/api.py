@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
 
 from foehn import registry
-from foehn.assets import collection_assets
-from foehn.collections import COLLECTION_META, COLLECTIONS, collection_id
+from foehn.collections import COLLECTION_META, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
-from foehn.grids import sanitize_noncf_time_units, write_zarr
-from foehn.meteocsv import decode_meteoswiss_csv
+from foehn.metadata import TABLES as metadata_tables
+from foehn.metadata import fetch_table
 from foehn.readers import Filters
 from foehn.transfer import DownloadResult
 from foehn.workspace import Workspace
@@ -119,61 +117,9 @@ def to_parquet(
         )
 
 
-@dataclass(frozen=True)
-class MetadataTable:
-    """One collection-level metadata file, and the columns foehn publishes from it.
-
-    The suffix is MeteoSwiss's; the renames are foehn's public column names, which
-    is why the table lives here rather than in :mod:`foehn.meteocsv`. Stating it
-    once means a fourth ``_meta_*`` file is a row — it used to be three implied
-    rename maps here, an if-ladder in the CLI, and three models in the MCP layer.
-    """
-
-    suffix: str
-    """Filename fragment identifying the file among a collection's assets."""
-
-    columns: dict[str, str]
-    """Source column → published name, in the order the frame comes back."""
-
-
-METADATA_TABLES: dict[str, MetadataTable] = {
-    "parameters": MetadataTable(
-        "_meta_parameters",
-        {
-            "parameter_shortname": "shortname",
-            "parameter_description_en": "description",
-            "parameter_unit": "unit",
-            "parameter_datatype": "type",
-            "parameter_granularity": "granularity",
-            "parameter_decimals": "decimals",
-            "parameter_group_en": "group",
-        },
-    ),
-    "stations": MetadataTable(
-        "_meta_stations",
-        {
-            "station_abbr": "abbr",
-            "station_name": "name",
-            "station_canton": "canton",
-            "station_height_masl": "altitude",
-            "station_coordinates_lv95_east": "lv95_east",
-            "station_coordinates_lv95_north": "lv95_north",
-            "station_coordinates_wgs84_lat": "lat",
-            "station_coordinates_wgs84_lon": "lon",
-            "station_data_since": "data_since",
-        },
-    ),
-    "inventory": MetadataTable(
-        "_meta_datainventory",
-        {
-            "station_abbr": "station",
-            "parameter_shortname": "parameter",
-            "data_since": "data_since",
-            "data_till": "data_till",
-            "owner": "owner",
-        },
-    ),
-}
+# Re-exported: the tables and their published column names are ``foehn.metadata``'s,
+# but ``METADATA_TABLES`` is a public name and the CLI builds its ``choices`` from it.
+METADATA_TABLES = metadata_tables
 
 
 def metadata(dataset: str, table: str) -> pl.DataFrame:
@@ -190,18 +136,7 @@ def metadata(dataset: str, table: str) -> pl.DataFrame:
     Returns:
         A Polars DataFrame with foehn's published column names.
     """
-    if table not in METADATA_TABLES:
-        raise ValueError(f"Unknown metadata table {table!r}. Valid options: {', '.join(METADATA_TABLES)}.")
-
-    spec = METADATA_TABLES[table]
-    fetcher = default_fetcher()
-    coll = fetcher.collection(collection_id(dataset))
-    for asset in collection_assets(coll, suffixes=(".csv",), contains=spec.suffix):
-        content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
-        df = pl.read_csv(content.encode("utf-8"), separator=";")
-        return df.select(pl.col(source).alias(published) for source, published in spec.columns.items())
-
-    raise ValueError(f"No {spec.suffix} metadata found for dataset {dataset!r}.")
+    return fetch_table(dataset, table, fetcher=default_fetcher())
 
 
 def parameters(dataset: str) -> pl.DataFrame:
@@ -482,41 +417,22 @@ def to_zarr(
     Returns:
         Path to the written ``.zarr`` store.
     """
-    # Also the unknown-dataset guard: the row is what says whether this kind has
-    # a cube builder, and asking for it raises for a dataset that has no row.
-    grid = registry.spec(dataset).grid
-    if stack and rechunk:
-        raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
-
     workspace = Workspace.resolve(data_dir)
     store_path = _resolve_store(dataset, match, workspace, store)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # NetCDF has no cube builder and needs none, so it falls through to the
-    # single-write path below.
-    if stack and grid is not None and grid.cube is not None:
-        registry.write_cube(
-            dataset,
-            store_path,
-            match=match,
-            variables=variables,
-            mode=mode,
-            workspace=workspace,
-            fetcher=default_fetcher(),
-        )
-        return store_path
-
-    ds = sanitize_noncf_time_units(open_dataset(dataset, variables=variables, match=match, data_dir=workspace.root))
-
-    if rechunk:
-        import importlib.util
-
-        if importlib.util.find_spec("dask") is None:
-            raise ImportError(
-                "to_zarr(rechunk=...) requires dask, which is not part of the "
-                "'grids' extra. Install it with:\n\n  pip install dask\n"
-            )
-        ds = ds.chunk(rechunk)
-
-    write_zarr(ds, store_path, mode)
+    # Which method writes it — cube or single — is the kind's row, not a branch
+    # here. So is whether the dataset has a Zarr path at all, which is what makes
+    # this the unknown-dataset guard too.
+    registry.write_zarr(
+        dataset,
+        store_path,
+        match=match,
+        variables=variables,
+        rechunk=rechunk,
+        mode=mode,
+        stack=stack,
+        workspace=workspace,
+        fetcher=default_fetcher(),
+    )
     return store_path

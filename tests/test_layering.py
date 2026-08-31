@@ -137,6 +137,24 @@ def test_every_write_to_the_workspace_stages():
     assert hand_rolled == set()
 
 
+def test_the_public_surface_only_delegates():
+    """``api`` states the public contract; every stage below it is reached through a seam.
+
+    It used to hold one stage outright — the metadata tables, fetched, decoded and
+    renamed inline — and to pick cube-vs-single itself in ``to_zarr``, which is
+    why it reached into ``assets``, ``meteocsv`` and ``grids`` while ``mcp_server``,
+    a peer front end, needed only the registry.
+    """
+    forbidden = {"assets", "meteocsv", "grids", "gridfiles", "downloads", "convert", "icon", "odim"}
+    assert _imports("api") & forbidden == set()
+
+
+def test_the_metadata_tables_have_one_consumer():
+    """Reached through ``api``'s three wrappers, like every other stage through its seam."""
+    importers = {module for module, deps in _graph().items() if "metadata" in deps}
+    assert importers == {"api"}
+
+
 def test_the_grid_fetching_has_one_consumer():
     """Like ``convert`` and ``downloads``: reached through the registry, not called directly."""
     importers = {module for module, deps in _graph().items() if "gridfiles" in deps}

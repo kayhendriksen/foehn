@@ -90,8 +90,9 @@ def test_open_dataset_honours_the_environment_variable(tmp_path, monkeypatch):
 
 def test_to_zarr_store_lands_in_the_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
-    with patch("foehn.api.open_dataset") as mock_open, patch("foehn.api.write_zarr"):
-        mock_open.return_value = object()
-        with patch("foehn.api.sanitize_noncf_time_units", side_effect=lambda ds: ds):
-            store = foehn.to_zarr("surface_derived_grid", match="rhiresd")
+    with patch("foehn.registry.write_zarr") as mock:
+        store = foehn.to_zarr("surface_derived_grid", match="rhiresd")
+
     assert store == Workspace(tmp_path).zarr("surface_derived_grid__rhiresd")
+    assert mock.call_args.args[1] == store
+    assert mock.call_args.kwargs["workspace"] == Workspace(tmp_path)

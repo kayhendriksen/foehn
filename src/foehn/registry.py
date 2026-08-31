@@ -48,11 +48,14 @@ from foehn.grids import (
     open_grib2,
     open_netcdf,
     open_radar,
+    require_dask,
     require_grib2,
     require_netcdf,
     require_radar,
+    sanitize_noncf_time_units,
     select_variables,
 )
+from foehn.grids import write_zarr as grids_write_zarr
 from foehn.transfer import DownloadResult, already_current, csv_to_disk, exists
 
 if TYPE_CHECKING:
@@ -435,9 +438,10 @@ def open_grid(
     return select_variables(reader.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher), variables)
 
 
-def write_cube(
+def _write_cube(
     dataset: str,
     store: Path,
+    reader: GridReader,
     *,
     match: str | None = None,
     variables: str | list[str] | None = None,
@@ -447,13 +451,9 @@ def write_cube(
 ) -> None:
     """Assemble *dataset*'s matched files into one Zarr store at *store*.
 
-    Callers guard on ``spec(dataset).grid.cube`` first — a kind with no cube
-    builder needs none, which is a fact about the kind rather than a branch.
+    Takes the reader rather than looking it up: :func:`write_zarr` has already
+    resolved it, and has already established that this kind has a cube builder.
     """
-    reader = _grid_reader(dataset)
-    if reader.cube is None:
-        fmt = COLLECTION_META[dataset]["format"]
-        raise ValueError(f"Dataset {dataset!r} is {fmt}; a multi-file match= already combines on read.")
     if match is None:
         raise ValueError(
             f'stack= needs match= to scope the cube for {dataset!r}, e.g. match="{reader.cube_match_example}".'
@@ -477,6 +477,44 @@ def write_cube(
         variables=variables,
         mode=mode,
     )
+
+
+def write_zarr(
+    dataset: str,
+    store: Path,
+    *,
+    match: str | None = None,
+    variables: str | list[str] | None = None,
+    rechunk: dict[str, int] | None = None,
+    mode: str = "w",
+    stack: bool = False,
+    workspace: Workspace,
+    fetcher: Fetcher,
+) -> None:
+    """Write *dataset* to a Zarr store at *store*, by whichever method its kind uses.
+
+    ``stack`` asks for a cube; whether the kind *has* a cube builder is the row's
+    to say. NetCDF has none and needs none — a multi-file ``match`` combines on
+    read — so it falls through to the single write rather than raising, and
+    ``api.to_zarr`` no longer has to know that.
+    """
+    reader = _grid_reader(dataset)
+    if stack and rechunk:
+        raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
+
+    if stack and reader.cube is not None:
+        _write_cube(
+            dataset, store, reader, match=match, variables=variables, mode=mode, workspace=workspace, fetcher=fetcher
+        )
+        return
+
+    ds = sanitize_noncf_time_units(
+        open_grid(dataset, match=match, variables=variables, workspace=workspace, fetcher=fetcher)
+    )
+    if rechunk:
+        require_dask()
+        ds = ds.chunk(rechunk)
+    grids_write_zarr(ds, store, mode)
 
 
 def convert(dataset: str, workspace: Workspace) -> int:
