@@ -3,6 +3,10 @@
 # CI cannot disagree about what "clean" means — they were previously kept in step
 # by hand, and a drifting ruff turns green PRs red with no code change.
 # Dependabot bumps these revs weekly (see .github/dependabot.yml).
+#
+# ty is the exception, and runs the other way round: its pin lives in the
+# pyproject dev extra, which is what CI installs from, so the hook below invokes
+# that one rather than carrying a second rev here to drift from it.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.4
@@ -35,6 +39,20 @@ repos:
     rev: v1.7.12
     hooks:
       - id: actionlint
+
+  # The typecheck CI runs, at the same pin — foehn ships py.typed, so these
+  # annotations are a published interface. Nothing ran it before a push, and a
+  # dict whose values ty widened to a union reached a branch 69 diagnostics deep.
+  # Checks all of src/ rather than the staged files, exactly as CI does: an
+  # annotation changed in one module is what breaks the call in another.
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check src
+        entry: uv run --extra dev ty check src/
+        language: system
+        pass_filenames: false
+        files: ^(src/foehn/.*\.py|pyproject\.toml)$
 
   # Workflow static analysis, same version CI runs.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
