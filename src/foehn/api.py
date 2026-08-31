@@ -10,9 +10,6 @@ import polars as pl
 
 from foehn import registry
 from foehn.assets import collection_assets
-from foehn.client import (
-    DownloadResult,
-)
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
@@ -23,6 +20,7 @@ from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.grids import sanitize_noncf_time_units, write_zarr
 from foehn.meteocsv import decode_meteoswiss_csv
 from foehn.readers import Filters
+from foehn.transfer import DownloadResult
 from foehn.workspace import Workspace
 
 if TYPE_CHECKING:

@@ -12,9 +12,9 @@ import polars as pl
 
 from foehn import registry
 from foehn.api import inventory, list_datasets, parameters, stations
-from foehn.client import load_last_run, save_last_run
 from foehn.collections import COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
+from foehn.state import load_last_run, save_last_run
 from foehn.workspace import Workspace
 
 

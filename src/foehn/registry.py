@@ -4,7 +4,7 @@ One table replacing the routing ladders that used to sit in ``api``, ``cli`` and
 the Databricks ingest script, each re-deriving from a different set of dataset
 keys. Callers ask the registry instead of testing membership.
 
-Layering: ``collections`` (dataset facts) → ``client``/``convert``/``readers``/
+Layering: ``collections`` (dataset facts) → ``downloads``/``convert``/``readers``/
 ``grids`` (adapters) → this module → ``api``/``cli``/``mcp_server``. All four
 pipeline stages route through the table: the load readers live in
 ``foehn.readers`` and the grid readers in ``foehn.grids``, both below this
@@ -19,18 +19,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from foehn.client import (
-    DownloadResult,
-    download_indoor_zip,
-    download_normals_zip,
-    stac_download,
-)
 from foehn.collections import COLLECTION_META, COLLECTIONS, KIND_OF, DatasetKind, kind
 from foehn.convert import (
     convert_indoor_to_parquet,
     convert_normals_to_parquet,
     convert_preamble_to_parquet,
     convert_to_parquet,
+)
+from foehn.downloads import (
+    download_indoor_zip,
+    download_normals_zip,
+    stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.grids import (
@@ -46,7 +45,7 @@ from foehn.grids import (
     require_radar,
     select_variables,
 )
-from foehn.transfer import already_current, csv_to_disk, exists
+from foehn.transfer import DownloadResult, already_current, csv_to_disk, exists
 
 if TYPE_CHECKING:
     import polars as pl

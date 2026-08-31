@@ -24,7 +24,7 @@ from foehn.api import (
     to_parquet,
     to_zarr,
 )
-from foehn.client import DownloadResult
+from foehn.transfer import DownloadResult
 
 __all__ = [
     "DownloadResult",

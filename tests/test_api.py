@@ -64,7 +64,7 @@ def test_download_unknown_dataset_raises():
 @patch("foehn.registry.download")
 def test_download_delegates_to_the_registry(mock_dl, dataset, tmp_path):
     """Whichever kind it is, download() hands it to the registry and returns the result."""
-    from foehn.client import DownloadResult
+    from foehn.transfer import DownloadResult
 
     mock_dl.return_value = DownloadResult(total_assets=1, downloaded=1)
 
@@ -89,7 +89,7 @@ def _make_indoor_zip(data_names):
 
 @patch("foehn.registry.download")
 def test_download_passes_force_through(mock_dl, tmp_path):
-    from foehn.client import DownloadResult
+    from foehn.transfer import DownloadResult
 
     mock_dl.return_value = DownloadResult()
     download("climate_scenarios_indoor", data_dir=tmp_path, force=True)
@@ -285,7 +285,7 @@ def test_load_forecast_local_fetches_only_latest_run(fetcher):
 
 @patch("foehn.registry.download")
 def test_download_passes_the_requested_time_slice(mock_dl, tmp_path):
-    from foehn.client import DownloadResult
+    from foehn.transfer import DownloadResult
 
     mock_dl.return_value = DownloadResult()
     download("smn", data_dir=tmp_path, time_slice=["historical"])

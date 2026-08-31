@@ -1,66 +1,30 @@
-"""Download MeteoSwiss data from the STAC API and opendata.swiss."""
+"""How one dataset's assets become files in :term:`Bronze`.
+
+One :func:`stac_download` engine configured per dataset kind, plus the two kinds
+that do not list STAC at all and ship a ZIP instead. Every adapter here has the
+shape :class:`~foehn.registry.DownloadAdapter` names, so the registry row holds
+one whichever path a kind takes.
+
+Was ``client`` — a name :file:`CONTEXT.md` tells you not to use (the **Fetcher**
+entry ends "_Avoid_: client, session, transport"), on the one module in the tree
+that makes no HTTP call itself. It also held the state files and the ZIP guards,
+which are :mod:`foehn.state` and :mod:`foehn.archives` now.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
-import zipfile
-from datetime import UTC, datetime
 from pathlib import Path
 
+from foehn.archives import safe_extract
 from foehn.assets import assets_of, collection_assets, latest_run_of, select
 from foehn.collections import CLIMATE_NORMALS_ZIP_URL, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
-from foehn.transfer import (
-    DownloadResult,
-    SkipRule,
-    Writer,
-    atomic_write_text,
-    csv_to_disk,
-    fetch_all,
-    stream_to_disk,
-)
+from foehn.state import load_etags, save_etags
+from foehn.transfer import DownloadResult, SkipRule, Writer, csv_to_disk, fetch_all, stream_to_disk
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
-
-
-# --- State files (ETags + last-run timestamp) ---
-
-
-def load_etags(workspace: Workspace) -> dict:
-    path = workspace.etags
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read %s (%s) — treating as empty", path, exc)
-    return {}
-
-
-def save_etags(workspace: Workspace, etags: dict):
-    path = workspace.etags
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(etags, indent=2))
-
-
-def load_last_run(workspace: Workspace) -> str | None:
-    """Return ISO timestamp of last successful run, or None."""
-    path = workspace.last_run
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read %s (%s) — treating as no previous run", path, exc)
-            return None
-        return data.get("timestamp")
-    return None
-
-
-def save_last_run(workspace: Workspace):
-    path = workspace.last_run
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
 
 
 # --- One listing path, configured per dataset kind ---
@@ -227,47 +191,6 @@ def download_metadata(
     )
 
 
-# --- ZIP safety (zip-slip + decompression-bomb guards) ---
-
-# Cap on declared total decompressed size. Generous — the largest legitimate
-# archive (indoor scenarios) is well under this — but stops a decompression
-# bomb from a compromised upstream filling the disk (or RAM, for in-memory
-# reads). Python's zipfile enforces each member's declared size on read, so
-# checking the headers is sufficient.
-_MAX_ZIP_EXTRACT_BYTES = 10 * 1024**3  # 10 GiB
-
-
-def check_zip_size(zf: zipfile.ZipFile, source: str) -> None:
-    """Raise ValueError if the archive declares more decompressed bytes than the cap.
-
-    Public because the archive *load* path reads its ZIP in memory rather than
-    through :func:`_safe_extract_zip`, and has to apply the same cap. One rule,
-    one place — the reader crossing this seam is part of the interface.
-    """
-    total = sum(m.file_size for m in zf.infolist())
-    if total > _MAX_ZIP_EXTRACT_BYTES:
-        raise ValueError(
-            f"ZIP {source!r} declares {total / 1e9:.1f} GB decompressed "
-            f"(cap {_MAX_ZIP_EXTRACT_BYTES / 1e9:.0f} GB) — refusing to extract."
-        )
-
-
-def _safe_extract_zip(zip_path: Path, out_dir: Path) -> int:
-    """Extract a ZIP after validating total size and member paths. Returns member count."""
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        check_zip_size(zf, zip_path.name)
-        resolved_out_dir = out_dir.resolve()
-        for member in zf.infolist():
-            target = (resolved_out_dir / member.filename).resolve()
-            # Path comparison, not string prefixing: a hardcoded "/" separator
-            # rejects every legitimate member on Windows, where the resolved
-            # target is separated by "\" and nothing ever matches the prefix.
-            if target == resolved_out_dir or not target.is_relative_to(resolved_out_dir):
-                raise ValueError(f"Unsafe path in ZIP: {member.filename!r}")
-        zf.extractall(out_dir)
-        return len(zf.namelist())
-
-
 # --- C6 climate normals ZIP ---
 
 
@@ -296,7 +219,7 @@ def download_normals_zip(
     fetcher.stream(CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
     logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)
 
-    extracted = _safe_extract_zip(filepath, out_dir)
+    extracted = safe_extract(filepath, out_dir)
     logger.info("  Extracted %d files", extracted)
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["normwerte.zip"])
@@ -336,7 +259,7 @@ def download_indoor_zip(
     fetcher.stream(archive.href, zip_path, timeout=300)
     logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)
 
-    extracted = _safe_extract_zip(zip_path, out_dir)
+    extracted = safe_extract(zip_path, out_dir)
     logger.info("  Extracted %d files", extracted)
 
     return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=[zip_path.name])
