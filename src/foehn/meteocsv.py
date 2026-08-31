@@ -23,6 +23,7 @@ import io
 import logging
 import re
 from pathlib import Path
+from typing import TypedDict
 
 import polars as pl
 
@@ -245,6 +246,28 @@ def parse_csv_bytes(
         raise last_err from None
 
 
+def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataType]] | None = None):
+    """Lazily scan one standard MeteoSwiss CSV, without reading it.
+
+    The lazy half of :func:`parse_csv_bytes`, which is the eager one. The convert
+    stage used to spell these options out itself — the last kind whose conventions
+    were stated above this module — because the dtype-drift retry is wrapped
+    around the scan. That retry is the convert stage's: it re-runs the sink, and
+    passes the widened types back in through *schema_overrides*.
+
+    A wider schema window than the eager path's, on purpose: a scan pays for the
+    inferred rows once per file rather than holding the file, and the converter's
+    groups are whole historical series.
+    """
+    return pl.scan_csv(
+        path,
+        separator=";",
+        try_parse_dates=True,
+        schema_overrides=schema_overrides or None,
+        infer_schema_length=10_000,
+    )
+
+
 def add_forecast_local_timestamp(frame):
     """Add a parsed reference_timestamp from forecast_local's compact Date column.
 
@@ -324,22 +347,76 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
 _INDOOR_TIME_COLS = ["time.yy", "time.mm", "time.dd", "time.hh"]
 
 
-def parse_indoor_filename(stem: str) -> tuple[str, str, str, str] | None:
-    """Parse an indoor scenario filename into (station, period, scenario, variant).
+class _IndoorCsvOptions(TypedDict):
+    """How MeteoSwiss writes the indoor archive's member CSVs.
+
+    A TypedDict rather than a plain dict so the two ``**`` unpackings below stay
+    checked: a plain one widens every value to the union of all of them, and
+    ``separator=`` then looks like it might be handed an ``int``.
+    """
+
+    separator: str
+    infer_schema_length: int
+    truncate_ragged_lines: bool
+
+
+# Comma-separated, with the timestamp split across four integer columns. Stated
+# once, for both the eager read and the lazy scan — the load path and the convert
+# stage each used to spell them out.
+_INDOOR_CSV_OPTIONS: _IndoorCsvOptions = {
+    "separator": ",",
+    "infer_schema_length": 10_000,
+    "truncate_ragged_lines": True,
+}
+
+
+def indoor_station(filename: str) -> str | None:
+    """Whose data an indoor archive member is, or None if it is not data at all.
 
     Data files are ``{station}_{period}_{scenario}_{variant}`` with a 4-digit
-    year as the period. Returns None for anything else (e.g. the archive's
-    metadata CSV), so callers can skip non-data files.
+    year as the period; the archive ships a metadata CSV alongside them. Both
+    callers ask this before reading — the load path to skip a station it was not
+    asked for, the convert stage to count what it skipped — so it is one
+    question, asked of the name, and not a by-product of parsing the file.
     """
-    parts = stem.split("_")
+    parsed = _parse_indoor_filename(filename)
+    return None if parsed is None else parsed[0]
+
+
+def _parse_indoor_filename(filename: str) -> tuple[str, str, str, str] | None:
+    """Split a member's stem into (station, period, scenario, variant), or None."""
+    parts = Path(filename).name.removesuffix(".csv").split("_")
     if len(parts) < 4 or not parts[1].isdigit():
         return None
     return parts[0], parts[1], parts[2], "_".join(parts[3:])
 
 
-def add_indoor_columns(frame, station: str, period: str, scenario: str, variant: str):
+def parse_indoor_csv(content: bytes, filename: str) -> pl.DataFrame:
+    """Read one indoor archive member from memory, tagged from its filename.
+
+    The in-memory path, used when the ZIP is streamed rather than extracted; the
+    converter uses :func:`scan_indoor_csv`. Both are given a member the caller
+    has already accepted via :func:`indoor_station`.
+    """
+    return _add_indoor_columns(pl.read_csv(content, **_INDOOR_CSV_OPTIONS), _indoor_identity(filename))
+
+
+def scan_indoor_csv(path: Path) -> pl.LazyFrame:
+    """Lazily scan one extracted indoor archive member, tagged from its filename."""
+    return _add_indoor_columns(pl.scan_csv(path, **_INDOOR_CSV_OPTIONS), _indoor_identity(path.name))
+
+
+def _indoor_identity(filename: str) -> tuple[str, str, str, str]:
+    parsed = _parse_indoor_filename(filename)
+    if parsed is None:
+        raise ValueError(f"{filename!r} is not an indoor data CSV — check indoor_station() before reading it.")
+    return parsed
+
+
+def _add_indoor_columns(frame, identity: tuple[str, str, str, str]):
     """Add reference_timestamp + filename-derived columns and drop the raw time
     columns. Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv)."""
+    station, period, scenario, variant = identity
     return frame.with_columns(
         pl.datetime(
             pl.col("time.yy"),
@@ -357,7 +434,7 @@ def add_indoor_columns(frame, station: str, period: str, scenario: str, variant:
 _CS_HEADER_PREFIX = "DATE;"
 
 
-def parse_climate_scenarios_filename(filename: str) -> tuple[str, str, str]:
+def _parse_climate_scenarios_filename(filename: str) -> tuple[str, str, str]:
     """Parse a climate-scenario filename into (station, variable, gwl).
 
     Files are named ``ogd-climate-scenarios-ch2025_{station}_{variable}_{gwl}``.
@@ -373,7 +450,7 @@ def parse_climate_scenarios_filename(filename: str) -> tuple[str, str, str]:
     return parts[-3], parts[-2], parts[-1]
 
 
-def add_climate_scenarios_columns(frame, station: str, variable: str, gwl: str):
+def _add_climate_scenarios_columns(frame, station: str, variable: str, gwl: str):
     """Add filename-derived columns and move the key columns to the front.
 
     Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv)."""
@@ -406,7 +483,7 @@ def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataF
     if header_idx is None:
         raise ValueError(f"No 'DATE;' data header found in {filename!r}")
 
-    station, variable, gwl = parse_climate_scenarios_filename(filename)
+    station, variable, gwl = _parse_climate_scenarios_filename(filename)
 
     table = "\n".join(lines[header_idx:])
     df = pl.read_csv(
@@ -415,7 +492,7 @@ def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataF
         infer_schema_length=20_000,
         truncate_ragged_lines=True,
     )
-    return add_climate_scenarios_columns(df, station, variable, gwl)
+    return _add_climate_scenarios_columns(df, station, variable, gwl)
 
 
 def _climate_scenarios_preamble_lines(path: Path) -> int:
@@ -438,7 +515,7 @@ def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
     newlines, ignoring CSV quoting, so a stray quote in a metadata value can't
     shift the header offset.
     """
-    station, variable, gwl = parse_climate_scenarios_filename(path.name)
+    station, variable, gwl = _parse_climate_scenarios_filename(path.name)
     lf = pl.scan_csv(
         path,
         separator=";",
@@ -446,4 +523,4 @@ def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
         infer_schema_length=20_000,
         truncate_ragged_lines=True,
     )
-    return add_climate_scenarios_columns(lf, station, variable, gwl)
+    return _add_climate_scenarios_columns(lf, station, variable, gwl)

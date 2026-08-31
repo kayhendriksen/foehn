@@ -12,7 +12,7 @@ import polars as pl
 
 from foehn import registry
 from foehn.api import METADATA_TABLES, list_datasets, metadata
-from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS
+from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS, DEFAULT_TIME_SLICE
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
 from foehn.state import load_last_run, save_last_run
 from foehn.workspace import Workspace
@@ -87,7 +87,7 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     full_refresh = args.full_refresh or os.environ.get("FOEHN_FULL_REFRESH", "").lower() in ("1", "true", "yes")
 
-    time_slices = ["recent"]
+    time_slices = [DEFAULT_TIME_SLICE]
     if args.all or args.now:
         time_slices.append("now")
     if args.all or args.historical:

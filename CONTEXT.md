@@ -285,6 +285,40 @@ _Avoid_: query, params, options
   state** reached into **Transfer**, the download engine, for a filesystem
   primitive that was never the download path's to own. Resolved: `atomicwrite` is
   a leaf and `test_layering` fails a module that hand-rolls the move itself.
+- The default **Time slice** was the token `"recent"`, written at four code sites
+  — the `Filters` field, its builder, `registry.download` and the CLI — and again
+  as prose in four docstrings. Resolved: `collections.DEFAULT_TIME_SLICE` is the
+  fact and every site reads it.
+- `load()`'s docstring named the **Granularity** and **Time slice** tokens as
+  prose, and so did `load_data`'s and `describe_data`'s — the latter two directly
+  under the comment in `mcp_server` saying a tool docstring is rendered from the
+  tables, never retyped beside them. The rule had been stated for one front end
+  and half-applied there. Resolved: the renderer is `docstrings.renders`, a leaf
+  under both front ends; `collections.options` renders a label table as prose;
+  and `test_docstrings` asserts every offered token reaches every surface that
+  offers it, so the rendering is load-bearing rather than a convention.
+- The layering guards that could not be asked of the import graph were substring
+  matches on the source — `".replace(path)"`, `"separator="`, `".chunk("`. Brittle
+  both ways: `"dask"` matched a comment, and `".replace(path)"` would have missed
+  `tmp.replace(target)`. Resolved: they read the tree — which names a module
+  calls, which constants it passes as a keyword, whether it calls
+  `<path>.replace(x)` with the one argument that tells `Path.replace` from
+  `str.replace`.
+- The **Standard CSV** kind's scan options were stated in the convert stage
+  rather than in **MeteoSwiss CSV**, because the dtype-drift retry is wrapped
+  around them. The last kind whose conventions sat above the module that owns
+  them. Resolved: `meteocsv.scan_standard_csv` is the lazy half of
+  `parse_csv_bytes`; the retry stays in the convert stage and passes the widened
+  types back in. What convert still spells out is the **Direct ZIP** kind's
+  tab-separated TXT, whose only reader it is.
+- The **Archive CSV** kind's member files were read in two places — `readers`
+  for the load path, `convert` for the Parquet stage — each spelling out
+  upstream's separator and schema window and then calling the two `meteocsv`
+  helpers in the right order. Every other kind already had its eager reader and
+  its lazy scanner in **MeteoSwiss CSV**, each owning its own read options.
+  Resolved: `indoor_station` answers whether a member is data and whose, and
+  `parse_indoor_csv`/`scan_indoor_csv` read one. The load path now spells out no
+  CSV convention at all.
 - The Zarr store's name — `<dataset>` unfiltered, `<dataset>__<match>` otherwise —
   was derived in `api` and handed to `Workspace.zarr()` as a finished string, so
   that method documented the encoding as its caller's job. The one path foehn

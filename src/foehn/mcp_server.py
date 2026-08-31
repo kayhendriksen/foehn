@@ -10,7 +10,6 @@ GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``
 from __future__ import annotations
 
 import logging
-from string import Template
 from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -24,9 +23,12 @@ from foehn.collections import (
     CATEGORY_LABELS,
     COLLECTION_META,
     COLLECTIONS,
+    DEFAULT_TIME_SLICE,
     GRANULARITY_LABELS,
     TIME_SLICE_LABELS,
+    options,
 )
+from foehn.docstrings import renders
 
 logger = logging.getLogger(__name__)
 
@@ -68,24 +70,18 @@ _INSPECTABLE_GRIDS = sorted(registry.grid_datasets())
 # treatment as the guide: rendered from the tables, never retyped beside them.
 # Both had already drifted. The guide told callers ``sort`` defaults to "asc";
 # ``load_data`` named twelve loadable datasets when the registry had thirteen.
-_LOADABLE_LIST = ", ".join(_LOADABLE_DATASETS)
-_CATEGORY_OPTIONS = ", ".join(f'"{code}" ({label.lower()})' for code, label in CATEGORY_LABELS.items())
 _CATEGORY_CODES = ", ".join(sorted(CATEGORIES))
 
-
-def _renders(**fragments: str):
-    """Fill a tool docstring's placeholders before the server reads it.
-
-    Spelled ``$name`` rather than ``{name}`` so a docstring stays free to contain
-    a brace. Sits *below* ``@mcp.tool`` so the finished text is what registers.
-    """
-
-    def apply(fn):
-        if fn.__doc__:  # python -OO strips docstrings
-            fn.__doc__ = Template(fn.__doc__).safe_substitute(**fragments)
-        return fn
-
-    return apply
+# What every tool docstring below is filled from. ``load_data`` and
+# ``describe_data`` used to name the granularity and time-slice tokens as prose,
+# directly under the comment above saying they would not.
+_VOCABULARY = {
+    "loadable": ", ".join(_LOADABLE_DATASETS),
+    "categories": options(CATEGORY_LABELS),
+    "granularities": options(GRANULARITY_LABELS),
+    "time_slices": options(TIME_SLICE_LABELS),
+    "default_time_slice": DEFAULT_TIME_SLICE,
+}
 
 
 mcp = MCPServer(
@@ -120,7 +116,7 @@ mcp = MCPServer(
 class Dataset(BaseModel):
     dataset: str = Field(description="Short name used in API calls (e.g. 'smn')")
     collection_id: str = Field(description="STAC collection ID")
-    category: str = Field(description=f"MeteoSwiss category: {_CATEGORY_OPTIONS}")
+    category: str = Field(description=f"MeteoSwiss category: {_VOCABULARY['categories']}")
     subcategory: str = Field(description="Subcategory code (e.g. 'A1')")
     description: str = Field(description="Human-readable description")
     format: str = Field(description="Data format (CSV, GRIB2, NetCDF, etc.)")
@@ -198,7 +194,7 @@ class GridSummary(BaseModel):
 
 
 @mcp.tool(title="List datasets", annotations=_READ_ONLY)
-@_renders(categories=_CATEGORY_OPTIONS)
+@renders(**_VOCABULARY)
 def list_datasets(category: str | None = None) -> list[Dataset]:
     """List all available MeteoSwiss datasets.
 
@@ -218,7 +214,7 @@ def list_datasets(category: str | None = None) -> list[Dataset]:
 
 
 @mcp.tool(title="Load data", annotations=_READ_ONLY)
-@_renders(loadable=_LOADABLE_LIST)
+@renders(**_VOCABULARY)
 def load_data(
     dataset: str,
     station: list[str] | None = None,
@@ -249,11 +245,10 @@ def load_data(
         station: Station abbreviation(s) (e.g. ["BER"] for Bern, or ["BER", "ZUR"]).
             Case-insensitive. Use get_stations() to find abbreviations.
             If omitted, returns all stations (may be large).
-        frequency: Time frequency. Options: "t" (10-min), "h" (hourly), "d" (daily),
-            "m" (monthly), "y" (yearly). Not all datasets support all frequencies —
-            check list_datasets() for the "frequencies" field.
-        time_slice: Time period. Options: "historical" (start of measurements to end
-            of last year), "recent" (this calendar year, default), "now" (last 24h).
+        frequency: Granularity. Options: $granularities. Not all datasets support
+            all of them — check list_datasets() for the "frequencies" field.
+        time_slice: Time period. Options: $time_slices.
+            Defaults to "$default_time_slice".
         year: Filter to specific year(s) (e.g. [2025] or [2020, 2021, 2022]).
             Applied after loading, so use with time_slice="historical" to get
             past years without hitting the row limit.
@@ -298,6 +293,7 @@ def load_data(
 
 
 @mcp.tool(title="Describe data", annotations=_READ_ONLY)
+@renders(**_VOCABULARY)
 def describe_data(
     dataset: str,
     station: list[str] | None = None,
@@ -328,8 +324,8 @@ def describe_data(
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
         station: Station abbreviation(s) to filter by.
-        frequency: Time frequency filter ("t", "h", "d", "m", "y").
-        time_slice: Time period ("historical", "recent", "now").
+        frequency: Granularity filter. Options: $granularities.
+        time_slice: Time period. Options: $time_slices.
         year: Filter to specific year(s) (e.g. [2025]).
         month: Filter to specific month(s) (1-12).
         date_from: Start date (inclusive), ISO format "YYYY-MM-DD".

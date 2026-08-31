@@ -34,6 +34,57 @@ def _imports(module: str) -> set[str]:
     return found - {module}
 
 
+def _calls(module: str) -> set[str]:
+    """Every function or method name called in *module*.
+
+    Read from the tree rather than matched in the text: ``"dask" in source`` was
+    true of a comment, and ``".chunk(" in source`` would be true of a docstring.
+    A rule worth asserting is worth asserting about the code.
+    """
+    tree = ast.parse((SRC / f"{module}.py").read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            names.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return names
+
+
+def _keyword_values(module: str, keyword: str) -> set[object]:
+    """Every constant passed as *keyword* at a call in *module*."""
+    tree = ast.parse((SRC / f"{module}.py").read_text(encoding="utf-8"))
+    found: set[object] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == keyword and isinstance(kw.value, ast.Constant):
+                found.add(kw.value.value)
+    return found
+
+
+def _renames_a_path(module: str) -> bool:
+    """Whether *module* calls ``<path>.replace(target)`` — the move half of staging.
+
+    One positional argument and no keywords is what tells it apart from
+    ``str.replace``, which takes at least two. The substring this replaces could
+    not, which is why it was spelled ``.replace(path)`` and would have missed
+    ``.replace(self.target)``.
+    """
+    tree = ast.parse((SRC / f"{module}.py").read_text(encoding="utf-8"))
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "replace"
+        and len(node.args) == 1
+        and not node.keywords
+        for node in ast.walk(tree)
+    )
+
+
 def _graph() -> dict[str, set[str]]:
     return {p.stem: _imports(p.stem) for p in SRC.glob("*.py") if p.stem != "__init__"}
 
@@ -91,9 +142,12 @@ def test_meteocsv_is_the_bottom_of_the_read_stack():
     assert _imports("meteocsv") <= {"collections"}
 
 
-@pytest.mark.parametrize("module", ["collections", "workspace", "_urls", "archives", "odim", "atomicwrite"])
+@pytest.mark.parametrize(
+    "module", ["collections", "workspace", "_urls", "archives", "odim", "atomicwrite", "docstrings"]
+)
 def test_the_leaf_modules_import_no_foehn(module):
-    """Dataset facts, the layout, URL validation, the ZIP guards, ODIM and staging sit under everything.
+    """Dataset facts, the layout, URL validation, the ZIP guards, ODIM, staging and
+    docstring rendering sit under everything.
 
     ``odim`` is upstream's radar file format and nothing else: one path in, one
     Dataset out. It takes ``xr`` as an argument rather than importing it, so it
@@ -129,12 +183,11 @@ def test_every_write_to_the_workspace_stages():
     Guards the rule itself rather than the imports: a fifth writer that hand-rolls
     ``.replace`` is exactly the regression this split was for.
     """
-    hand_rolled = {
-        module
-        for module in ("transfer", "convert", "fetch", "state", "downloads", "gridfiles")
-        if ".replace(path)" in (SRC / f"{module}.py").read_text(encoding="utf-8")
-    }
+    writers = ("transfer", "convert", "fetch", "state", "downloads", "gridfiles")
+    hand_rolled = {module for module in writers if _renames_a_path(module)}
     assert hand_rolled == set()
+    # And the rule has somewhere to live: the leaf that owns it does the move.
+    assert _renames_a_path("atomicwrite")
 
 
 def test_the_public_surface_only_delegates():
@@ -177,7 +230,34 @@ def test_the_registry_routes_a_zarr_write_without_knowing_the_recipe():
     Guards the rule rather than the imports: restating either step above the
     seam is the regression, however it is spelled.
     """
-    source = (SRC / "registry.py").read_text(encoding="utf-8")
-    assert "sanitize" not in source
-    assert "require_dask" not in source
-    assert ".chunk(" not in source
+    called = _calls("registry")
+    assert not {name for name in called if "sanitize" in name}
+    assert "require_dask" not in called
+    assert "chunk" not in called
+
+
+def test_the_load_path_reads_no_csv_itself():
+    """Every CSV the load path parses is parsed by ``meteocsv``.
+
+    The indoor archive's members were the exception: their separator and schema
+    window were spelled out in ``readers`` and again in ``convert``, above the
+    module that owns upstream's conventions, while every other kind already had
+    an eager reader and a lazy scanner down there.
+    """
+    called = _calls("readers")
+    assert not called & {"read_csv", "scan_csv"}
+    assert _keyword_values("readers", "separator") == set()
+
+
+def test_the_convert_stage_states_one_upstream_convention():
+    """The normals TXT, and nothing else.
+
+    The indoor archive's separator was stated here and in ``readers``; the
+    standard kind's was stated here and, differently, in ``meteocsv`` — the last
+    kind whose conventions sat above the module that owns them, because the
+    dtype-drift retry is wrapped around its scan. The retry stayed; the scan
+    moved. What is left is the **Direct ZIP** kind's tab-separated TXT, which has
+    no reader of its own: this stage is its only consumer, so a seam for it would
+    have exactly one adapter.
+    """
+    assert _keyword_values("convert", "separator") == {"\t"}
