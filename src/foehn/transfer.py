@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from foehn import atomicwrite
 from foehn.assets import Asset
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import utf8_meteoswiss_csv
@@ -69,25 +70,6 @@ class DownloadResult:
             failed=self.failed + other.failed,
             filenames=self.filenames + other.filenames,
         )
-
-
-# --- Atomic writes ---
-
-
-def atomic_write_bytes(path: Path, data: bytes | memoryview) -> None:
-    """Write bytes via a sibling temp file + Path.replace so readers never see a torn write."""
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_bytes(data)
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    """Write text via a sibling temp file + Path.replace so readers never see a torn write."""
-    atomic_write_bytes(path, text.encode("utf-8"))
 
 
 # --- Writers: how one asset becomes one file ---
@@ -164,7 +146,7 @@ def csv_to_disk(fetcher: Fetcher, asset: Asset, path: Path, etag: str | None) ->
     fetched = fetcher.get(asset.href, etag=validator, timeout=60)
     if fetched.not_modified:
         return WriteResult(downloaded=False)
-    atomic_write_bytes(path, utf8_meteoswiss_csv(fetched.body))
+    atomicwrite.write_bytes(path, utf8_meteoswiss_csv(fetched.body))
     return WriteResult(downloaded=True, etag=fetched.etag)
 
 
@@ -304,8 +286,6 @@ __all__ = [
     "WriteResult",
     "Writer",
     "already_current",
-    "atomic_write_bytes",
-    "atomic_write_text",
     "csv_to_disk",
     "exists",
     "fetch_all",

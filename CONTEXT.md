@@ -149,6 +149,20 @@ filename rules that carry station, **Granularity**, **Time slice** and
 the load path, the convert stage and the Databricks ingest script alike.
 _Avoid_: parsing, format (a **Format** is a value; this is the rules for one)
 
+**Staging**:
+Writing to a sibling temp file and moving it onto the target, so a write that
+dies part-way leaves nothing rather than a truncated file with a fresh mtime —
+which every skip rule above it reads as "already done". One rule, under the
+**Fetcher**, **Transfer**, the convert stage and **Run state** alike.
+_Avoid_: atomic (it is not atomic on every filesystem; the move is what matters)
+
+**Metadata table**:
+One collection-level **Asset** — parameters, stations, inventory — and the
+columns foehn publishes from it. The suffix is MeteoSwiss's, the published names
+are foehn's. Not a **Dataset kind** thing: nothing about it varies by kind, so it
+is reached directly rather than through a registry row.
+_Avoid_: metadata (unqualified — the convert stage means dtypes by it)
+
 **Run state**:
 What foehn remembers between runs, in the **Workspace**: the ETag store keyed by
 asset href, and the last-run cursor the CLI advances only after a fully clean
@@ -265,3 +279,17 @@ _Avoid_: query, params, options
   paths), `odim` and `icon` carry upstream's conventions (what **MeteoSwiss
   CSV** is to the tabular path), and `grids` is the **Grid readers**. The same
   four-way split the tabular path already had.
+- **Staging** was stated four times — the **Fetcher**'s stream, **Transfer**'s
+  byte writer, the convert stage's Parquet writer and **Run state** — with three
+  suffixes and three docstrings reasoning their way to the same rule. **Run
+  state** reached into **Transfer**, the download engine, for a filesystem
+  primitive that was never the download path's to own. Resolved: `atomicwrite` is
+  a leaf and `test_layering` fails a module that hand-rolls the move itself.
+- `api` — the public surface — held one stage outright rather than delegating:
+  the **Metadata tables** were fetched, decoded and renamed inline, so it was the
+  one entry point taking no **Fetcher** and reachable only through the
+  process-wide default. `to_zarr` likewise chose cube-vs-single itself. Resolved:
+  `metadata` owns the tables and their implementation, `registry.write_zarr`
+  owns the choice, and `api` states the contract and delegates. It imported nine
+  modules against `mcp_server`'s two; it imports seven now, and holds 51
+  statements where it held 80.

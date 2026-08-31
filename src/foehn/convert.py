@@ -16,6 +16,7 @@ from typing import Literal
 
 import polars as pl
 
+from foehn.atomicwrite import staged
 from foehn.meteocsv import (
     add_indoor_columns,
     column_from_dtype_error,
@@ -47,16 +48,11 @@ def _write_parquet_atomic(
     skip from then on, so the next run reports success over a corrupt file.
     Staging into a temp file means a failed write leaves nothing at all.
     """
-    tmp = path.with_name(path.name + ".tmp")
-    try:
+    with staged(path) as tmp:
         if isinstance(frame, pl.LazyFrame):
             frame.sink_parquet(tmp, compression=compression)
         else:
             frame.write_parquet(tmp, compression=compression)
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
 
 
 @dataclass(frozen=True)

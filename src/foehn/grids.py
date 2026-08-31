@@ -99,6 +99,22 @@ def require_grib2() -> None:
         ) from exc
 
 
+def require_dask() -> None:
+    """A :data:`Require` for ``rechunk=``: dask is *not* part of the 'grids' extra.
+
+    Named here with the other three so every optional-import message foehn can
+    raise sits in one place, even though nothing in ``KINDS`` carries this one —
+    rechunking is a caller's request, not a property of a kind.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("dask") is None:
+        raise ImportError(
+            "to_zarr(rechunk=...) requires dask, which is not part of the "
+            "'grids' extra. Install it with:\n\n  pip install dask\n"
+        )
+
+
 def require_radar() -> None:
     """A :data:`Require`: ODIM composites need xarray plus h5py + pyproj."""
     _require_xarray()
@@ -469,6 +485,7 @@ __all__ = [
     "open_grib2",
     "open_netcdf",
     "open_radar",
+    "require_dask",
     "require_grib2",
     "require_netcdf",
     "require_radar",

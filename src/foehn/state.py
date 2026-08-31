@@ -15,7 +15,7 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from foehn.transfer import atomic_write_text
+from foehn.atomicwrite import write_text
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def load_etags(workspace: Workspace) -> dict:
 def save_etags(workspace: Workspace, etags: dict):
     path = workspace.etags
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(etags, indent=2))
+    write_text(path, json.dumps(etags, indent=2))
 
 
 def load_last_run(workspace: Workspace) -> str | None:
@@ -53,4 +53,4 @@ def load_last_run(workspace: Workspace) -> str | None:
 def save_last_run(workspace: Workspace):
     path = workspace.last_run
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))
+    write_text(path, json.dumps({"timestamp": datetime.now(UTC).isoformat()}))

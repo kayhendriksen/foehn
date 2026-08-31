@@ -6,7 +6,9 @@ call the grib2 handler?" — one assertion per caller per kind, which is the
 duplication the registry removes.
 """
 
+import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -305,13 +307,32 @@ def test_convert_passes_the_directories_through(tmp_path):
     assert (tmp_path / "parquet" / "smn" / "smn_d_recent.parquet").exists()
 
 
-def test_write_cube_refuses_a_kind_with_no_cube_builder():
-    """NetCDF combines a multi-file match on read, so ``stack`` has nothing to assemble."""
-    with pytest.raises(ValueError, match="already combines on read"):
-        registry.write_cube(
+def test_a_stack_of_a_kind_with_no_cube_builder_falls_through_to_one_write():
+    """NetCDF combines a multi-file match on read, so ``stack`` is a no-op rather than an error.
+
+    ``api.to_zarr`` used to carry this as a branch of its own; it is the row's
+    ``cube`` that says which method writes the store.
+    """
+    with patch("foehn.registry._write_cube") as cube, patch("foehn.registry.open_grid") as opened:
+        registry.write_zarr(
             "surface_derived_grid",
             Path("unused.zarr"),
             match="rhiresd",
+            stack=True,
+            workspace=Workspace(Path("unused")),
+            fetcher=InMemoryFetcher(),
+        )
+
+    assert cube.call_count == 0
+    assert opened.call_count == 1
+
+
+def test_write_zarr_refuses_a_tabular_dataset():
+    """The row is what says whether a dataset has a Zarr path at all."""
+    with pytest.raises(ValueError, match=re.escape("Use foehn.load")):
+        registry.write_zarr(
+            "smn",
+            Path("unused.zarr"),
             workspace=Workspace(Path("unused")),
             fetcher=InMemoryFetcher(),
         )

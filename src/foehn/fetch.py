@@ -26,6 +26,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from foehn._urls import validate_download_href, validate_stac_url
+from foehn.atomicwrite import staged
 from foehn.collections import STAC_API_BASE
 
 logger = logging.getLogger(__name__)
@@ -185,17 +186,15 @@ class HttpFetcher:
         for a complete one.
         """
         validate_download_href(url)
-        tmp = path.with_name(path.name + ".part")
-        try:
-            with _as_fetch_error(url), self._session().get(url, stream=True, timeout=timeout) as resp:
-                resp.raise_for_status()
-                with tmp.open("wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        fh.write(chunk)
-            tmp.replace(path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        with (
+            staged(path, suffix=".part") as tmp,
+            _as_fetch_error(url),
+            self._session().get(url, stream=True, timeout=timeout) as resp,
+        ):
+            resp.raise_for_status()
+            with tmp.open("wb") as fh:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    fh.write(chunk)
 
     def items(
         self,

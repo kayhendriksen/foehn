@@ -91,9 +91,9 @@ def test_meteocsv_is_the_bottom_of_the_read_stack():
     assert _imports("meteocsv") <= {"collections"}
 
 
-@pytest.mark.parametrize("module", ["collections", "workspace", "_urls", "archives", "odim"])
+@pytest.mark.parametrize("module", ["collections", "workspace", "_urls", "archives", "odim", "atomicwrite"])
 def test_the_leaf_modules_import_no_foehn(module):
-    """Dataset facts, the layout, URL validation, the ZIP guards and ODIM sit under everything.
+    """Dataset facts, the layout, URL validation, the ZIP guards, ODIM and staging sit under everything.
 
     ``odim`` is upstream's radar file format and nothing else: one path in, one
     Dataset out. It takes ``xr`` as an argument rather than importing it, so it
@@ -112,6 +112,47 @@ def test_the_grid_readers_do_not_know_how_files_arrive():
     assert "transfer" not in deps
     assert "assets" not in deps
     assert "gridfiles" not in deps
+
+
+def test_the_run_state_does_not_depend_on_the_download_engine():
+    """``state`` imported ``transfer`` for one filesystem primitive, which is ``atomicwrite`` now.
+
+    The same shape as ``transfer`` importing ``convert``: a module reaching into
+    a pipeline stage for a helper that was never that stage's to own.
+    """
+    assert _imports("state") == {"atomicwrite", "workspace"}
+
+
+def test_every_write_to_the_workspace_stages():
+    """Four modules used to state the temp-file-then-replace rule; now they call it.
+
+    Guards the rule itself rather than the imports: a fifth writer that hand-rolls
+    ``.replace`` is exactly the regression this split was for.
+    """
+    hand_rolled = {
+        module
+        for module in ("transfer", "convert", "fetch", "state", "downloads", "gridfiles")
+        if ".replace(path)" in (SRC / f"{module}.py").read_text(encoding="utf-8")
+    }
+    assert hand_rolled == set()
+
+
+def test_the_public_surface_only_delegates():
+    """``api`` states the public contract; every stage below it is reached through a seam.
+
+    It used to hold one stage outright — the metadata tables, fetched, decoded and
+    renamed inline — and to pick cube-vs-single itself in ``to_zarr``, which is
+    why it reached into ``assets``, ``meteocsv`` and ``grids`` while ``mcp_server``,
+    a peer front end, needed only the registry.
+    """
+    forbidden = {"assets", "meteocsv", "grids", "gridfiles", "downloads", "convert", "icon", "odim"}
+    assert _imports("api") & forbidden == set()
+
+
+def test_the_metadata_tables_have_one_consumer():
+    """Reached through ``api``'s three wrappers, like every other stage through its seam."""
+    importers = {module for module, deps in _graph().items() if "metadata" in deps}
+    assert importers == {"api"}
 
 
 def test_the_grid_fetching_has_one_consumer():

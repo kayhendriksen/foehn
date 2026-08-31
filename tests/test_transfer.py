@@ -8,21 +8,11 @@ bookkeeping, and destination collisions.
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from foehn.assets import Asset
 from foehn.fetch import FetchError
-from foehn.transfer import (
-    DownloadResult,
-    already_current,
-    atomic_write_bytes,
-    csv_to_disk,
-    fetch_all,
-    stream_to_disk,
-)
+from foehn.transfer import DownloadResult, already_current, csv_to_disk, fetch_all, stream_to_disk
 from tests.fakes import InMemoryFetcher
 
 
@@ -169,19 +159,6 @@ def test_results_add(tmp_path):
 def test_empty_input_is_a_noop(tmp_path):
     result = fetch_all([], tmp_path, fetcher=InMemoryFetcher(), write=stream_to_disk)
     assert result == DownloadResult()
-
-
-# --- Atomic writes ---
-
-
-def test_a_failed_write_leaves_no_temp_file_behind(tmp_path):
-    """The sibling .tmp is the whole point: a crash must not leave one to be mistaken for data."""
-    target = tmp_path / "asset.csv"
-    with patch.object(Path, "replace", side_effect=OSError("disk full")), pytest.raises(OSError):
-        atomic_write_bytes(target, b"payload")
-
-    assert not target.exists()
-    assert list(tmp_path.iterdir()) == []
 
 
 # --- already_current ---
