@@ -147,6 +147,11 @@ show_missing = true
 testpaths = ["tests"]
 addopts = "-ra -m 'not live'"
 pythonpath = ["."]
+filterwarnings = [
+    # Synthetic NetCDF fixtures must not regress to xarray's netCDF4 writer,
+    # which triggers NumPy 2.5's deprecated array-shape assignment.
+    "error:Setting the shape on a NumPy array has been deprecated.*:DeprecationWarning",
+]
 markers = [
     "live: opt-in tests that hit the live MeteoSwiss STAC/S3 (run with -m live)",
 ]

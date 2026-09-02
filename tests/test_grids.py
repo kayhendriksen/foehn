@@ -295,6 +295,30 @@ def test_to_zarr_radar_stacked_time_cube(fetcher, tmp_path):
     assert str(times[1])[:16] == "2026-05-10T00:05"
 
 
+def test_to_zarr_radar_appends_new_timesteps_in_place(fetcher, tmp_path):
+    """A later radar batch extends time instead of rewriting or copying the store."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "radar_precip"
+    first = "cpc26130000000.h5"
+    second = "cpc26130000500.h5"
+    write_odim_composite(base / first, time="000000")
+    fetcher.any_items = _items_for(first)
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
+
+    write_odim_composite(base / second, time="000500")
+    fetcher.any_items = _items_for(second)
+    to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True, mode="a")
+
+    appended = xr.open_zarr(store)
+    assert appended.sizes["time"] == 2
+    assert str(appended.time.values[1])[:16] == "2026-05-10T00:05"
+
+
 def test_to_zarr_stack_requires_match(tmp_path):
     """A radar cube needs a match to scope the time range."""
     pytest.importorskip("h5py")
@@ -516,6 +540,53 @@ def test_a_written_store_keeps_valid_cf_time_units(tmp_path):
     assert written["time"].values[0] == np.datetime64("2000-01-01")
 
 
+def test_append_writes_in_place_without_copying_the_existing_store(tmp_path):
+    from foehn import grids
+
+    store = tmp_path / "existing.zarr"
+    store.mkdir()
+    (store / "existing").write_text("keep")
+    dataset = object()
+
+    with (
+        patch.object(grids, "_write_zarr") as implementation,
+        patch("foehn.atomicwrite.shutil.copytree", side_effect=AssertionError("copied whole store")),
+    ):
+        grids.write_zarr(dataset, store, mode="a")
+
+    implementation.assert_called_once_with(dataset, store, "a", rechunk=None, append_dim=None)
+
+
+def test_grid_reader_append_targets_the_existing_store(fetcher, tmp_path):
+    from foehn import grids, registry
+    from foehn.workspace import Workspace
+
+    store = tmp_path / "existing.zarr"
+    store.mkdir()
+    dataset = object()
+    reader = registry.spec("surface_derived_grid").grid
+    assert reader is not None
+
+    with (
+        patch.object(grids.GridReader, "open_dataset", return_value=dataset),
+        patch.object(grids, "_write_zarr") as implementation,
+        patch("foehn.atomicwrite.shutil.copytree", side_effect=AssertionError("copied whole store")),
+    ):
+        reader.write_store(
+            "surface_derived_grid",
+            store,
+            match=None,
+            variables=None,
+            rechunk=None,
+            mode="a",
+            stack=False,
+            workspace=Workspace(tmp_path),
+            fetcher=fetcher,
+        )
+
+    implementation.assert_called_once_with(dataset, store, "a", rechunk=None)
+
+
 def test_to_zarr_with_noncf_time_reopens_cleanly(fetcher, tmp_path):
     """End-to-end: a NetCDF with non-CF time units must produce a re-openable store."""
     fetcher.any_items = _items_for("normals_yearly.nc")
@@ -533,8 +604,9 @@ def test_to_zarr_with_noncf_time_reopens_cleanly(fetcher, tmp_path):
     )
     out_dir = tmp_path / "bronze" / "climate_normals_grid"
     out_dir.mkdir(parents=True)
-    # netcdf4 engine preserves the non-CF units attribute on the time axis
-    ds.to_netcdf(out_dir / "normals_yearly.nc", engine="netcdf4")
+    # h5netcdf preserves the non-CF units without netCDF4's deprecated NumPy
+    # shape assignment during synthetic fixture creation.
+    ds.to_netcdf(out_dir / "normals_yearly.nc", engine="h5netcdf")
 
     store = to_zarr("climate_normals_grid", data_dir=tmp_path)
     roundtrip = xr.open_zarr(store)  # default CF decode must not throw
@@ -570,9 +642,15 @@ def test_radar_cube_refuses_a_composite_with_no_time(fetcher, tmp_path):
     fetcher.any_items = _items_for("cpc2613000000_00060.001.h5")
     base = tmp_path / "bronze" / "radar_precip"
     write_odim_composite(base / "cpc2613000000_00060.001.h5", date="", time="")
+    store = Workspace(tmp_path).zarr("radar_precip", "cpc26130")
+    store.mkdir(parents=True)
+    (store / "complete").write_text("previous")
 
     with pytest.raises(ValueError, match="no time coordinate"):
         to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
+
+    assert (store / "complete").read_text() == "previous"
+    assert not (store / "zarr.json").exists()
 
 
 def test_radar_cube_keeps_only_the_requested_variables(fetcher, tmp_path):
@@ -606,8 +684,10 @@ def test_netcdf_open_points_at_match_when_files_will_not_combine(fetcher, tmp_pa
     base = tmp_path / "bronze" / "surface_derived_grid"
     base.mkdir(parents=True)
     # Same variable, incompatible shapes on the same dim: combine_by_coords cannot merge them.
-    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(base / "a.nc")
-    xr.Dataset({"v": (("x", "y"), np.zeros((3, 2)))}, coords={"x": [0, 1, 2], "y": [0, 1]}).to_netcdf(base / "b.nc")
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(base / "a.nc", engine="h5netcdf")
+    xr.Dataset({"v": (("x", "y"), np.zeros((3, 2)))}, coords={"x": [0, 1, 2], "y": [0, 1]}).to_netcdf(
+        base / "b.nc", engine="h5netcdf"
+    )
 
     with pytest.raises(ValueError, match="narrow to a coherent set with match="):
         open_dataset("surface_derived_grid", data_dir=tmp_path)

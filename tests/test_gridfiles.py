@@ -56,6 +56,46 @@ def test_ensure_netcdf_files_match_selects_subset_via_remote(tmp_path):
     assert result == [keep]
 
 
+def test_ensure_grid_files_refreshes_a_restated_asset(tmp_path):
+    out_dir = tmp_path / "bronze" / "radar_precip"
+    out_dir.mkdir(parents=True)
+    cached = out_dir / "cpc2613000000.h5"
+    cached.write_bytes(b"old")
+    cached.touch()
+    item = {
+        "assets": {"d": {"href": "https://data.geo.admin.ch/x/cpc2613000000.h5"}},
+        "properties": {"updated": "2100-01-01T00:00:00+00:00"},
+    }
+    fake = _fake([item], body=b"new")
+
+    result = ensure_grid_files(
+        "radar_precip", Workspace(tmp_path), suffixes=(".h5",), match="cpc2613000000", fetcher=fake
+    )
+
+    assert result == [cached]
+    assert cached.read_bytes() == b"new"
+    assert len(fake.streams) == 1
+
+
+def test_a_failed_refresh_falls_back_to_a_complete_grid_cache(tmp_path):
+    out_dir = tmp_path / "bronze" / "radar_precip"
+    out_dir.mkdir(parents=True)
+    cached = out_dir / "cpc2613000000.h5"
+    cached.write_bytes(b"old but complete")
+    href = f"https://data.geo.admin.ch/x/{cached.name}"
+    item = {"assets": {"d": {"href": href}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}}
+    fake = _fake([item])
+    fake.fail(href)
+
+    with pytest.warns(UserWarning, match="using the complete local cache"):
+        result = ensure_grid_files(
+            "radar_precip", Workspace(tmp_path), suffixes=(".h5",), match="cpc2613000000", fetcher=fake
+        )
+
+    assert result == [cached]
+    assert cached.read_bytes() == b"old but complete"
+
+
 def test_ensure_netcdf_files_match_downloads_missing_from_partial_cache(tmp_path):
     """A multi-file NetCDF match must not return a partial cache — it fetches what's missing."""
     out_dir = tmp_path / "bronze" / "surface_derived_grid"

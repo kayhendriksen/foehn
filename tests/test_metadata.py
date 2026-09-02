@@ -50,6 +50,22 @@ def test_the_columns_come_back_in_the_declared_order():
     assert df.columns == ["shortname", "description", "unit", "type", "granularity", "decimals", "group"]
 
 
+def test_inventory_declares_an_open_ended_data_till():
+    field = TABLES["inventory"].field("data_till")
+
+    assert field.nullable is True
+    assert field.annotation == str | None
+
+
+def test_an_open_ended_inventory_row_remains_null():
+    source = "station_abbr;parameter_shortname;data_since;data_till;owner\nBER;tre200d0;1864-01-01;;MeteoSchweiz\n"
+    fake = _fake("https://data.geo.admin.ch/x/ogd-smn_meta_datainventory.csv", body=source)
+
+    df = fetch_table("smn", "inventory", fetcher=fake)
+
+    assert df["data_till"].to_list() == [None]
+
+
 def test_a_table_that_does_not_exist_names_the_ones_that_do():
     with pytest.raises(ValueError, match="Unknown metadata table 'stations_v2'"):
         fetch_table("smn", "stations_v2", fetcher=_fake())

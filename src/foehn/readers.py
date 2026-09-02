@@ -24,6 +24,7 @@ import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 import polars as pl
@@ -31,7 +32,7 @@ import polars as pl
 from foehn._urls import asset_filename
 from foehn.archives import check_zip_size
 from foehn.assets import assets_of, collection_assets, hrefs, select
-from foehn.collections import COLLECTIONS, DEFAULT_TIME_SLICE, DatasetKind, kind
+from foehn.collections import COLLECTIONS, DEFAULT_TIME_SLICE
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import (
     decode_meteoswiss_csv,
@@ -102,20 +103,42 @@ class Filters:
         ``load()``'s behalf. The archive and preamble readers used to read an
         empty list the other way and error out; they now agree with the main path.
         """
-        return cls(
+        months = _as_tuple(month)
+        start = _parse_date_bound(date_from, "date_from")
+        end = _parse_date_bound(date_to, "date_to")
+        filters = cls(
             stations=_lower_set(station),
             granularities=_lower_set(frequency),
             time_slices=_as_tuple(time_slice) or (DEFAULT_TIME_SLICE,),
             year=_as_tuple(year),
-            month=_as_tuple(month),
-            date_from=date_from,
-            date_to=date_to,
+            month=months,
+            date_from=_normalized_date_bound(date_from, start),
+            date_to=_normalized_date_bound(date_to, end),
             columns=tuple(columns) if columns else None,
             drop_null=drop_null,
             sort=sort,
             limit=limit,
             workers=workers,
         )
+        filters.validate()
+        return filters
+
+    def validate(self) -> None:
+        """Validate the query at any entry seam, including direct construction."""
+        if self.month is not None and (
+            invalid_months := sorted({value for value in self.month if not 1 <= value <= 12})
+        ):
+            raise ValueError(f"Invalid month {invalid_months}. Valid options: 1 through 12.")
+        if self.sort is not None and self.sort not in ("asc", "desc"):
+            raise ValueError(f"Invalid sort {self.sort!r}. Valid options: asc, desc.")
+        if self.limit is not None and self.limit < 0:
+            raise ValueError("limit must be zero or greater.")
+        if self.workers < 1:
+            raise ValueError("workers must be greater than zero.")
+        start = _parse_date_bound(self.date_from, "date_from")
+        end = _parse_date_bound(self.date_to, "date_to")
+        if start is not None and end is not None and start > end:
+            raise ValueError("date_from must be before or equal to date_to.")
 
     @property
     def has_calendar_filter(self) -> bool:
@@ -135,6 +158,28 @@ def _as_tuple(value):
     if isinstance(value, (str, int)):
         return (value,)
     return tuple(value) or None
+
+
+def _parse_date_bound(value: str | None, label: str) -> datetime | None:
+    """Validate an ISO date/datetime and return a comparable UTC-naive value."""
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{label} must be an ISO date or datetime, got {value!r}.") from None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+def _normalized_date_bound(value: str | None, parsed: datetime | None) -> str | None:
+    """Keep whole-day syntax; express datetimes as UTC-naive for Polars."""
+    if value is None or parsed is None:
+        return None
+    if _BARE_DATE_RE.match(value):
+        return value
+    return parsed.isoformat()
 
 
 class ReadAdapter(Protocol):
@@ -259,45 +304,26 @@ def _fetch_frames(fetch_one, targets: list[str], workers: int) -> list[pl.DataFr
 # --- The readers ---
 
 
-def read_standard(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
-    """Per-station CSVs split by time slice and granularity — the main path.
-
-    Also serves the forecast kind, whose filenames carry no time slice: there the
-    newest run is what bounds the set instead.
-    """
+def _metadata_types(dataset: str, fetcher: Fetcher) -> dict[str, type[pl.DataType]]:
+    """Read the Collection's dtype declarations once for either CSV Reader."""
     collection_id = COLLECTIONS[dataset]
-
-    # 1. Fetch metadata types for schema inference.
     metadata_types: dict[str, type[pl.DataType]] = {}
     coll = fetcher.collection(collection_id)
     for asset in collection_assets(coll, suffixes=(".csv",), contains="_meta_parameters"):
         metadata_types = parse_metadata_types(decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body))
         break
+    return metadata_types
 
-    # 2. Get STAC items and collect matching CSV URLs.
-    items = fetcher.items(collection_id)
 
-    # Filter items by station (item id = station abbreviation).
-    if filters.stations is not None:
-        items = [item for item in items if item.get("id", "").lower() in filters.stations]
-
-    # A forecast item is one *day*, not one forecast, and the newest one is empty
-    # until that day's runs publish — so keep all items and narrow to the newest
-    # run by filename below. Ranking on ``datetime`` would not help either: it is a
-    # refresh timestamp, identical across items to the microsecond.
-    is_forecast = kind(dataset) is DatasetKind.FORECAST_CSV
-    if is_forecast and items:
-        items.sort(key=lambda x: x.get("id", ""))
-
-    csv_hrefs = hrefs(
-        select(
-            assets_of(items, suffixes=(".csv",)),
-            time_slices=None if is_forecast else list(filters.time_slices),
-            granularities=filters.granularities,
-            latest_run=is_forecast,
-        )
-    )
-
+def _read_csv_hrefs(
+    dataset: str,
+    filters: Filters,
+    csv_hrefs: list[str],
+    *,
+    fetcher: Fetcher,
+    metadata_types: dict[str, type[pl.DataType]],
+) -> pl.DataFrame:
+    """Fetch and normalize already-selected Standard or Forecast CSV Assets."""
     if not csv_hrefs:
         described = (
             f"station={sorted(filters.stations) if filters.stations else None}, "
@@ -306,40 +332,56 @@ def read_standard(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Dat
         )
         raise ValueError(f"No CSV files found for {dataset!r} with {described}.")
 
-    # 3. Download and parse each CSV concurrently.
-    # With an explicit ``columns=``, tell the parser up front instead of parsing all
-    # ~42 columns of every station file and selecting afterwards. The frame retained
-    # per station drops by an order of magnitude, which is what bounds peak memory
-    # while the whole matched set is assembled. Everything the later filters and the
-    # concat rely on has to survive the projection.
     wanted_columns: set[str] | None = None
     if filters.columns:
         wanted_columns = {"station_abbr", "reference_timestamp", *filters.columns}
         if filters.drop_null:
             wanted_columns.add(filters.drop_null)
-        # Whatever this kind derives its timestamp from has to survive the projection.
         wanted_columns |= source_columns_for(dataset)
 
     def _fetch(href: str) -> pl.DataFrame:
-        # Zero-copy when the payload is already UTF-8 (the usual case): these are
-        # the big files, and ``workers`` of them are in flight at once.
         body = fetcher.get(href, timeout=60).body
         frame = parse_csv_bytes(utf8_meteoswiss_csv(body), metadata_types, wanted_columns=wanted_columns)
-        # Drop the rows this call can never return *before* they reach the
-        # concat. Every frame is otherwise held in full until the whole matched
-        # set is materialised, so a narrow year= over many stations peaked at the
-        # size of the entire time slice. A kind that derives its timestamp gets
-        # it here, so its frames can be narrowed too.
         frame = derive_timestamp(frame, dataset)
         if "reference_timestamp" in frame.columns:
             frame = apply_time_filters(frame, filters)
         return frame
 
     df = pl.concat(_fetch_frames(_fetch, csv_hrefs, filters.workers), how="diagonal_relaxed")
-
-    # Again on the concatenation: a station whose file was empty contributes no
-    # rows above, and the diagonal concat can still leave the column absent.
     return derive_timestamp(df, dataset)
+
+
+def read_standard(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
+    """Per-station CSVs split by Time slice and Granularity — the main path."""
+    collection_id = COLLECTIONS[dataset]
+    metadata_types = _metadata_types(dataset, fetcher)
+
+    items = fetcher.items(collection_id)
+    if filters.stations is not None:
+        items = [item for item in items if item.get("id", "").lower() in filters.stations]
+    csv_hrefs = hrefs(
+        select(
+            assets_of(items, suffixes=(".csv",)),
+            time_slices=list(filters.time_slices),
+            granularities=filters.granularities,
+        )
+    )
+    return _read_csv_hrefs(dataset, filters, csv_hrefs, fetcher=fetcher, metadata_types=metadata_types)
+
+
+def read_forecast(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
+    """Newest Forecast run, normalized to include its derived Reference timestamp."""
+    collection_id = COLLECTIONS[dataset]
+    metadata_types = _metadata_types(dataset, fetcher)
+    items = fetcher.items(collection_id)
+    if filters.stations is not None:
+        items = [item for item in items if item.get("id", "").lower() in filters.stations]
+
+    # A forecast item is one day, not one Forecast run, and the newest day can be
+    # empty while publication is in progress. Select the newest run by filename.
+    items.sort(key=lambda item: item.get("id", ""))
+    csv_hrefs = hrefs(select(assets_of(items, suffixes=(".csv",)), latest_run=True))
+    return _read_csv_hrefs(dataset, filters, csv_hrefs, fetcher=fetcher, metadata_types=metadata_types)
 
 
 def read_preamble(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
@@ -409,6 +451,7 @@ __all__ = [
     "Reader",
     "apply_time_filters",
     "read_archive",
+    "read_forecast",
     "read_preamble",
     "read_standard",
 ]

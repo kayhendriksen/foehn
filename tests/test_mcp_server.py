@@ -129,6 +129,17 @@ class TestModels:
         assert e.station == "BER"
         assert e.owner == "MeteoSchweiz"
 
+    def test_inventory_entry_accepts_an_open_ended_range(self):
+        entry = InventoryEntry(
+            station="BER",
+            parameter="tre200d0",
+            data_since="1864-01-01",
+            data_till=None,
+            owner="MeteoSchweiz",
+        )
+
+        assert entry.data_till is None
+
 
 # ── list_datasets ────────────────────────────────────────────────────────────
 
@@ -709,6 +720,23 @@ class TestGetInventory:
         assert result[0].station == "BER"
         assert result[0].parameter == "tre200d0"
         mock_inv.assert_called_once_with("smn")
+
+    @patch("foehn.mcp_server.foehn.inventory")
+    def test_preserves_an_open_ended_range(self, mock_inv):
+        mock_inv.return_value = pl.DataFrame(
+            {
+                "station": ["BER"],
+                "parameter": ["tre200d0"],
+                "data_since": ["1864-01-01"],
+                "data_till": [None],
+                "owner": ["MeteoSchweiz"],
+            },
+            schema_overrides={"data_till": pl.String},
+        )
+
+        result = get_inventory("smn")
+
+        assert result[0].data_till is None
 
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):

@@ -56,6 +56,15 @@ def test_list_datasets_categories():
     assert rows["forecast_local"]["format"] == "CSV"
 
 
+def test_list_datasets_returns_detached_rows():
+    rows = list_datasets()
+    smn = next(row for row in rows if row["dataset"] == "smn")
+    smn["frequencies"].append("made-up")
+
+    fresh = next(row for row in list_datasets() if row["dataset"] == "smn")
+    assert "made-up" not in fresh["frequencies"]
+
+
 def test_download_unknown_dataset_raises():
     with pytest.raises(ValueError, match="Unknown dataset"):
         download("nonexistent")
@@ -355,6 +364,20 @@ def test_load_frequency_on_unsupported_dataset_raises():
 
     with pytest.raises(ValueError, match="does not support frequency"):
         load("forecast_local", frequency="h")
+
+
+def test_stale_catalogue_granularities_do_not_veto_an_upstream_asset():
+    from foehn import registry
+    from foehn.readers import Filters
+
+    registry.validate_load("pollen", Filters.build(frequency="t"))
+
+
+def test_stale_catalogue_time_slices_do_not_veto_an_upstream_asset():
+    from foehn import registry
+    from foehn.readers import Filters
+
+    registry.validate_load("nime", Filters.build(frequency="d", time_slice="now"))
 
 
 def _mock_response(content, status_code=200):
@@ -1092,6 +1115,8 @@ def test_load_leaves_query_validation_to_the_registry():
         registry.validate_load("smn", Filters.build(sort="sideways"))
     with pytest.raises(ValueError, match="Invalid time_slice"):
         registry.validate_load("smn", Filters.build(time_slice="yesterday"))
+    with pytest.raises(ValueError, match="Invalid sort"):
+        registry.validate_load("smn", Filters(sort="ascending"))
 
 
 def test_a_polars_that_cannot_run_here_names_the_databricks_build():

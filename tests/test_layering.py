@@ -142,9 +142,7 @@ def test_meteocsv_is_the_bottom_of_the_read_stack():
     assert _imports("meteocsv") <= {"collections"}
 
 
-@pytest.mark.parametrize(
-    "module", ["collections", "workspace", "_urls", "archives", "odim", "atomicwrite", "docstrings"]
-)
+@pytest.mark.parametrize("module", ["catalog", "workspace", "_urls", "archives", "odim", "_locking", "docstrings"])
 def test_the_leaf_modules_import_no_foehn(module):
     """Dataset facts, the layout, URL validation, the ZIP guards, ODIM, staging and
     docstring rendering sit under everything.
@@ -156,12 +154,8 @@ def test_the_leaf_modules_import_no_foehn(module):
     assert _imports(module) == set()
 
 
-def test_the_grid_readers_do_not_know_how_files_arrive():
-    """``grids`` opens what it is handed; listing and fetching are ``gridfiles``.
-
-    All three used to be one module, so the reader that parses an ODIM composite
-    imported the download engine.
-    """
+def test_the_grid_reader_owns_file_acquisition_without_absorbing_transfer():
+    """The Grid reader sequences an injected acquisition Adapter without importing it."""
     deps = _imports("grids")
     assert "transfer" not in deps
     assert "assets" not in deps
@@ -174,7 +168,7 @@ def test_the_run_state_does_not_depend_on_the_download_engine():
     The same shape as ``transfer`` importing ``convert``: a module reaching into
     a pipeline stage for a helper that was never that stage's to own.
     """
-    assert _imports("state") == {"atomicwrite", "workspace"}
+    assert _imports("state") == {"_locking", "atomicwrite", "workspace"}
 
 
 def test_every_write_to_the_workspace_stages():
@@ -203,13 +197,13 @@ def test_the_public_surface_only_delegates():
 
 
 def test_the_metadata_tables_have_one_consumer():
-    """Reached through ``api``'s three wrappers, like every other stage through its seam."""
+    """The public wrappers and MCP Adapter share the authoritative published schema."""
     importers = {module for module, deps in _graph().items() if "metadata" in deps}
-    assert importers == {"api"}
+    assert importers == {"api", "mcp_server"}
 
 
 def test_the_grid_fetching_has_one_consumer():
-    """Like ``convert`` and ``downloads``: reached through the registry, not called directly."""
+    """Grid file acquisition sits behind the Grid reader Seam."""
     importers = {module for module, deps in _graph().items() if "gridfiles" in deps}
     assert importers == {"registry"}
 
@@ -249,15 +243,35 @@ def test_the_load_path_reads_no_csv_itself():
     assert _keyword_values("readers", "separator") == set()
 
 
-def test_the_convert_stage_states_one_upstream_convention():
-    """The normals TXT, and nothing else.
+def test_the_convert_stage_states_no_upstream_csv_conventions():
+    """Standard, preamble, archive and normals parsing all belong to ``meteocsv``."""
+    assert _keyword_values("convert", "separator") == set()
 
-    The indoor archive's separator was stated here and in ``readers``; the
-    standard kind's was stated here and, differently, in ``meteocsv`` — the last
-    kind whose conventions sat above the module that owns them, because the
-    dtype-drift retry is wrapped around its scan. The retry stayed; the scan
-    moved. What is left is the **Direct ZIP** kind's tab-separated TXT, which has
-    no reader of its own: this stage is its only consumer, so a seam for it would
-    have exactly one adapter.
+
+def test_delta_ingest_uses_the_shared_meteoswiss_csv_implementation():
+    """The independent Delta entry point must publish the same normalized frames.
+
+    This script used to parse each Dataset kind directly with Polars, so Parquet,
+    Reader and Delta could disagree while every package-module layering test
+    remained green. Inspecting the entry point keeps it on the same Interface.
     """
-    assert _keyword_values("convert", "separator") == {"\t"}
+    path = SRC.parents[1] / "scripts" / "ingest_delta.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    polars_csv_calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+        and node.func.attr in {"read_csv", "scan_csv"}
+    }
+    shared_imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "foehn.meteocsv"
+        for alias in node.names
+    }
+
+    assert polars_csv_calls == set()
+    assert {"read_dataset_csv", "scan_dataset_csv", "read_metadata_csv", "read_normals_txt"} <= shared_imports

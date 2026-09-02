@@ -16,12 +16,20 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from foehn.archives import safe_extract
-from foehn.assets import assets_of, collection_assets, latest_run_of, select
+from foehn.assets import Asset, assets_of, collection_assets, latest_run_of, select
 from foehn.collections import CLIMATE_NORMALS_ZIP_URL, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
-from foehn.state import load_etags, save_etags
-from foehn.transfer import DownloadResult, SkipRule, Writer, csv_to_disk, fetch_all, stream_to_disk
+from foehn.state import EtagRun
+from foehn.transfer import (
+    DownloadResult,
+    SkipRule,
+    Writer,
+    csv_to_disk,
+    fetch_all,
+    materialization_current,
+    materialize_archive,
+    stream_to_disk,
+)
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -49,20 +57,6 @@ def _updated_since(items: list[dict], since: str | None) -> list[dict]:
     kept = [item for item in items if item.get("properties", {}).get("updated", "") > since]
     logger.info("  %d items updated since last run", len(kept))
     return kept
-
-
-def _prune_stale_etags(etags: dict, collection_id: str, listed: set[str]) -> None:
-    """Drop ETags for assets that no longer exist upstream.
-
-    Otherwise ``_etags.json`` grows forever — forecast runs get fresh filenames
-    every cycle. Only safe on a clean, complete listing: see the call site.
-    """
-    prefix = f"/{collection_id}/"
-    stale = [k for k in etags if prefix in k and k not in listed]
-    for k in stale:
-        del etags[k]
-    if stale:
-        logger.info("  Pruned %d stale ETag entries", len(stale))
 
 
 def stac_download(
@@ -149,7 +143,8 @@ def stac_download(
 
         # The conditional-GET writer decides "unchanged" from the server's 304,
         # so the ETag store is this kind's skip rule.
-        store = load_etags(workspace) if etags else None
+        etag_run = EtagRun.begin(workspace) if etags else None
+        store = etag_run.values if etag_run is not None else None
         fetched = fetch_all(
             wanted,
             out_dir,
@@ -161,12 +156,11 @@ def stac_download(
             label=label,
         )
 
-        if store is not None:
+        if etag_run is not None:
             # Only on a clean full listing: with ``since`` the item list is
             # partial, and after failures the universe may be incomplete.
-            if since is None and fetched.failed == 0:
-                _prune_stale_etags(store, collection_id, {a.href for a in every})
-            save_etags(workspace, store)
+            listed = {a.href for a in every} if since is None and fetched.failed == 0 else None
+            etag_run.commit(collection_id, listed=listed)
 
         return result + fetched
 
@@ -205,24 +199,13 @@ def download_normals_zip(
     command and in the Databricks ingest script instead of a row.
     """
     out_dir = workspace.bronze(dataset)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    filepath = out_dir / "normwerte.zip"
-
-    # Skip on the *extraction output*, not the ZIP: a run that died between
-    # download and extract must not be mistaken for a completed one.
-    if not force and any(out_dir.glob("*.txt")):
+    asset = Asset.from_stac("normals", {"href": CLIMATE_NORMALS_ZIP_URL})
+    if not force and materialization_current(asset, out_dir):
         logger.info("  %s already downloaded and extracted — skipping", dataset)
         return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     _banner("Climate normals (C6): fixed-URL ZIP", out_dir)
-
-    fetcher.stream(CLIMATE_NORMALS_ZIP_URL, filepath, timeout=120)
-    logger.info("  Downloaded: %s (%.0f KB)", filepath.name, filepath.stat().st_size / 1024)
-
-    extracted = safe_extract(filepath, out_dir)
-    logger.info("  Extracted %d files", extracted)
-
-    return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=["normwerte.zip"])
+    return materialize_archive(asset, out_dir, fetcher=fetcher, force=force, timeout=120)
 
 
 # --- Indoor climate scenarios ZIP (single .csv.zip of per-station CSVs) ---
@@ -240,11 +223,6 @@ def download_indoor_zip(
     """
     collection_id = COLLECTIONS[dataset]
     out_dir = workspace.bronze(dataset)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    if not force and any(out_dir.glob("*.csv")):
-        logger.info("  %s already extracted — skipping", dataset)
-        return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
     items = fetcher.items(collection_id)
     archives = assets_of(items, suffixes=(".zip",))
@@ -253,13 +231,9 @@ def download_indoor_zip(
         logger.warning("  No .zip asset found for %s", dataset)
         return DownloadResult()
 
+    if not force and materialization_current(archive, out_dir):
+        logger.info("  %s already extracted and current — skipping", dataset)
+        return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
+
     _banner(f"Indoor scenarios: {collection_id}", out_dir)
-
-    zip_path = out_dir / archive.name
-    fetcher.stream(archive.href, zip_path, timeout=300)
-    logger.info("  Downloaded: %s (%.1f MB)", zip_path.name, zip_path.stat().st_size / 1e6)
-
-    extracted = safe_extract(zip_path, out_dir)
-    logger.info("  Extracted %d files", extracted)
-
-    return DownloadResult(total_assets=1, downloaded=1, skipped=0, filenames=[zip_path.name])
+    return materialize_archive(archive, out_dir, fetcher=fetcher, force=force, timeout=300)

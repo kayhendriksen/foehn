@@ -67,6 +67,8 @@ df = foehn.load("smn", station="BER", frequency="d", sort="desc")
 | `columns` | `list[str]` | Only return these columns |
 | `drop_null` | `str` | Drop rows where this column is null |
 | `sort` | `str` | Sort by timestamp: "asc" or "desc" |
+| `limit` | `int` | Maximum rows; zero returns an empty frame, negative values are invalid |
+| `workers` | `int` | Concurrent fetches; must be positive |
 
 ### Climate scenario collections
 
@@ -113,7 +115,7 @@ foehn.download("smn", data_dir="./data/meteoswiss")
 foehn.download("smn", time_slice=["historical", "recent"])
 ```
 
-CSVs and metadata files are written to `<data_dir>/bronze/<collection>/`.
+CSVs and metadata files are written to `<data_dir>/bronze/<dataset>/`.
 Omit `data_dir` and foehn uses `$FOEHN_DATA_DIR`, falling back to
 `./data/meteoswiss` — the same rule the CLI follows.
 
@@ -151,6 +153,8 @@ ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
 ```
 
 This path is *download-then-lazy*: the source file is fetched in full to the
-local cache before any read. See the [gridded data documentation](grids.md) for
+local cache before any read. Later calls compare STAC freshness metadata and
+refresh changed assets, while retaining a complete cache as the offline fallback.
+See the [gridded data documentation](grids.md) for
 `open_dataset`, `to_zarr`, `match`, the GRIB2/radar single-file requirement, and
 the Swiss-grid coordinate notes.

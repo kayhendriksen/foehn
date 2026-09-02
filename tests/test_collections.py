@@ -5,6 +5,7 @@ from foehn.collections import (
     CATEGORIES,
     COLLECTION_META,
     COLLECTIONS,
+    DATASETS,
     GRANULARITIES,
     KIND_OF,
     TIME_SLICES,
@@ -63,6 +64,22 @@ def test_every_collection_has_exactly_one_kind():
     """
     assert set(KIND_OF) == set(COLLECTIONS)
     assert all(isinstance(k, DatasetKind) for k in KIND_OF.values())
+
+
+def test_catalogue_is_the_authoritative_dataset_row():
+    row = DATASETS["pollen"]
+    assert row.collection == COLLECTIONS["pollen"]
+    assert row.kind is KIND_OF["pollen"]
+    assert row.frequencies == ("h", "d", "y")
+
+
+def test_compatibility_views_are_immutable():
+    import pytest
+
+    with pytest.raises(TypeError):
+        COLLECTIONS["smn"] = "changed"
+    with pytest.raises(TypeError):
+        COLLECTION_META["smn"]["format"] = "changed"
 
 
 def test_every_kind_is_used():
@@ -137,8 +154,8 @@ def test_collection_meta_declares_expected_frequencies_and_slices():
         "climate_scenarios_indoor": ([], []),
     }
     for key, (frequencies, time_slices) in expected.items():
-        assert COLLECTION_META[key]["frequencies"] == frequencies
-        assert COLLECTION_META[key]["time_slices"] == time_slices
+        assert list(COLLECTION_META[key]["frequencies"]) == frequencies
+        assert list(COLLECTION_META[key]["time_slices"]) == time_slices
 
 
 def test_radar_collections_are_hdf5():

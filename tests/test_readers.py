@@ -64,6 +64,47 @@ def test_filters_are_hashable_and_frozen():
     assert hash(Filters.build(station="BER", year=[2025, 2026])) is not None
 
 
+@pytest.mark.parametrize("month", [0, 13, [1, 12, 99]])
+def test_month_must_be_in_calendar_range(month):
+    with pytest.raises(ValueError, match="Invalid month"):
+        Filters.build(month=month)
+
+
+@pytest.mark.parametrize("value", ["sideways", "ASC"])
+def test_sort_is_validated_at_the_filters_interface(value):
+    with pytest.raises(ValueError, match="Invalid sort"):
+        Filters.build(sort=value)
+
+
+def test_zero_limit_is_intentional_but_negative_is_invalid():
+    assert Filters.build(limit=0).limit == 0
+    with pytest.raises(ValueError, match="zero or greater"):
+        Filters.build(limit=-1)
+
+
+def test_workers_must_be_positive():
+    with pytest.raises(ValueError, match="greater than zero"):
+        Filters.build(workers=0)
+
+
+@pytest.mark.parametrize("label", ["date_from", "date_to"])
+def test_date_bounds_must_be_iso(label):
+    with pytest.raises(ValueError, match=label):
+        Filters.build(**{label: "not-a-date"})
+
+
+def test_date_bounds_must_not_be_reversed():
+    with pytest.raises(ValueError, match="date_from"):
+        Filters.build(date_from="2025-02-01", date_to="2025-01-01")
+
+
+def test_timezone_bounds_are_normalized_before_polars_compares_them():
+    filters = Filters.build(date_from="2025-01-01T00:00:00+01:00")
+
+    assert filters.date_from == "2024-12-31T23:00:00"
+    assert apply_time_filters(_frame(["2024-12-31 22:00", "2024-12-31 23:00"]), filters).height == 1
+
+
 # --- The shared time predicates ---
 
 

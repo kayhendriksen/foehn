@@ -9,8 +9,7 @@ import polars as pl
 
 from foehn import registry
 from foehn.collections import (
-    COLLECTION_META,
-    COLLECTIONS,
+    DATASETS,
     DEFAULT_TIME_SLICE,
     GRANULARITY_LABELS,
     TIME_SLICE_LABELS,
@@ -59,7 +58,7 @@ def list_datasets() -> list[dict]:
     Each dict has keys: ``dataset``, ``collection_id``, ``category``, ``subcategory``,
     ``description``, ``format``, ``frequencies``, ``time_slices``.
     """
-    return [{"dataset": key, "collection_id": cid, **COLLECTION_META[key]} for key, cid in COLLECTIONS.items()]
+    return [{"dataset": key, "collection_id": row.collection, **row.published()} for key, row in DATASETS.items()]
 
 
 @renders(**_VOCABULARY)
@@ -413,6 +412,8 @@ def to_zarr(
         mode: Zarr write mode (default "w" — overwrite the store at this path).
             Note distinct ``match`` values map to distinct default paths, so this
             only overwrites a prior run of the *same* slice, not a different one.
+            Replacement mode is staged; ``"a"`` writes in place so its work and
+            temporary disk use scale with the new data, without rollback on interruption.
         stack: Assemble the matched files into one cube, using whichever method
             the dataset's kind uses — radar stacks CombiPrecip timesteps into a
             ``(time, y, x)`` cube incrementally (dask-free, one timestep in

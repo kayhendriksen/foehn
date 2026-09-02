@@ -26,6 +26,8 @@ htmlcov/
 .databricks/
 .claude/
 .agents/
+AGENTS.md
+docs/agents/
 
 # OS
 .DS_Store

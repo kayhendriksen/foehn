@@ -26,17 +26,28 @@ import contextlib
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
-from pyspark.sql import SparkSession
 
 from foehn import registry
 from foehn.collections import DatasetKind, kind
-from foehn.meteocsv import group_csv_files, load_metadata_types, parse_csv_bytes
+from foehn.meteocsv import (
+    group_csv_files,
+    load_metadata_types,
+    read_dataset_csv,
+    read_metadata_csv,
+    read_normals_txt,
+    scan_dataset_csv,
+)
+from foehn.workspace import Workspace
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 # Every dataset that is not a grid — climate_normals included, which used to be
 # appended by hand because it converts to Parquet without being loadable.
-INGESTED_COLLECTIONS = registry.non_grid_datasets()
+INGESTED_DATASETS = registry.non_grid_datasets()
 
 # Collections where historical data can exceed available memory.
 # Chunked ingestion is used for these when --historical is set.
@@ -59,53 +70,32 @@ def _table_suffix(group_key: tuple[str, ...]) -> str:
     return ""
 
 
-def _build_schema_overrides(
-    files: list[Path], metadata_types: dict[str, type[pl.DataType]]
-) -> dict[str, type[pl.DataType]] | None:
-    """Match CSV column headers to metadata types for schema overrides."""
-    if not metadata_types:
-        return None
-    try:
-        header = pl.read_csv(files[0], separator=";", n_rows=0, infer_schema_length=0).columns
-        overrides = {col: metadata_types[col] for col in header if col in metadata_types}
-        return overrides or None
-    except Exception:
-        return None
-
-
-def _scan_and_collect(files: list[Path], metadata_types: dict[str, type[pl.DataType]]) -> pl.DataFrame:
-    """Lazily scan CSV files and collect with streaming engine.
+def _scan_and_collect(dataset: str, files: list[Path], metadata_types: dict[str, type[pl.DataType]]) -> pl.DataFrame:
+    """Normalize a Dataset's CSV files and collect with the streaming engine.
 
     Falls back to eager parse_csv_bytes (with retry logic) if streaming
     collect fails — e.g. when a column has mixed types that only the
     fallback's per-column Float64 override can handle.
     """
-    overrides = _build_schema_overrides(files, metadata_types)
-
-    lazy_frames: list[pl.LazyFrame] = []
-    for f in files:
-        lf = pl.scan_csv(
-            f,
-            separator=";",
-            infer_schema_length=100,
-            try_parse_dates=True,
-            schema_overrides=overrides,
-        )
-        lazy_frames.append(lf)
+    lazy_frames = [scan_dataset_csv(path, dataset, metadata_types=metadata_types) for path in files]
 
     combined = pl.concat(lazy_frames, how="diagonal_relaxed")
     try:
         return combined.collect(engine="streaming")
     except (pl.exceptions.ComputeError, pl.exceptions.SchemaError):
-        # Fall back to eager parsing with parse_csv_bytes retry logic.
-        frames = [parse_csv_bytes(f.read_bytes(), metadata_types) for f in files]
+        frames = [read_dataset_csv(path, dataset, metadata_types=metadata_types) for path in files]
         return pl.concat(frames, how="diagonal_relaxed")
 
 
 def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mode: str = "overwrite") -> None:
     """Convert a Polars DataFrame to Spark via Arrow and write to a Delta table."""
     spark_df = spark.createDataFrame(polars_df.to_arrow())
-    spark_df.write.mode(mode).option("mergeSchema", "true").saveAsTable(table)
+    writer = spark_df.write.mode(mode)
+    if mode == "overwrite":
+        writer = writer.option("overwriteSchema", "true")
+    else:
+        writer = writer.option("mergeSchema", "true")
+    writer.saveAsTable(table)
 
 
 def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> None:
@@ -119,7 +109,7 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
         return
 
     try:
-        meta = pl.read_csv(meta_files[0], separator=";", infer_schema_length=0)
+        meta = read_metadata_csv(meta_files[0])
     except Exception:
         return
 
@@ -167,12 +157,7 @@ def _ingest_metadata(
         table = f"{catalog}.{schema}.`{tbl_name}`"
 
         try:
-            df = pl.read_csv(
-                meta_path,
-                separator=";",
-                infer_schema_length=10000,
-                try_parse_dates=True,
-            )
+            df = read_metadata_csv(meta_path)
             _write_to_delta(spark, df, table)
             print(f"  OK  {tbl_name:25s} → {table} ({df.height} rows)", flush=True)
             succeeded += 1
@@ -220,7 +205,7 @@ def _ingest_collection(
                 total_chunks = (len(files) + chunk_size - 1) // chunk_size
                 for i in range(0, len(files), chunk_size):
                     chunk = files[i : i + chunk_size]
-                    polars_df = _scan_and_collect(chunk, metadata_types)
+                    polars_df = _scan_and_collect(key, chunk, metadata_types)
                     mode = "overwrite" if i == 0 else "append"
                     _write_to_delta(spark, polars_df, table, mode=mode)
                     chunk_num = i // chunk_size + 1
@@ -229,7 +214,7 @@ def _ingest_collection(
                         flush=True,
                     )
             else:
-                polars_df = _scan_and_collect(files, metadata_types)
+                polars_df = _scan_and_collect(key, files, metadata_types)
                 _write_to_delta(spark, polars_df, table)
 
             print(f"  OK  {tbl_name:25s} → {table} ({len(files)} files)", flush=True)
@@ -332,15 +317,7 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
     frames: list[pl.DataFrame] = []
     for txt_path in txt_files:
         try:
-            df = pl.read_csv(
-                txt_path,
-                separator="\t",
-                skip_rows=8,
-                encoding="latin1",
-                infer_schema_length=100,
-                try_parse_dates=True,
-                truncate_ragged_lines=True,
-            )
+            df = read_normals_txt(txt_path)
             frames.append(df)
         except Exception as e:
             print(f"  WARN: {txt_path.name}: {e}", flush=True)
@@ -356,6 +333,8 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
 
 
 def main() -> None:
+    from pyspark.sql import SparkSession
+
     parser = argparse.ArgumentParser(description="Ingest MeteoSwiss CSVs → Delta tables via Polars + Spark.")
     parser.add_argument("--catalog", default="main")
     parser.add_argument("--schema", default="meteoswiss")
@@ -396,7 +375,7 @@ def main() -> None:
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {cat}.{sch}")
         spark.sql(f"CREATE VOLUME IF NOT EXISTS {cat}.{sch}.{vol}")
 
-    bronze_base = Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}/bronze")
+    workspace = Workspace(Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}"))
 
     total_ok = 0
     total_skip = 0
@@ -406,19 +385,19 @@ def main() -> None:
         invalid = [k for k in keys if k not in RADAR_COLLECTIONS]
         if invalid:
             raise SystemExit(f"Unknown radar collection(s): {invalid}. Valid: {list(RADAR_COLLECTIONS)}")
-        ok, skip = _ingest_radar(spark, bronze_base, cat, sch, keys)
+        ok, skip = _ingest_radar(spark, workspace.bronze(), cat, sch, keys)
         print(f"\nDone — {ok} tables written, {skip} skipped.")
         return
 
-    for key in INGESTED_COLLECTIONS:
+    for key in INGESTED_DATASETS:
         # The one dataset whose bronze files are TXT rather than CSV.
         if kind(key) is DatasetKind.DIRECT_ZIP:
-            ok, skip = _ingest_climate_normals(spark, bronze_base, cat, sch)
+            ok, skip = _ingest_climate_normals(spark, workspace.bronze(), cat, sch)
             total_ok += ok
             total_skip += skip
             continue
 
-        csv_dir = bronze_base / key
+        csv_dir = workspace.bronze(key)
         if not csv_dir.exists():
             print(f"  --  {key:25s}   skipped (no data)", flush=True)
             total_skip += 1

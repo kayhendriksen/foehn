@@ -6,6 +6,7 @@ call the grib2 handler?" — one assertion per caller per kind, which is the
 duplication the registry removes.
 """
 
+import os
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -238,6 +239,19 @@ def test_the_grid_kinds_fetch_no_collection_metadata(tmp_path):
     assert fake.collection_calls == []
 
 
+def test_netcdf_download_refreshes_the_same_restated_asset_as_open_dataset(tmp_path):
+    path = tmp_path / "bronze" / "surface_derived_grid" / "grid.nc"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"old")
+    os.utime(path, (0, 0))
+    href = "https://data.geo.admin.ch/grid.nc"
+    fake = _fetcher([stac_item("i1", href, updated="2100-01-01T00:00:00Z")], body=b"new")
+
+    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
+
+    assert path.read_bytes() == b"new"
+
+
 def test_download_defaults_to_the_recent_slice(tmp_path):
     base = "https://data.geo.admin.ch"
     fake = _fetcher(
@@ -307,13 +321,8 @@ def test_convert_passes_the_directories_through(tmp_path):
     assert (tmp_path / "parquet" / "smn" / "smn_d_recent.parquet").exists()
 
 
-def test_a_stack_of_a_kind_with_no_cube_builder_falls_through_to_one_write():
-    """NetCDF combines a multi-file match on read, so ``stack`` is a no-op rather than an error.
-
-    ``api.to_zarr`` used to carry this as a branch of its own; it is the row's
-    ``cube`` that says which method writes the store.
-    """
-    with patch("foehn.registry._write_cube") as cube, patch("foehn.registry.open_grid") as opened:
+def test_registry_delegates_the_complete_zarr_recipe_to_the_grid_reader():
+    with patch("foehn.grids.GridReader.write_store") as write_store:
         registry.write_zarr(
             "surface_derived_grid",
             Path("unused.zarr"),
@@ -323,8 +332,7 @@ def test_a_stack_of_a_kind_with_no_cube_builder_falls_through_to_one_write():
             fetcher=InMemoryFetcher(),
         )
 
-    assert cube.call_count == 0
-    assert opened.call_count == 1
+    assert write_store.call_count == 1
 
 
 def test_write_zarr_refuses_a_tabular_dataset():

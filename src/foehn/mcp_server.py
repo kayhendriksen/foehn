@@ -21,14 +21,15 @@ from foehn import registry
 from foehn.collections import (
     CATEGORIES,
     CATEGORY_LABELS,
-    COLLECTION_META,
     COLLECTIONS,
+    DATASETS,
     DEFAULT_TIME_SLICE,
     GRANULARITY_LABELS,
     TIME_SLICE_LABELS,
     options,
 )
 from foehn.docstrings import renders
+from foehn.metadata import TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,11 @@ mcp = MCPServer(
 # ── Structured output models ───────────────────────────────────────────────
 
 
+def _metadata_field(table: str, name: str):
+    """Build one MCP field from the authoritative published metadata schema."""
+    return Field(description=TABLES[table].field(name).description)
+
+
 class Dataset(BaseModel):
     dataset: str = Field(description="Short name used in API calls (e.g. 'smn')")
     collection_id: str = Field(description="STAC collection ID")
@@ -125,33 +131,38 @@ class Dataset(BaseModel):
 
 
 class Parameter(BaseModel):
-    shortname: str = Field(description="Column name in data files (e.g. 'tre200s0')")
-    description: str = Field(description="Human-readable description (e.g. 'Air temperature 2m above ground')")
-    unit: str = Field(description="Measurement unit (e.g. '°C', 'mm', 'hPa')")
-    type: str = Field(description="Data type")
-    granularity: str = Field(description="Temporal granularity")
-    decimals: int | str = Field(description="Number of decimal places")
-    group: str = Field(description="Parameter group (e.g. 'Temperature', 'Precipitation')")
+    shortname: str = _metadata_field("parameters", "shortname")
+    description: str = _metadata_field("parameters", "description")
+    unit: str = _metadata_field("parameters", "unit")
+    type: str = _metadata_field("parameters", "type")
+    granularity: str = _metadata_field("parameters", "granularity")
+    decimals: int | str = _metadata_field("parameters", "decimals")
+    group: str = _metadata_field("parameters", "group")
 
 
 class Station(BaseModel):
-    abbr: str = Field(description="Station abbreviation (e.g. 'BER' for Bern)")
-    name: str = Field(description="Full station name")
-    canton: str = Field(description="Swiss canton code (e.g. 'BE', 'ZH')")
-    altitude: int | float = Field(description="Altitude in metres above sea level")
-    lv95_east: float = Field(description="LV95 easting in metres (EPSG:2056)")
-    lv95_north: float = Field(description="LV95 northing in metres (EPSG:2056)")
-    lat: float = Field(description="WGS84 latitude")
-    lon: float = Field(description="WGS84 longitude")
-    data_since: str = Field(description="Date measurements started (DD.MM.YYYY, as published by MeteoSwiss)")
+    abbr: str = _metadata_field("stations", "abbr")
+    name: str = _metadata_field("stations", "name")
+    canton: str = _metadata_field("stations", "canton")
+    altitude: int | float = _metadata_field("stations", "altitude")
+    lv95_east: float = _metadata_field("stations", "lv95_east")
+    lv95_north: float = _metadata_field("stations", "lv95_north")
+    lat: float = _metadata_field("stations", "lat")
+    lon: float = _metadata_field("stations", "lon")
+    data_since: str = _metadata_field("stations", "data_since")
 
 
 class InventoryEntry(BaseModel):
-    station: str = Field(description="Station abbreviation")
-    parameter: str = Field(description="Parameter shortname")
-    data_since: str = Field(description="Start of available data")
-    data_till: str = Field(description="End of available data")
-    owner: str = Field(description="Data owner")
+    station: str = _metadata_field("inventory", "station")
+    parameter: str = _metadata_field("inventory", "parameter")
+    data_since: str = _metadata_field("inventory", "data_since")
+    data_till: str | None = _metadata_field("inventory", "data_till")
+    owner: str = _metadata_field("inventory", "owner")
+
+
+TABLES["parameters"].assert_model(Parameter.model_fields)
+TABLES["stations"].assert_model(Station.model_fields)
+TABLES["inventory"].assert_model(InventoryEntry.model_fields)
 
 
 class ColumnSummary(BaseModel):
@@ -496,9 +507,9 @@ def get_inventory(dataset: str) -> list[InventoryEntry]:
 def usage_guide() -> str:
     """Complete reference guide for querying MeteoSwiss data with foehn tools."""
     loadable_list = "\n".join(
-        f"  - `{ds}` — {COLLECTION_META[ds]['description']} "
-        f"(frequencies: {', '.join(COLLECTION_META[ds]['frequencies']) or 'n/a'}, "
-        f"time slices: {', '.join(COLLECTION_META[ds]['time_slices']) or 'none'})"
+        f"  - `{ds}` — {DATASETS[ds].description} "
+        f"(frequencies: {', '.join(DATASETS[ds].frequencies) or 'n/a'}, "
+        f"time slices: {', '.join(DATASETS[ds].time_slices) or 'none'})"
         for ds in _LOADABLE_DATASETS
     )
     # Rendered rather than restated: these are the tokens ``foehn.load`` enforces,
@@ -506,8 +517,7 @@ def usage_guide() -> str:
     frequency_list = "\n".join(f"- `{token}` — {label}" for token, label in GRANULARITY_LABELS.items())
     time_slice_list = "\n".join(f"- `{token}` — {label}" for token, label in TIME_SLICE_LABELS.items())
     grid_list = "\n".join(
-        f"  - `{ds}` — {COLLECTION_META[ds]['description']} ({COLLECTION_META[ds]['format']})"
-        for ds in _INSPECTABLE_GRIDS
+        f"  - `{ds}` — {DATASETS[ds].description} ({DATASETS[ds].format})" for ds in _INSPECTABLE_GRIDS
     )
     return f"""\
 # foehn — MeteoSwiss Data Access Guide

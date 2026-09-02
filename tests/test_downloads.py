@@ -6,6 +6,7 @@ few that do check traffic are the ones where traffic *is* the behaviour: an ETag
 skip, a ``since`` filter, first-page-only listing.
 """
 
+import pytest
 from conftest import make_zip
 
 from foehn import registry
@@ -290,15 +291,14 @@ def test_normals_zip_extracts_files(tmp_path):
     assert (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
 
 
-def test_normals_zip_skips_if_extracted(tmp_path):
-    fake = _fake(body=make_zip({"sample.txt": b"data"}))
-    out_dir = tmp_path / "bronze" / "climate_normals"
-    out_dir.mkdir(parents=True)
-    (out_dir / "sample.txt").write_bytes(b"extracted")
+def test_normals_zip_skips_a_completed_materialization(tmp_path):
+    first = _fake(body=make_zip({"sample.txt": b"data"}))
+    download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=first)
 
-    download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=fake)
+    second = _fake(body=make_zip({"sample.txt": b"changed"}))
+    download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=second)
 
-    assert fake.gets == [] and fake.streams == []
+    assert second.gets == [] and second.streams == []
 
 
 def test_normals_zip_redownloads_if_not_extracted(tmp_path):
@@ -328,6 +328,25 @@ def test_normals_zip_force_redownloads(tmp_path):
 
     assert len(fake.streams) == 1
     assert (out_dir / "new.txt").exists()
+    assert not (out_dir / "old.txt").exists()
+
+
+def test_normals_refresh_keeps_the_previous_complete_directory_on_failure(tmp_path, monkeypatch):
+    out_dir = tmp_path / "bronze" / "climate_normals"
+    first = _fake(body=make_zip({"old.txt": b"complete"}))
+    download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=first)
+
+    def fail_after_one_member(_zip_path, staged_dir):
+        (staged_dir / "new.txt").write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("foehn.transfer.safe_extract", fail_after_one_member)
+    second = _fake(body=make_zip({"new.txt": b"fresh"}))
+    with pytest.raises(OSError, match="disk full"):
+        download_normals_zip("climate_normals", Workspace(tmp_path), force=True, fetcher=second)
+
+    assert (out_dir / "old.txt").read_bytes() == b"complete"
+    assert not (out_dir / "new.txt").exists()
 
 
 # --- the binary listing path (registry: GRIB2_GRID / RADAR_GRID) ---
@@ -430,17 +449,36 @@ def test_indoor_zip_downloads_and_extracts(tmp_path):
     assert result.filenames == ["indoor.zip"]
 
 
-def test_indoor_zip_skips_when_already_extracted(tmp_path):
-    """The skip rule is a property of the output directory, not of one asset."""
-    out_dir = tmp_path / "bronze" / "climate_scenarios_indoor"
-    out_dir.mkdir(parents=True)
-    (out_dir / "ABE_2020_RCP26_a.csv").write_bytes(b"extracted")
-    fake = _fake(items=[stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")])
+def test_indoor_zip_skips_when_the_materialization_is_current(tmp_path):
+    """The listing is checked for freshness, but a current Archive Asset is not fetched."""
+    item = stac_item("i", "https://data.geo.admin.ch/x/indoor.zip")
+    first = _fake(items=[item], body=make_zip({"ABE_2020_RCP26_a.csv": b"extracted"}))
+    download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=first)
 
-    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=fake)
+    second = _fake(items=[item])
+    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=second)
 
-    assert fake.streams == [] and fake.listings == []
+    assert second.streams == [] and len(second.listings) == 1
     assert (result.total_assets, result.downloaded, result.skipped) == (1, 0, 1)
+
+
+def test_indoor_zip_refreshes_when_the_archive_asset_is_newer(tmp_path):
+    href = "https://data.geo.admin.ch/x/indoor.zip"
+    first = _fake(
+        items=[stac_item("i", href, updated="2026-01-01T00:00:00Z")],
+        body=make_zip({"ABE_2020_RCP26_a.csv": b"old"}),
+    )
+    download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=first)
+
+    second = _fake(
+        items=[stac_item("i", href, updated="2026-02-01T00:00:00Z")],
+        body=make_zip({"ABE_2020_RCP26_a.csv": b"new"}),
+    )
+    result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=second)
+
+    out = tmp_path / "bronze" / "climate_scenarios_indoor" / "ABE_2020_RCP26_a.csv"
+    assert result.downloaded == 1
+    assert out.read_bytes() == b"new"
 
 
 def test_indoor_zip_force_redownloads_over_an_extracted_directory(tmp_path):

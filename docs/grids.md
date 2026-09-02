@@ -74,9 +74,11 @@ ds = foehn.open_dataset("climate_scenarios_grid", match="_pr_", variables="pr")
 > **Download-then-lazy, not cloud-lazy.** The first call downloads the *entire*
 > NetCDF to `<data_dir>/bronze/<dataset>/` before anything is read — for
 > `climate_scenarios_grid` that's roughly 900 MB up front. Array *values* are
-> then read lazily from the local copy; subsequent calls reuse the cache. There
-> is no byte-range read of the remote file. Use `match=` to avoid pulling
-> parameters you don't need.
+> then read lazily from the local copy. On later calls foehn checks the current
+> STAC asset metadata: an unchanged asset reuses the cache and a newer `updated`
+> timestamp refreshes it. If that metadata check is temporarily offline, an
+> existing complete local file remains usable. There is no byte-range read of
+> the remote file. Use `match=` to avoid pulling parameters you don't need.
 
 Once open, it's an ordinary xarray Dataset — slice it with `.sel()`/`.isel()`,
 reduce, plot, etc. (these grids use the Swiss LV95 projection, so spatial
@@ -234,6 +236,15 @@ Non-CF time axes (MeteoSwiss climate normals label theirs `years since
 1991-01-01`, which CF decoding rejects) are sanitised on write so the resulting
 store always re-opens cleanly with `xarray.open_zarr()`.
 
+With the default `mode="w"`, the complete replacement store is staged beside its
+destination and published only after a successful write. If opening, cubing,
+rechunking, or writing fails, an existing complete store is preserved.
+
+`mode="a"` writes directly into the existing store. This keeps append work and
+temporary disk usage proportional to the new data instead of copying the entire
+store first. Like other in-place append APIs, an interrupted append is not rolled
+back automatically.
+
 ---
 
 ## CLI
@@ -258,7 +269,8 @@ foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 
 The MCP server exposes the inspect path as the `describe_grid` tool (any gridded
 format): it returns a grid's dimensions, coordinates, and variables without
-streaming array values into the LLM context (it does cache the source file — the
-same download-then-lazy caveat, hence it's annotated `read_only_hint=False`).
+streaming array values into the LLM context (it may refresh the source cache when
+STAC reports a newer asset — the same download-then-lazy caveat, hence it's
+annotated `read_only_hint=False`).
 Writing Zarr stores (`to_zarr`) is intentionally not exposed over MCP — conversion/
 write tools aren't part of the MCP surface. See the [MCP server docs](mcp-server.md).

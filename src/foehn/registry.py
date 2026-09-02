@@ -5,7 +5,7 @@ the Databricks ingest script, each re-deriving from a different set of dataset
 keys. Callers ask the registry instead of testing membership.
 
 Layering: ``collections`` (dataset facts) → ``downloads``/``convert``/``readers``/
-``grids`` (adapters) → this module → ``api``/``cli``/``mcp_server``. All four
+``gridfiles``/``grids`` (adapters) → this module → ``api``/``cli``/``mcp_server``. All four
 pipeline stages route through the table: the load readers live in
 ``foehn.readers`` and the grid readers in ``foehn.grids``, both below this
 module, so ``load`` and ``grid`` can sit in :class:`KindSpec` beside ``download``
@@ -43,7 +43,6 @@ from foehn.downloads import (
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.gridfiles import ensure_grid_files
 from foehn.grids import (
-    CubeAdapter,
     GridReader,
     cube_grib2,
     cube_radar,
@@ -53,10 +52,8 @@ from foehn.grids import (
     require_grib2,
     require_netcdf,
     require_radar,
-    select_variables,
 )
-from foehn.grids import write_zarr as grids_write_zarr
-from foehn.transfer import DownloadResult, already_current, csv_to_disk, exists
+from foehn.transfer import DownloadResult, already_current, csv_to_disk
 
 if TYPE_CHECKING:
     import polars as pl
@@ -66,6 +63,7 @@ from foehn.readers import (
     Filters,
     Reader,
     read_archive,
+    read_forecast,
     read_preamble,
     read_standard,
 )
@@ -124,9 +122,9 @@ _download_forecast_csv = stac_download(
 _download_netcdf = stac_download(
     suffixes=(".nc", ".tif", ".zip"),
     title="NetCDF collection",
-    # These are static: an existing file is never restated upstream, so a plain
-    # existence check is enough.
-    skip=exists,
+    # Read and explicit download paths share the same freshness rule. If an
+    # upstream asset is restated under its old name, both paths refresh it.
+    skip=already_current,
 )
 
 # The ephemeral collections only ever want the newest page, and MeteoSwiss
@@ -225,7 +223,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.FORECAST_CSV: KindSpec(
         download=_download_forecast_csv,
         convert=convert_to_parquet,
-        load=Reader(read_standard),
+        load=Reader(read_forecast),
         grid=None,
         supports_granularity=False,
         supports_calendar_filters=True,
@@ -246,6 +244,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         convert=None,
         load=None,
         grid=GridReader(
+            acquire=ensure_grid_files,
             suffixes=(".nc",),
             require=require_netcdf,
             open=open_netcdf,
@@ -261,6 +260,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         convert=None,
         load=None,
         grid=GridReader(
+            acquire=ensure_grid_files,
             suffixes=(".grib2", ".grib"),
             require=require_grib2,
             open=open_grib2,
@@ -283,6 +283,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         convert=None,
         load=None,
         grid=GridReader(
+            acquire=ensure_grid_files,
             suffixes=(".h5",),
             require=require_radar,
             open=open_radar,
@@ -347,20 +348,19 @@ def unreadable_message(dataset: str) -> str:
 def validate_load(dataset: str, filters: Filters) -> Reader:
     """Refuse a query this dataset cannot answer, and return the reader for it.
 
-    Every one of these is a fact the row already holds, so they belong on this
-    side of the seam — ``api.load`` used to carry all six between its docstring
-    and its single call. The messages name public keywords because that is what
-    the caller typed; the registry already speaks that vocabulary in
-    :func:`unreadable_message` and :func:`open_grid`.
+    Kind capabilities belong on this side of the seam, alongside generic query
+    validation and the shared token vocabulary — ``api.load`` used to carry all
+    of them between its docstring and its single call. The messages name public
+    keywords because that is what the caller typed; the registry already speaks
+    that vocabulary in :func:`unreadable_message` and :func:`open_grid`.
     """
+    filters.validate()
     kind_spec = spec(dataset)
     reader = kind_spec.load
     if reader is None:
         raise ValueError(unreadable_message(dataset))
     if filters.granularities is not None and not kind_spec.supports_granularity:
         raise ValueError(f"Dataset {dataset!r} does not support frequency filtering.")
-    if filters.sort is not None and filters.sort not in ("asc", "desc"):
-        raise ValueError(f"Invalid sort {filters.sort!r}. Valid options: asc, desc.")
     # Reject a token outside the vocabulary rather than quietly matching no
     # assets and reporting "no CSV files found" — a mistyped frequency is a
     # caller error, and the MCP layer used to catch it with its own copy of
@@ -417,68 +417,12 @@ def open_grid(
     fails in milliseconds rather than after the download — ``climate_scenarios_grid``
     is ~900 MB.
     """
-    reader = _grid_reader(dataset)
-    if reader.max_files == 1 and match is None:
-        fmt = COLLECTION_META[dataset]["format"]
-        raise ValueError(
-            f"Dataset {dataset!r} is a {fmt} collection of many single-field files; opening it "
-            "unfiltered would download them all. Narrow to one file with match=, e.g. "
-            f'foehn.open_dataset({dataset!r}, match="{reader.match_example}").'
-        )
-    reader.require()
-    files = ensure_grid_files(
+    return _grid_reader(dataset).open_dataset(
         dataset,
-        workspace,
-        suffixes=reader.suffixes,
         match=match,
-        max_files=reader.max_files,
-        run_datetime=reader.run_datetime,
-        fetcher=fetcher,
-    )
-    return select_variables(reader.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher), variables)
-
-
-def _write_cube(
-    dataset: str,
-    store: Path,
-    reader: GridReader,
-    cube: CubeAdapter,
-    *,
-    match: str | None = None,
-    variables: str | list[str] | None = None,
-    mode: str = "w",
-    workspace: Workspace,
-    fetcher: Fetcher,
-) -> None:
-    """Assemble *dataset*'s matched files into one Zarr store at *store*.
-
-    Takes the reader *and* the cube adapter :func:`write_zarr` picked off it.
-    A kind with no cube builder cannot reach here, and saying that in the
-    signature is what makes it true — the runtime guard this replaces could only
-    check it after the fact.
-    """
-    if match is None:
-        raise ValueError(
-            f'stack= needs match= to scope the cube for {dataset!r}, e.g. match="{reader.cube_match_example}".'
-        )
-    reader.require()
-    files = ensure_grid_files(
-        dataset,
-        workspace,
-        suffixes=reader.suffixes,
-        match=match,
-        max_files=reader.cube_max_files,
-        run_datetime=reader.run_datetime,
-        fetcher=fetcher,
-    )
-    cube(
-        files,
-        store,
-        dataset=dataset,
+        variables=variables,
         workspace=workspace,
         fetcher=fetcher,
-        variables=variables,
-        mode=mode,
     )
 
 
@@ -502,30 +446,16 @@ def write_zarr(
     ``api.to_zarr`` no longer has to know that. Which method, not how: what a
     Dataset needs doing to it on the way to a store is ``grids.write_zarr``'s.
     """
-    reader = _grid_reader(dataset)
-    if stack and rechunk:
-        raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
-
-    cube = reader.cube
-    if stack and cube is not None:
-        _write_cube(
-            dataset,
-            store,
-            reader,
-            cube,
-            match=match,
-            variables=variables,
-            mode=mode,
-            workspace=workspace,
-            fetcher=fetcher,
-        )
-        return
-
-    grids_write_zarr(
-        open_grid(dataset, match=match, variables=variables, workspace=workspace, fetcher=fetcher),
+    _grid_reader(dataset).write_store(
+        dataset,
         store,
-        mode,
+        match=match,
+        variables=variables,
         rechunk=rechunk,
+        mode=mode,
+        stack=stack,
+        workspace=workspace,
+        fetcher=fetcher,
     )
 
 

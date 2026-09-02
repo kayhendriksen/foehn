@@ -8,8 +8,8 @@ The public ``open_dataset`` and ``to_zarr`` live in :mod:`foehn.api`, exactly as
 
 Upstream's file conventions are not here: ODIM's gain/offset/nodata scaling is
 :mod:`foehn.odim`, ICON's unstructured cell coordinates are :mod:`foehn.icon`,
-and getting a match's files onto disk is :mod:`foehn.gridfiles`. What is left is
-the readers themselves — the same split the tabular path has between
+and getting a match's files onto disk is an injected acquisition adapter. What
+is left is the readers themselves — the same split the tabular path has between
 ``readers``, ``meteocsv``, ``assets`` and ``transfer``.
 
 This module used to sit *above* the registry and keep a second table of its own,
@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from foehn import icon, odim
+from foehn import atomicwrite, icon, odim
 from foehn.collections import COLLECTION_META
 from foehn.fetch import Fetcher
 from foehn.workspace import Workspace
@@ -183,6 +183,22 @@ class CubeAdapter(Protocol):
     ) -> None: ...
 
 
+class AcquireAdapter(Protocol):
+    """Materialize the grid files selected by one read request."""
+
+    def __call__(
+        self,
+        dataset: str,
+        workspace: Workspace,
+        *,
+        suffixes: tuple[str, ...],
+        match: str | None,
+        max_files: int | None,
+        run_datetime: bool,
+        fetcher: Fetcher,
+    ) -> list[Path]: ...
+
+
 @dataclass(frozen=True)
 class GridReader:
     """How one grid kind is read. Constructed in :data:`~foehn.registry.KINDS`.
@@ -191,6 +207,9 @@ class GridReader:
     configuration is stated in the registry row, exactly as ``key_columns`` and
     ``sort_column`` are for the tabular readers.
     """
+
+    acquire: AcquireAdapter
+    """Injected file-acquisition boundary; implemented above this read layer."""
 
     suffixes: tuple[str, ...]
     """Asset extensions this kind reads. Other payloads (GeoTIFF/ZIP copies) are ignored."""
@@ -241,6 +260,103 @@ class GridReader:
     data date matches nothing.
     """
 
+    def open_dataset(
+        self,
+        dataset: str,
+        *,
+        match: str | None,
+        variables: str | list[str] | None,
+        workspace: Workspace,
+        fetcher: Fetcher,
+    ) -> xr.Dataset:
+        """Validate, materialize, and open one Grid Dataset."""
+        if self.max_files == 1 and match is None:
+            fmt = COLLECTION_META[dataset]["format"]
+            raise ValueError(
+                f"Dataset {dataset!r} is a {fmt} collection of many single-field files; opening it "
+                "unfiltered would download them all. Narrow to one file with match=, e.g. "
+                f'foehn.open_dataset({dataset!r}, match="{self.match_example}").'
+            )
+        self.require()
+        files = self.acquire(
+            dataset,
+            workspace,
+            suffixes=self.suffixes,
+            match=match,
+            max_files=self.max_files,
+            run_datetime=self.run_datetime,
+            fetcher=fetcher,
+        )
+        return select_variables(self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher), variables)
+
+    def write_store(
+        self,
+        dataset: str,
+        store: Path,
+        *,
+        match: str | None,
+        variables: str | list[str] | None,
+        rechunk: dict[str, int] | None,
+        mode: str,
+        stack: bool,
+        workspace: Workspace,
+        fetcher: Fetcher,
+    ) -> None:
+        """Write a Zarr store behind the Grid reader seam."""
+        if stack and rechunk:
+            raise ValueError("rechunk= is not supported with stack= (the cube is written separately).")
+
+        if stack and self.cube is not None:
+            if match is None:
+                raise ValueError(
+                    f'stack= needs match= to scope the cube for {dataset!r}, e.g. match="{self.cube_match_example}".'
+                )
+            self.require()
+            files = self.acquire(
+                dataset,
+                workspace,
+                suffixes=self.suffixes,
+                match=match,
+                max_files=self.cube_max_files,
+                run_datetime=self.run_datetime,
+                fetcher=fetcher,
+            )
+            if mode == "w":
+                with atomicwrite.staged_directory(store) as staged:
+                    self.cube(
+                        files,
+                        staged,
+                        dataset=dataset,
+                        workspace=workspace,
+                        fetcher=fetcher,
+                        variables=variables,
+                        mode=mode,
+                    )
+            else:
+                self.cube(
+                    files,
+                    store,
+                    dataset=dataset,
+                    workspace=workspace,
+                    fetcher=fetcher,
+                    variables=variables,
+                    mode=mode,
+                )
+            return
+
+        ds = self.open_dataset(
+            dataset,
+            match=match,
+            variables=variables,
+            workspace=workspace,
+            fetcher=fetcher,
+        )
+        if mode == "w":
+            with atomicwrite.staged_directory(store) as staged:
+                _write_zarr(ds, staged, mode, rechunk=rechunk)
+        else:
+            _write_zarr(ds, store, mode, rechunk=rechunk)
+
 
 # --- Writing ---------------------------------------------------------------
 
@@ -273,10 +389,10 @@ def _sanitize_noncf_time_units(ds):
     return ds
 
 
-def write_zarr(
+def _write_zarr(
     ds, store: Path, mode: str = "w", *, rechunk: dict[str, int] | None = None, append_dim: str | None = None
 ) -> None:
-    """Write a Dataset to a Zarr store: sanitised, optionally rechunked, quietly.
+    """Write inside a staged replacement or directly into an append target.
 
     Everything a Dataset needs on its way to a store, so a caller learns one
     call rather than three. The non-CF time units have to be moved aside or the
@@ -303,6 +419,17 @@ def write_zarr(
             ds.to_zarr(store, mode=mode, append_dim=append_dim)
         else:
             ds.to_zarr(store, mode=mode)
+
+
+def write_zarr(
+    ds, store: Path, mode: str = "w", *, rechunk: dict[str, int] | None = None, append_dim: str | None = None
+) -> None:
+    """Stage replacement stores; append to existing stores without copying them."""
+    if mode == "w":
+        with atomicwrite.staged_directory(store) as staged:
+            _write_zarr(ds, staged, mode, rechunk=rechunk, append_dim=append_dim)
+    else:
+        _write_zarr(ds, store, mode, rechunk=rechunk, append_dim=append_dim)
 
 
 def select_variables(ds, variables: str | list[str] | None):
@@ -434,7 +561,8 @@ def cube_radar(
         # in memory. Same rule as everywhere else, hence the same call.
         ds = select_variables(ds, variables).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
-        write_zarr(ds, store, mode if i == 0 else "a", append_dim=None if i == 0 else "time")
+        write_mode = mode if i == 0 else "a"
+        _write_zarr(ds, store, write_mode, append_dim="time" if write_mode == "a" else None)
 
 
 def cube_grib2(
@@ -483,10 +611,11 @@ def cube_grib2(
         fetcher=fetcher,
         what="the cube is on the bare unstructured grid.",
     )
-    write_zarr(cube, store, mode)
+    _write_zarr(cube, store, mode)
 
 
 __all__ = [
+    "AcquireAdapter",
     "CubeAdapter",
     "GridReader",
     "OpenAdapter",

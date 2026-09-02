@@ -50,8 +50,8 @@ Add foehn to your MCP client config:
 
 `describe_grid` is the gridded counterpart to `describe_data`, covering every
 gridded collection — NetCDF, GRIB2 forecasts, and HDF5/ODIM radar (GRIB2 and
-radar need a single-file `match`). It caches the source file locally on first
-use (download-then-lazy) and needs the `grids` extra (`pip install
+radar need a single-file `match`). It caches the source file locally and refreshes
+it when STAC reports a newer asset (download-then-lazy); it needs the `grids` extra (`pip install
 "foehn[grids]"`). It returns structure only — grid *values* aren't streamed into
 the LLM context, and writing Zarr stores isn't exposed over MCP (use the Python
 API or `foehn to-zarr` CLI).
