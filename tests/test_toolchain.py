@@ -9,6 +9,7 @@ contract from the repo side, where a break shows up before it reaches CI.
 
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -69,6 +70,28 @@ def test_unknown_tool_fails_loudly():
 
     assert result.returncode != 0
     assert "no pin found" in result.stderr
+
+
+def test_import_foehn_does_not_require_the_posix_fcntl_module():
+    """Windows has no fcntl; importing the package must not reach for it eagerly."""
+    script = """
+import builtins
+real_import = builtins.__import__
+def without_fcntl(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ImportError("fcntl unavailable")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = without_fcntl
+import foehn
+"""
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)

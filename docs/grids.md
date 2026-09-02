@@ -236,9 +236,14 @@ Non-CF time axes (MeteoSwiss climate normals label theirs `years since
 1991-01-01`, which CF decoding rejects) are sanitised on write so the resulting
 store always re-opens cleanly with `xarray.open_zarr()`.
 
-The complete store is staged beside its destination and published only after a
-successful write. If opening, cubing, rechunking, or writing fails, an existing
-complete store at the destination is preserved.
+With the default `mode="w"`, the complete replacement store is staged beside its
+destination and published only after a successful write. If opening, cubing,
+rechunking, or writing fails, an existing complete store is preserved.
+
+`mode="a"` writes directly into the existing store. This keeps append work and
+temporary disk usage proportional to the new data instead of copying the entire
+store first. Like other in-place append APIs, an interrupted append is not rolled
+back automatically.
 
 ---
 

@@ -104,19 +104,9 @@ class Filters:
         empty list the other way and error out; they now agree with the main path.
         """
         months = _as_tuple(month)
-        if months is not None and (invalid_months := sorted({value for value in months if not 1 <= value <= 12})):
-            raise ValueError(f"Invalid month {invalid_months}. Valid options: 1 through 12.")
-        if sort is not None and sort not in ("asc", "desc"):
-            raise ValueError(f"Invalid sort {sort!r}. Valid options: asc, desc.")
-        if limit is not None and limit < 0:
-            raise ValueError("limit must be zero or greater.")
-        if workers < 1:
-            raise ValueError("workers must be greater than zero.")
         start = _parse_date_bound(date_from, "date_from")
         end = _parse_date_bound(date_to, "date_to")
-        if start is not None and end is not None and start > end:
-            raise ValueError("date_from must be before or equal to date_to.")
-        return cls(
+        filters = cls(
             stations=_lower_set(station),
             granularities=_lower_set(frequency),
             time_slices=_as_tuple(time_slice) or (DEFAULT_TIME_SLICE,),
@@ -130,6 +120,25 @@ class Filters:
             limit=limit,
             workers=workers,
         )
+        filters.validate()
+        return filters
+
+    def validate(self) -> None:
+        """Validate the query at any entry seam, including direct construction."""
+        if self.month is not None and (
+            invalid_months := sorted({value for value in self.month if not 1 <= value <= 12})
+        ):
+            raise ValueError(f"Invalid month {invalid_months}. Valid options: 1 through 12.")
+        if self.sort is not None and self.sort not in ("asc", "desc"):
+            raise ValueError(f"Invalid sort {self.sort!r}. Valid options: asc, desc.")
+        if self.limit is not None and self.limit < 0:
+            raise ValueError("limit must be zero or greater.")
+        if self.workers < 1:
+            raise ValueError("workers must be greater than zero.")
+        start = _parse_date_bound(self.date_from, "date_from")
+        end = _parse_date_bound(self.date_to, "date_to")
+        if start is not None and end is not None and start > end:
+            raise ValueError("date_from must be before or equal to date_to.")
 
     @property
     def has_calendar_filter(self) -> bool:

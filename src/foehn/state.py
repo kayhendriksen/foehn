@@ -11,31 +11,17 @@ exception costs the whole run.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from foehn._locking import exclusive_lock
 from foehn.atomicwrite import write_text
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def _state_lock(workspace: Workspace) -> Iterator[None]:
-    """Serialize the short Run state read-modify-write transition."""
-    workspace.root.mkdir(parents=True, exist_ok=True)
-    with workspace.state_lock.open("a+b") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _read_mapping(path: Path, label: str) -> dict[str, str]:
@@ -73,7 +59,7 @@ def save_etags(workspace: Workspace, etags: dict[str, str]) -> None:
     """
     if not all(isinstance(key, str) and isinstance(value, str) for key, value in etags.items()):
         raise ValueError("ETags must map string Asset hrefs to string validators.")
-    with _state_lock(workspace):
+    with exclusive_lock(workspace.state_lock):
         _save_etags_unlocked(workspace, etags)
 
 
@@ -94,7 +80,7 @@ class EtagRun:
         """Merge this run's changes and optionally prune a complete Collection listing."""
         changed = {key: value for key, value in self.values.items() if self.original.get(key) != value}
         removed = self.original.keys() - self.values.keys()
-        with _state_lock(self.workspace):
+        with exclusive_lock(self.workspace.state_lock):
             current = load_etags(self.workspace)
             current.update(changed)
             for key in removed:
@@ -145,7 +131,7 @@ def save_last_run(workspace: Workspace, timestamp: str | None = None) -> None:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("Run watermark must include a timezone.")
-    with _state_lock(workspace):
+    with exclusive_lock(workspace.state_lock):
         current = _read_mapping(path, "last-run cursor").get("timestamp")
         if current is not None:
             try:

@@ -5,7 +5,7 @@ the Databricks ingest script, each re-deriving from a different set of dataset
 keys. Callers ask the registry instead of testing membership.
 
 Layering: ``collections`` (dataset facts) → ``downloads``/``convert``/``readers``/
-``grids`` (adapters) → this module → ``api``/``cli``/``mcp_server``. All four
+``gridfiles``/``grids`` (adapters) → this module → ``api``/``cli``/``mcp_server``. All four
 pipeline stages route through the table: the load readers live in
 ``foehn.readers`` and the grid readers in ``foehn.grids``, both below this
 module, so ``load`` and ``grid`` can sit in :class:`KindSpec` beside ``download``
@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Protocol
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
-    DATASETS,
     DEFAULT_TIME_SLICE,
     GRANULARITIES,
     KIND_OF,
@@ -42,6 +41,7 @@ from foehn.downloads import (
     stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.gridfiles import ensure_grid_files
 from foehn.grids import (
     GridReader,
     cube_grib2,
@@ -53,7 +53,7 @@ from foehn.grids import (
     require_netcdf,
     require_radar,
 )
-from foehn.transfer import DownloadResult, already_current, csv_to_disk, exists
+from foehn.transfer import DownloadResult, already_current, csv_to_disk
 
 if TYPE_CHECKING:
     import polars as pl
@@ -122,9 +122,9 @@ _download_forecast_csv = stac_download(
 _download_netcdf = stac_download(
     suffixes=(".nc", ".tif", ".zip"),
     title="NetCDF collection",
-    # These are static: an existing file is never restated upstream, so a plain
-    # existence check is enough.
-    skip=exists,
+    # Read and explicit download paths share the same freshness rule. If an
+    # upstream asset is restated under its old name, both paths refresh it.
+    skip=already_current,
 )
 
 # The ephemeral collections only ever want the newest page, and MeteoSwiss
@@ -244,6 +244,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         convert=None,
         load=None,
         grid=GridReader(
+            acquire=ensure_grid_files,
             suffixes=(".nc",),
             require=require_netcdf,
             open=open_netcdf,
@@ -259,6 +260,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         convert=None,
         load=None,
         grid=GridReader(
+            acquire=ensure_grid_files,
             suffixes=(".grib2", ".grib"),
             require=require_grib2,
             open=open_grib2,
@@ -281,6 +283,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
         convert=None,
         load=None,
         grid=GridReader(
+            acquire=ensure_grid_files,
             suffixes=(".h5",),
             require=require_radar,
             open=open_radar,
@@ -345,12 +348,13 @@ def unreadable_message(dataset: str) -> str:
 def validate_load(dataset: str, filters: Filters) -> Reader:
     """Refuse a query this dataset cannot answer, and return the reader for it.
 
-    Every one of these is a fact the row already holds, so they belong on this
-    side of the seam — ``api.load`` used to carry all six between its docstring
-    and its single call. The messages name public keywords because that is what
-    the caller typed; the registry already speaks that vocabulary in
-    :func:`unreadable_message` and :func:`open_grid`.
+    Kind capabilities belong on this side of the seam, alongside generic query
+    validation and the shared token vocabulary — ``api.load`` used to carry all
+    of them between its docstring and its single call. The messages name public
+    keywords because that is what the caller typed; the registry already speaks
+    that vocabulary in :func:`unreadable_message` and :func:`open_grid`.
     """
+    filters.validate()
     kind_spec = spec(dataset)
     reader = kind_spec.load
     if reader is None:
@@ -363,19 +367,8 @@ def validate_load(dataset: str, filters: Filters) -> Reader:
     # these two sets.
     if filters.granularities and (unknown := sorted(filters.granularities - GRANULARITIES)):
         raise ValueError(f"Invalid frequency {unknown}. Valid options: {', '.join(sorted(GRANULARITIES))}.")
-    if filters.granularities:
-        declared = frozenset(DATASETS[dataset].frequencies)
-        if unsupported := sorted(filters.granularities - declared):
-            valid = ", ".join(DATASETS[dataset].frequencies)
-            raise ValueError(f"Dataset {dataset!r} does not publish frequency {unsupported}. Valid options: {valid}.")
     if unknown_slices := sorted(set(filters.time_slices) - TIME_SLICES):
         raise ValueError(f"Invalid time_slice {unknown_slices}. Valid options: {', '.join(sorted(TIME_SLICES))}.")
-    declared_slices = frozenset(DATASETS[dataset].time_slices)
-    if declared_slices and (unsupported_slices := sorted(set(filters.time_slices) - declared_slices)):
-        valid = ", ".join(DATASETS[dataset].time_slices)
-        raise ValueError(
-            f"Dataset {dataset!r} does not publish time_slice {unsupported_slices}. Valid options: {valid}."
-        )
     if not kind_spec.supports_calendar_filters and filters.has_calendar_filter:
         raise ValueError(
             f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "

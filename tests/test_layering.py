@@ -142,7 +142,7 @@ def test_meteocsv_is_the_bottom_of_the_read_stack():
     assert _imports("meteocsv") <= {"collections"}
 
 
-@pytest.mark.parametrize("module", ["catalog", "workspace", "_urls", "archives", "odim", "atomicwrite", "docstrings"])
+@pytest.mark.parametrize("module", ["catalog", "workspace", "_urls", "archives", "odim", "_locking", "docstrings"])
 def test_the_leaf_modules_import_no_foehn(module):
     """Dataset facts, the layout, URL validation, the ZIP guards, ODIM, staging and
     docstring rendering sit under everything.
@@ -155,11 +155,11 @@ def test_the_leaf_modules_import_no_foehn(module):
 
 
 def test_the_grid_reader_owns_file_acquisition_without_absorbing_transfer():
-    """The Grid reader sequences acquisition but delegates its Implementation."""
+    """The Grid reader sequences an injected acquisition Adapter without importing it."""
     deps = _imports("grids")
     assert "transfer" not in deps
     assert "assets" not in deps
-    assert "gridfiles" in deps
+    assert "gridfiles" not in deps
 
 
 def test_the_run_state_does_not_depend_on_the_download_engine():
@@ -168,7 +168,7 @@ def test_the_run_state_does_not_depend_on_the_download_engine():
     The same shape as ``transfer`` importing ``convert``: a module reaching into
     a pipeline stage for a helper that was never that stage's to own.
     """
-    assert _imports("state") == {"atomicwrite", "workspace"}
+    assert _imports("state") == {"_locking", "atomicwrite", "workspace"}
 
 
 def test_every_write_to_the_workspace_stages():
@@ -205,7 +205,7 @@ def test_the_metadata_tables_have_one_consumer():
 def test_the_grid_fetching_has_one_consumer():
     """Grid file acquisition sits behind the Grid reader Seam."""
     importers = {module for module, deps in _graph().items() if "gridfiles" in deps}
-    assert importers == {"grids"}
+    assert importers == {"registry"}
 
 
 def test_upstreams_grid_conventions_have_one_consumer_each():

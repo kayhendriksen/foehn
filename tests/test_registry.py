@@ -6,6 +6,7 @@ call the grib2 handler?" — one assertion per caller per kind, which is the
 duplication the registry removes.
 """
 
+import os
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -236,6 +237,19 @@ def test_the_grid_kinds_fetch_no_collection_metadata(tmp_path):
     fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/grid.nc")])
     registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
     assert fake.collection_calls == []
+
+
+def test_netcdf_download_refreshes_the_same_restated_asset_as_open_dataset(tmp_path):
+    path = tmp_path / "bronze" / "surface_derived_grid" / "grid.nc"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"old")
+    os.utime(path, (0, 0))
+    href = "https://data.geo.admin.ch/grid.nc"
+    fake = _fetcher([stac_item("i1", href, updated="2100-01-01T00:00:00Z")], body=b"new")
+
+    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
+
+    assert path.read_bytes() == b"new"
 
 
 def test_download_defaults_to_the_recent_slice(tmp_path):

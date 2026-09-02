@@ -14,10 +14,12 @@ foehn's short key for one body of MeteoSwiss data — `smn`, `radar_precip`,
 _Avoid_: collection (that is the STAC id), source, feed, product
 
 **Dataset catalogue**:
-The immutable declaration of every **Dataset** and its **Collection**, **Dataset
-kind**, **Category**, **Format**, granularities and time slices. Public catalogue
-rows and the legacy `COLLECTIONS`, `COLLECTION_META` and `KIND_OF` mappings are
-derived views; none is another source of facts.
+The immutable descriptive declaration of every **Dataset** and its **Collection**,
+**Dataset kind**, **Category**, **Format**, known granularities and known time
+slices. Public catalogue rows and the legacy `COLLECTIONS`, `COLLECTION_META` and
+`KIND_OF` mappings are derived views; none is another source of facts. Known
+granularities and slices inform discovery but do not veto an upstream **Asset**:
+MeteoSwiss can publish a new one before foehn's catalogue is updated.
 _Avoid_: collection table, registry (the registry carries executable adapters)
 
 **Collection**:
@@ -157,13 +159,16 @@ the load path, the convert stage and the Databricks ingest script alike.
 _Avoid_: parsing, format (a **Format** is a value; this is the rules for one)
 
 **Staging**:
-Writing a complete file or directory materialisation beside its target, verifying
-it, then moving it onto the target. A failed refresh preserves the old complete
-target rather than leaving a truncated file or partial archive/Zarr directory
-that a skip rule could read as "already done". One rule, under the **Fetcher**,
-**Transfer**, convert stage, grid writer and **Run state** alike. In-flight
-builds use unique sibling paths; directory publication serializes only its short
-final exchange, so processes sharing a **Workspace** never share partial output.
+Writing a complete replacement file or directory materialisation beside its
+target, verifying it, then moving it onto the target. A failed replacement
+preserves the old complete target rather than leaving a truncated file or
+partial archive/Zarr directory that a skip rule could read as "already done".
+One rule, under the **Fetcher**, **Transfer**, convert stage, grid writer and
+**Run state** alike. In-flight builds use unique sibling paths in a reaped
+namespace; directory publication serializes only its short final exchange, so
+processes sharing a **Workspace** never share partial output. Zarr append mode is
+the deliberate exception: it writes in place to stay O(delta), so it does not
+promise rollback of an interrupted append.
 _Avoid_: atomic (it is not atomic on every filesystem; the move is what matters)
 
 **Metadata table**:
@@ -196,9 +201,10 @@ _Avoid_: loader, parser (parsing is one step inside a reader)
 **Grid reader**:
 How one **Dataset kind** becomes an xarray Dataset — one per grid kind, selected
 from the registry exactly as a **Reader** is. Carries what its kind needs opened
-and owns the sequence from requirement validation through fresh file acquisition,
-single/cube selection and complete Zarr publication. Where the kind has one, it
-also carries how matched files assemble into a cube. A **Dataset kind** has a
+and owns the sequence from requirement validation through an injected fresh-file
+acquisition Adapter, single/cube selection and Zarr writing. Replacement stores
+are staged; append stores are updated in place. Where the kind has one, it also
+carries how matched files assemble into a cube. A **Dataset kind** has a
 **Reader** or a **Grid reader**, never both.
 _Avoid_: engine, backend (those are xarray's, and one grid reader uses no xarray
 engine at all), format reader
@@ -208,8 +214,8 @@ One load query, normalised: stations and granularities lowercased, scalars
 widened to tuples, an empty list read as "no filter". The public `load()`
 keywords are packed into one of these at the seam, so nothing below restates
 the eleven arguments. Invalid months, ISO dates, date ordering, sort tokens,
-negative limits and non-positive worker counts fail while building **Filters**;
-`limit=0` is a valid empty result.
+negative limits and non-positive worker counts fail at every registry entry seam,
+including for directly constructed **Filters**; `limit=0` is a valid empty result.
 _Avoid_: query, params, options
 
 ## Relationships
@@ -299,13 +305,17 @@ _Avoid_: query, params, options
   by name. Resolved: `gridfiles` fetches (what **Transfer** is to the download
   paths), `odim` and `icon` carry upstream's conventions (what **MeteoSwiss
   CSV** is to the tabular path), and `grids` is the **Grid readers**. The same
-  four-way split the tabular path already had.
+  four-way split the tabular path already had. The registry injects `gridfiles`
+  as the acquisition Adapter, so the Grid reader owns sequencing without
+  depending on the download engine again.
 - **Staging** was stated four times — the **Fetcher**'s stream, **Transfer**'s
   byte writer, the convert stage's Parquet writer and **Run state** — with three
   suffixes and three docstrings reasoning their way to the same rule. **Run
   state** reached into **Transfer**, the download engine, for a filesystem
-  primitive that was never the download path's to own. Resolved: `atomicwrite` is
-  a leaf and `test_layering` fails a module that hand-rolls the move itself.
+  primitive that was never the download path's to own. Resolved: `atomicwrite`
+  sits on the cross-platform `_locking` leaf and `test_layering` fails a module
+  that hand-rolls the move itself. New files honour the process umask, replacements
+  preserve the target mode, and stale namespaced stages are reaped.
 - The default **Time slice** was the token `"recent"`, written at four code sites
   — the `Filters` field, its builder, `registry.download` and the CLI — and again
   as prose in four docstrings. Resolved: `collections.DEFAULT_TIME_SLICE` is the
@@ -374,12 +384,14 @@ _Avoid_: query, params, options
 - Archive expansion and Zarr cubes wrote their final directories incrementally,
   so a failed refresh could destroy or expose a partial previous materialisation.
   Existence-only grid checks also made restated upstream assets permanent.
-  Resolved: directory **Staging** publishes only complete materialisations, and
-  STAC `updated` metadata decides freshness with existing local data as the
-  offline fallback.
+  Resolved: replacement directory **Staging** publishes only complete
+  materialisations, append mode updates Zarr in place without copying the whole
+  store, and STAC `updated` metadata decides freshness with existing local data
+  as the offline fallback.
 - The registry selected a **Grid reader** but still sequenced its acquisition,
-  cube decision and Zarr recipe. Resolved: the registry only routes; the Grid
-  reader owns the orchestration and stages the whole store once.
+  cube decision and Zarr recipe. Resolved: the registry only routes and injects
+  acquisition; the Grid reader owns the orchestration, stages replacement stores
+  once and performs O(delta) appends in place.
 - The three **Metadata table** rename maps and the three MCP output models stated
   the published schema separately; inventory's open-ended `data_till` was typed
   as required text. Resolved: each field has one curated schema declaration,

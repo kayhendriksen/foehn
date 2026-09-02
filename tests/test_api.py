@@ -366,14 +366,18 @@ def test_load_frequency_on_unsupported_dataset_raises():
         load("forecast_local", frequency="h")
 
 
-def test_load_rejects_a_granularity_not_published_by_the_dataset():
-    with pytest.raises(ValueError, match="does not publish frequency"):
-        load("pollen", frequency="t")
+def test_stale_catalogue_granularities_do_not_veto_an_upstream_asset():
+    from foehn import registry
+    from foehn.readers import Filters
+
+    registry.validate_load("pollen", Filters.build(frequency="t"))
 
 
-def test_load_rejects_a_time_slice_not_published_by_the_dataset():
-    with pytest.raises(ValueError, match="does not publish time_slice"):
-        load("nime", frequency="d", time_slice="now")
+def test_stale_catalogue_time_slices_do_not_veto_an_upstream_asset():
+    from foehn import registry
+    from foehn.readers import Filters
+
+    registry.validate_load("nime", Filters.build(frequency="d", time_slice="now"))
 
 
 def _mock_response(content, status_code=200):
@@ -1111,6 +1115,8 @@ def test_load_leaves_query_validation_to_the_registry():
         registry.validate_load("smn", Filters.build(sort="sideways"))
     with pytest.raises(ValueError, match="Invalid time_slice"):
         registry.validate_load("smn", Filters.build(time_slice="yesterday"))
+    with pytest.raises(ValueError, match="Invalid sort"):
+        registry.validate_load("smn", Filters(sort="ascending"))
 
 
 def test_a_polars_that_cannot_run_here_names_the_databricks_build():

@@ -5,6 +5,8 @@ assert is the property the four callers were each reasoning their way to: after
 a failed write there is nothing at the target and nothing beside it.
 """
 
+import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +28,27 @@ def test_text_is_written_as_utf8(tmp_path):
     write_text(target, '{"station": "Zürich"}')
 
     assert target.read_bytes() == '{"station": "Zürich"}'.encode()
+
+
+def test_a_new_published_file_honours_the_process_umask(tmp_path):
+    target = tmp_path / "shared.csv"
+    previous = os.umask(0o022)
+    try:
+        write_bytes(target, b"payload")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_replacing_a_file_preserves_its_existing_mode(tmp_path):
+    target = tmp_path / "shared.csv"
+    target.write_bytes(b"old")
+    target.chmod(0o640)
+
+    write_bytes(target, b"new")
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
 
 
 def test_a_failed_write_leaves_neither_the_target_nor_the_staged_file(tmp_path):
@@ -72,7 +95,7 @@ def test_the_staged_file_sits_beside_the_target_under_the_given_suffix(tmp_path)
         seen = sorted(p.name for p in tmp_path.iterdir())
 
     assert len(seen) == 1
-    assert seen[0].startswith(".grid.grib2.")
+    assert seen[0].startswith(".foehn-stage-")
     assert seen[0].endswith(".part")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["grid.grib2"]
 
@@ -114,4 +137,37 @@ def test_overlapping_directory_builds_never_share_staging(tmp_path):
         assert (target / "second").exists()
 
     assert (target / "first").exists()
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["cube.zarr"]
+    # Windows uses one stable directory-publication lock file; POSIX locks the
+    # directory handle itself. Neither platform leaves a random staging path.
+    remaining = {path.name for path in tmp_path.iterdir()} - {".foehn-publish.lock"}
+    assert remaining == {"cube.zarr"}
+
+
+def test_stale_namespaced_staging_artifacts_are_reaped(tmp_path):
+    stale_file = tmp_path / ".foehn-stage-dead-file"
+    stale_file.write_bytes(b"partial")
+    stale_dir = tmp_path / ".foehn-stage-dead-directory"
+    stale_dir.mkdir()
+    (stale_dir / "partial").write_text("x")
+    for path in (stale_file, stale_dir):
+        os.utime(path, (0, 0))
+
+    write_bytes(tmp_path / "fresh", b"complete")
+
+    assert not stale_file.exists()
+    assert not stale_dir.exists()
+
+
+def test_stale_legacy_staging_artifacts_are_reaped_during_upgrade(tmp_path):
+    target = tmp_path / "asset.csv"
+    stale_file = tmp_path / ".asset.csv.dead.transfer"
+    stale_file.write_bytes(b"partial")
+    stale_dir = tmp_path / ".asset.csv.staging-dead"
+    stale_dir.mkdir()
+    for path in (stale_file, stale_dir):
+        os.utime(path, (0, 0))
+
+    write_bytes(target, b"complete")
+
+    assert not stale_file.exists()
+    assert not stale_dir.exists()

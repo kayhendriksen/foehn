@@ -1,27 +1,103 @@
 """Never leave a torn file at its final path.
 
-Every write foehn makes to the **Workspace** stages into a sibling temp file and
-``Path.replace``s it into place, so a write that dies part-way leaves nothing
-rather than a truncated file with a fresh mtime — which the skip rules above it
-read as "already done" and never retry.
+Every replacement write foehn makes to the **Workspace** stages into a sibling
+temp file and ``Path.replace``s it into place, so a write that dies part-way
+leaves nothing rather than a truncated file with a fresh mtime — which the skip
+rules above it read as "already done" and never retry. Incremental Zarr appends
+are explicitly in-place and do not use this replacement primitive.
 
 One rule, stated once. It used to be written out four times: the download
 engine's byte writer, the streaming fetcher, the Parquet converter, and the run
 state, which reached into the download engine for it. Three suffixes and three
 docstrings, all reasoning their way to the same thing.
 
-A leaf: this knows about the filesystem and nothing about foehn.
+This knows only about the filesystem and the portable locking primitive below
+it. Staging names share one namespace so abandoned artifacts can be recognised
+and reaped without touching unrelated dotfiles.
 """
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import shutil
-import tempfile
+import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
+
+from foehn._locking import exclusive_directory_lock
+
+_STAGE_PREFIX = ".foehn-stage-"
+_STALE_AFTER_SECONDS = 24 * 60 * 60
+
+
+def _remove_tree(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _reap_stale_stages(path: Path) -> None:
+    """Remove abandoned stages old enough that no live write owns them.
+
+    Target-specific legacy patterns migrate workspaces created before the
+    shared namespace was introduced. Their age gate avoids touching a live
+    writer from an older foehn process during a rolling upgrade.
+    """
+    cutoff = time.time() - _STALE_AFTER_SECONDS
+    patterns = (
+        f"{_STAGE_PREFIX}*",
+        f".{path.name}.*.tmp",
+        f".{path.name}.*.part",
+        f".{path.name}.*.transfer",
+        f".{path.name}.staging-*",
+    )
+    candidates = {candidate for pattern in patterns for candidate in path.parent.glob(pattern)}
+    for candidate in candidates:
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                _remove_tree(candidate)
+        except FileNotFoundError:
+            pass
+
+
+def _stage_name(path: Path, suffix: str) -> Path:
+    return path.parent / f"{_STAGE_PREFIX}{uuid.uuid4().hex}-{path.name}{suffix}"
+
+
+def _new_stage_file(path: Path, suffix: str) -> Path:
+    while True:
+        candidate = _stage_name(path, suffix)
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o666)
+        except FileExistsError:
+            continue
+        os.close(descriptor)
+        try:
+            existing_mode = path.stat().st_mode & 0o7777
+        except FileNotFoundError:
+            pass
+        else:
+            candidate.chmod(existing_mode)
+        return candidate
+
+
+def _new_stage_directory(path: Path) -> Path:
+    while True:
+        candidate = _stage_name(path, "")
+        try:
+            candidate.mkdir(mode=0o777)
+        except FileExistsError:
+            continue
+        try:
+            existing_mode = path.stat().st_mode & 0o7777
+        except FileNotFoundError:
+            pass
+        else:
+            candidate.chmod(existing_mode)
+        return candidate
 
 
 @contextlib.contextmanager
@@ -37,9 +113,8 @@ def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
     token is unique, so concurrent processes never share a partial file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=suffix, dir=path.parent)
-    os.close(fd)
-    tmp = Path(name)
+    _reap_stale_stages(path)
+    tmp = _new_stage_file(path, suffix)
     try:
         yield tmp
         tmp.replace(path)
@@ -48,23 +123,11 @@ def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
         raise
 
 
-def _remove_tree(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.exists():
-        shutil.rmtree(path)
-
-
 @contextlib.contextmanager
 def _directory_lock(path: Path) -> Iterator[None]:
-    """Serialize only the final sibling-directory exchange, without a lock file."""
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    """Serialize the short directory exchange with a cross-platform lock."""
+    with exclusive_directory_lock(path):
         yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
 
 
 def _recover_directory(path: Path, backup_path: Path) -> None:
@@ -75,7 +138,7 @@ def _recover_directory(path: Path, backup_path: Path) -> None:
 
 
 @contextlib.contextmanager
-def staged_directory(path: Path, *, copy_existing: bool = False) -> Iterator[Path]:
+def staged_directory(path: Path) -> Iterator[Path]:
     """Build a complete sibling directory, then publish it at ``path``.
 
     An existing directory remains untouched while the replacement is written.
@@ -85,11 +148,10 @@ def staged_directory(path: Path, *, copy_existing: bool = False) -> Iterator[Pat
     """
     backup_path = path.with_name(path.name + ".previous")
     path.parent.mkdir(parents=True, exist_ok=True)
+    _reap_stale_stages(path)
     with _directory_lock(path.parent):
         _recover_directory(path, backup_path)
-    staged_path = Path(tempfile.mkdtemp(prefix=f".{path.name}.staging-", dir=path.parent))
-    if copy_existing and path.exists():
-        shutil.copytree(path, staged_path, dirs_exist_ok=True)
+    staged_path = _new_stage_directory(path)
 
     try:
         yield staged_path

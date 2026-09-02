@@ -412,6 +412,8 @@ def to_zarr(
         mode: Zarr write mode (default "w" — overwrite the store at this path).
             Note distinct ``match`` values map to distinct default paths, so this
             only overwrites a prior run of the *same* slice, not a different one.
+            Replacement mode is staged; ``"a"`` writes in place so its work and
+            temporary disk use scale with the new data, without rollback on interruption.
         stack: Assemble the matched files into one cube, using whichever method
             the dataset's kind uses — radar stacks CombiPrecip timesteps into a
             ``(time, y, x)`` cube incrementally (dask-free, one timestep in
