@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import stat
 import time
 import uuid
 from collections.abc import Iterator
@@ -30,6 +31,8 @@ from foehn._locking import exclusive_directory_lock
 
 _STAGE_PREFIX = ".foehn-stage-"
 _STALE_AFTER_SECONDS = 24 * 60 * 60
+_DEFAULT_PUBLISHED_FILE_MODE = 0o644
+_DEFAULT_PUBLISHED_DIRECTORY_MODE = 0o755
 
 
 def _remove_tree(path: Path) -> None:
@@ -71,33 +74,39 @@ def _new_stage_file(path: Path, suffix: str) -> Path:
     while True:
         candidate = _stage_name(path, suffix)
         try:
-            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o666)
+            # Partial content is private regardless of the process umask. The
+            # intended final mode is applied only at the publication boundary.
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
         except FileExistsError:
             continue
         os.close(descriptor)
-        try:
-            existing_mode = path.stat().st_mode & 0o7777
-        except FileNotFoundError:
-            pass
-        else:
-            candidate.chmod(existing_mode)
         return candidate
+
+
+def _published_file_mode(path: Path) -> int:
+    """Preserve an existing target's permissions; use the legacy default for a new file."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode) & 0o777
+    except FileNotFoundError:
+        return _DEFAULT_PUBLISHED_FILE_MODE
 
 
 def _new_stage_directory(path: Path) -> Path:
     while True:
         candidate = _stage_name(path, "")
         try:
-            candidate.mkdir(mode=0o777)
+            candidate.mkdir(mode=0o700)
         except FileExistsError:
             continue
-        try:
-            existing_mode = path.stat().st_mode & 0o7777
-        except FileNotFoundError:
-            pass
-        else:
-            candidate.chmod(existing_mode)
         return candidate
+
+
+def _published_directory_mode(path: Path) -> int:
+    """Preserve an existing directory mode; use the normal shared-readable default."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode) & 0o777
+    except FileNotFoundError:
+        return _DEFAULT_PUBLISHED_DIRECTORY_MODE
 
 
 @contextlib.contextmanager
@@ -117,6 +126,7 @@ def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
     tmp = _new_stage_file(path, suffix)
     try:
         yield tmp
+        tmp.chmod(_published_file_mode(path))
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -155,6 +165,7 @@ def staged_directory(path: Path) -> Iterator[Path]:
 
     try:
         yield staged_path
+        staged_path.chmod(_published_directory_mode(path))
         with _directory_lock(path.parent):
             _recover_directory(path, backup_path)
             if path.exists():

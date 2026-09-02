@@ -30,11 +30,24 @@ def test_text_is_written_as_utf8(tmp_path):
     assert target.read_bytes() == '{"station": "Zürich"}'.encode()
 
 
-def test_a_new_published_file_honours_the_process_umask(tmp_path):
+def test_a_new_published_file_uses_the_shared_readable_default(tmp_path):
     target = tmp_path / "shared.csv"
     previous = os.umask(0o022)
     try:
         write_bytes(target, b"payload")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_an_unpublished_stage_is_private_even_with_a_permissive_umask(tmp_path):
+    target = tmp_path / "shared.csv"
+    previous = os.umask(0o000)
+    try:
+        with staged(target) as staged_path:
+            staged_path.write_bytes(b"payload")
+            assert stat.S_IMODE(staged_path.stat().st_mode) == 0o600
     finally:
         os.umask(previous)
 
@@ -111,6 +124,19 @@ def test_staged_directory_replaces_the_complete_member_set(tmp_path):
 
     assert not (target / "obsolete").exists()
     assert (target / "fresh").read_text() == "new"
+
+
+def test_an_unpublished_directory_is_private_even_with_a_permissive_umask(tmp_path):
+    target = tmp_path / "cube.zarr"
+    previous = os.umask(0o000)
+    try:
+        with staged_directory(target) as staged_dir:
+            (staged_dir / "payload").write_text("complete")
+            assert stat.S_IMODE(staged_dir.stat().st_mode) == 0o700
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
 
 
 def test_staged_directory_failure_preserves_the_previous_version(tmp_path):

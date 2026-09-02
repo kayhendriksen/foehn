@@ -314,8 +314,9 @@ _Avoid_: query, params, options
   state** reached into **Transfer**, the download engine, for a filesystem
   primitive that was never the download path's to own. Resolved: `atomicwrite`
   sits on the cross-platform `_locking` leaf and `test_layering` fails a module
-  that hand-rolls the move itself. New files honour the process umask, replacements
-  preserve the target mode, and stale namespaced stages are reaped.
+  that hand-rolls the move itself. Unpublished files and directories are always
+  private; new published materialisations use shared-readable defaults,
+  replacements preserve the target mode, and stale namespaced stages are reaped.
 - The default **Time slice** was the token `"recent"`, written at four code sites
   — the `Filters` field, its builder, `registry.download` and the CLI — and again
   as prose in four docstrings. Resolved: `collections.DEFAULT_TIME_SLICE` is the
