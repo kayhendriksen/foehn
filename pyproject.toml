@@ -16,7 +16,7 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
     "polars>=1.18",
-    # Imported directly in client.py (Retry). It arrives via requests today, but
+    # Imported directly in fetch.py (Retry). It arrives via requests today, but
     # relying on a transitive dep breaks silently if requests ever swaps backends.
     # Floor is where Retry gained allowed_methods.
     "urllib3>=1.26",
@@ -121,7 +121,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "src/foehn/cli.py" = ["T201"]
-"src/foehn/client.py" = ["T201"]
 "src/foehn/convert.py" = ["T201"]
 "src/foehn/mcp_server.py" = ["T201"]
 "scripts/*" = ["T201", "PERF203"]
@@ -140,6 +139,13 @@ branch = true
 # optional dependency the suite does not install (to_zarr's dask rechunk), and a
 # handful of defensive branches on library output. Kept a couple of points below
 # so ordinary churn doesn't go red, but a real regression does.
+#
+# precision is set because the gate is compared against the *rounded* total. At
+# the default precision of 0 a run of 96.95% rounded to 97 and passed, while
+# pytest-cov printed "FAIL Required test coverage of 97.0% not reached" from its
+# own unrounded comparison — a green job with a red line in its log, and half a
+# point of slack the floor did not intend to give.
+precision = 2
 fail_under = 97
 show_missing = true
 

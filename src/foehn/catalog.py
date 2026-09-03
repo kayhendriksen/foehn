@@ -265,19 +265,53 @@ DATASETS: Mapping[str, DatasetSpec] = MappingProxyType(
     }
 )
 
-# Backwards-compatible names, now immutable derived views rather than sources.
-COLLECTIONS: Mapping[str, str] = MappingProxyType({key: row.collection for key, row in DATASETS.items()})
-KIND_OF: Mapping[str, DatasetKind] = MappingProxyType({key: row.kind for key, row in DATASETS.items()})
-COLLECTION_META: Mapping[str, Mapping[str, object]] = MappingProxyType(
+
+class _ReadOnlyDict(dict):
+    """A dict that refuses mutation but is still a dict to ``json`` and ``==``.
+
+    The compatibility views need both halves and ``MappingProxyType`` only gives
+    one. As a proxy they were immutable but not value-compatible:
+    ``json.dumps(COLLECTION_META)`` raised, and comparing a row against the
+    literal a caller wrote at v0.4.0 was quietly False. As plain dicts they were
+    value-compatible but no longer immutable, and one stray
+    ``COLLECTIONS["smn"] = ...`` silently repointed a dataset for the rest of
+    the process. A dict subclass is both: the C JSON encoder and ``==`` see the
+    dict storage, while every mutating method is closed off.
+    """
+
+    __slots__ = ()
+
+    def _read_only(self, *_args: object, **_kwargs: object):
+        raise TypeError(
+            f"{type(self).__name__} is a read-only view derived from catalog.DATASETS; "
+            "add or change a dataset there instead."
+        )
+
+    __setitem__ = _read_only
+    __delitem__ = _read_only
+    update = _read_only
+    setdefault = _read_only
+    pop = _read_only
+    popitem = _read_only
+    clear = _read_only
+
+
+# Backwards-compatible names: read-only views derived from DATASETS, which stays
+# the one source. The *values* are the plain dicts and lists v0.4.0 published,
+# because that is the entire point of a compatibility view — a view that is not
+# value-compatible is just a second break.
+COLLECTIONS: Mapping[str, str] = _ReadOnlyDict({key: row.collection for key, row in DATASETS.items()})
+KIND_OF: Mapping[str, DatasetKind] = _ReadOnlyDict({key: row.kind for key, row in DATASETS.items()})
+COLLECTION_META: Mapping[str, dict[str, object]] = _ReadOnlyDict(
     {
-        key: MappingProxyType(
+        key: _ReadOnlyDict(
             {
                 "category": row.category,
                 "subcategory": row.subcategory,
                 "description": row.description,
                 "format": row.format,
-                "frequencies": row.frequencies,
-                "time_slices": row.time_slices,
+                "frequencies": list(row.frequencies),
+                "time_slices": list(row.time_slices),
             }
         )
         for key, row in DATASETS.items()

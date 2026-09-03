@@ -67,6 +67,15 @@ def _run_datetime_filter(match: str | None) -> str | None:
     return run.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _fingerprint(path: Path) -> tuple[int, int] | None:
+    """What a file looks like right now, or None if it is not there."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
 def _raise_if_too_many(dataset: str, match: str | None, names: list[str], max_files: int | None) -> None:
     """Refuse a match that resolves to more files than the caller can handle at once."""
     if max_files is None or len(names) <= max_files:
@@ -77,8 +86,8 @@ def _raise_if_too_many(dataset: str, match: str | None, names: list[str], max_fi
         detail = "but this collection is read one file at a time. Narrow match= to pick a single file"
     else:
         detail = (
-            f"which exceeds the {max_files}-file cap for cubing (the whole set is loaded into memory "
-            "at once). Narrow match= to a smaller set"
+            f"which exceeds the {max_files}-file cap (the whole set is opened at once, and downloading "
+            "a collection this size is rarely what was meant). Narrow match= to a smaller set"
         )
     raise ValueError(
         f"match={match!r} matched {len(names)} files for {dataset!r}, {detail}. Matches include:\n{examples}{more}"
@@ -166,6 +175,10 @@ def ensure_grid_files(
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
     _raise_if_too_many(dataset, match, [a.name for a in matched], max_files)
 
+    # Recorded before the fetch so the failure path can tell an untouched cache
+    # from one this run has already started replacing.
+    before = {asset.name: _fingerprint(out_dir / asset.name) for asset in matched}
+
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
     # grid read cannot proceed on a partial set, so the first failure is fatal.
     # Destination de-duplication and the worker pool are the transfer module's.
@@ -180,13 +193,28 @@ def ensure_grid_files(
         )
     except FetchError as exc:
         cached = [out_dir / asset.name for asset in matched]
-        if all(path.exists() for path in cached):
-            warnings.warn(
-                f"Could not refresh {dataset!r} ({type(exc).__name__}); using the complete local cache.",
-                stacklevel=2,
-            )
-            return sorted(cached)
-        raise
+        if not all(path.exists() for path in cached):
+            raise
+        # Presence is not coherence. ``fetch_all`` refreshes assets one at a
+        # time, so a failure part-way through leaves the files it already
+        # replaced at the new generation and the rest at the old one — and every
+        # one of them exists. Falling back then hands back a set that silently
+        # mixes generations, which for a multi-file cube is worse than failing.
+        #
+        # An untouched cache is a different case and still usable: nothing was
+        # replaced, so every file is the same generation it was before the run.
+        # That is the offline fallback this branch was written for.
+        if replaced := [path.name for path in cached if _fingerprint(path) != before.get(path.name)]:
+            raise FetchError(
+                f"Could not refresh {dataset!r} ({type(exc).__name__}: {exc}) after replacing "
+                f"{len(replaced)} of {len(cached)} file(s). The local set now mixes generations, so it is "
+                "not safe to read; re-run to finish the refresh."
+            ) from exc
+        warnings.warn(
+            f"Could not refresh {dataset!r} ({type(exc).__name__}); using the complete local cache.",
+            stacklevel=2,
+        )
+        return sorted(cached)
     return sorted({out_dir / asset.name for asset in matched})
 
 

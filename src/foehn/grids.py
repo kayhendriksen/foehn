@@ -47,6 +47,7 @@ into memory) is future work.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import warnings
 from collections.abc import Callable
@@ -158,6 +159,7 @@ class OpenAdapter(Protocol):
         dataset: str,
         workspace: Workspace,
         fetcher: Fetcher,
+        engine: str | None = None,
     ) -> xr.Dataset: ...
 
 
@@ -268,6 +270,7 @@ class GridReader:
         variables: str | list[str] | None,
         workspace: Workspace,
         fetcher: Fetcher,
+        engine: str | None = None,
     ) -> xr.Dataset:
         """Validate, materialize, and open one Grid Dataset."""
         if self.max_files == 1 and match is None:
@@ -287,7 +290,9 @@ class GridReader:
             run_datetime=self.run_datetime,
             fetcher=fetcher,
         )
-        return select_variables(self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher), variables)
+        return select_variables(
+            self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher, engine=engine), variables
+        )
 
     def write_store(
         self,
@@ -471,8 +476,23 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
             kwargs["backend_kwargs"] = backend_kwargs
         if len(files) == 1:
             return xr.open_dataset(files[0], **kwargs)
-        datasets = [xr.open_dataset(f, **kwargs) for f in files]
-        return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+        # Opened one at a time so a failure can close what is already open. The
+        # comprehension this replaces leaked a handle per file whenever the
+        # combine raised, which on a large set exhausts the descriptor limit and
+        # reports the exhaustion instead of the original fault. On success the
+        # handles stay open: the combined Dataset reads from them lazily.
+        datasets: list = []
+        try:
+            for source in files:
+                # Not a comprehension: the except below has to close whatever
+                # was opened before the failure, which needs the partial list.
+                datasets.append(xr.open_dataset(source, **kwargs))  # noqa: PERF401
+            return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+        except BaseException:
+            for opened in datasets:
+                with contextlib.suppress(Exception):
+                    opened.close()
+            raise
 
     try:
         return _do(decode_times=True)
@@ -491,11 +511,24 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
 # --- The open adapters -----------------------------------------------------
 
 
-def open_netcdf(files: list[Path], *, dataset: str, **_: object) -> xr.Dataset:
-    """Open one or more NetCDF files, combining them on their coordinates."""
+def open_netcdf(files: list[Path], *, dataset: str, engine: str | None = None, **_: object) -> xr.Dataset:
+    """Open one or more NetCDF files, combining them on their coordinates.
+
+    ``engine`` is passed to xarray, for a caller who needs to name a backend —
+    ``h5netcdf`` where netCDF4 chokes on a particular file. Left unset, xarray
+    picks. This was a documented keyword at v0.4.0 and its removal broke calls
+    that named a backend, so it stays.
+    """
     xr = _require_xarray()
     try:
-        return _open_grid(xr, files, engine=None)
+        return _open_grid(xr, files, engine=engine)
+    except OSError:
+        # An unreadable file is not a heterogeneous set, and telling its owner
+        # to narrow the match sends them somewhere the fix cannot be. The
+        # underlying error already names the file that would not open, so it is
+        # more use unchanged — a corrupt entry in the cache is deleted, not
+        # matched around.
+        raise
     except Exception as exc:
         if len(files) > 1:
             fmt = COLLECTION_META[dataset]["format"]
@@ -536,6 +569,42 @@ def open_radar(files: list[Path], **_: object) -> xr.Dataset:
 _STACK_TIME_ENCODING = {"units": "seconds since 1970-01-01", "calendar": "proleptic_gregorian", "dtype": "int64"}
 
 
+def _time_keys(ds) -> frozenset:
+    """The timestamps *ds* carries, as integer nanoseconds.
+
+    Normalised to one unit because the two sides of the comparison do not share
+    one: an ODIM composite opens at ``datetime64[s]`` while the same instant read
+    back out of a Zarr store is ``datetime64[ns]``. Worse, ``.tolist()`` on those
+    two returns different *types* — ``datetime`` for seconds, ``int`` for
+    nanoseconds — so the sets never intersected and every timestep looked new.
+    """
+    return frozenset(ds["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist())
+
+
+def _cube_times(xr, store: Path) -> frozenset:
+    """The timestamps an existing cube already holds, or nothing if it has none.
+
+    A store that cannot be opened is treated as holding nothing: the append then
+    behaves exactly as it did before this check existed, rather than failing on
+    the way to a write that would have worked.
+    """
+    if not store.exists():
+        return frozenset()
+    try:
+        with warnings.catch_warnings():
+            # foehn writes consolidated metadata, but this may be reading a store
+            # written by something that did not. Only the time coordinate is
+            # wanted, so the slower path is fine and the advice is not for us.
+            warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+            with xr.open_zarr(store) as existing:
+                if "time" not in existing.coords:
+                    return frozenset()
+                return _time_keys(existing)
+    except Exception as exc:  # any unreadable store means "unknown", not "fail"
+        logger.debug("Could not read existing times from %s (%s); appending without de-duplication", store, exc)
+        return frozenset()
+
+
 def cube_radar(
     files: list[Path],
     store: Path,
@@ -552,8 +621,17 @@ def cube_radar(
     """
     xr = _require_xarray()
 
+    # An append is scoped by a ``match``, and a match spans everything upstream
+    # has published under it — not just what arrived since the last append. So
+    # the file list overlaps whatever the store already holds, and appending it
+    # wholesale writes those timesteps a second time: append [00:00], then a
+    # listing of [00:00, 00:05], and the cube reads [00:00, 00:00, 00:05].
+    # Nothing downstream de-duplicates a Zarr append, so it is checked here.
+    already_stored = _cube_times(xr, store) if mode == "a" else frozenset()
+
+    written = 0
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
-    for i, path in enumerate(sorted(files)):
+    for path in sorted(files):
         ds = odim.open_composite(xr, path)
         if "time" not in ds.coords:
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
@@ -561,8 +639,15 @@ def cube_radar(
         # in memory. Same rule as everywhere else, hence the same call.
         ds = select_variables(ds, variables).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
-        write_mode = mode if i == 0 else "a"
+        if already_stored and _time_keys(ds) <= already_stored:
+            logger.debug("%s: already in %s, not appending again", path.name, store.name)
+            continue
+        # "w" creates the store on the first write of a replacement — and on an
+        # append whose target does not exist yet, where "a" has nothing to
+        # extend. Everything after the first write extends what it just made.
+        write_mode = "a" if written or (mode == "a" and store.exists()) else "w"
         _write_zarr(ds, store, write_mode, append_dim="time" if write_mode == "a" else None)
+        written += 1
 
 
 def cube_grib2(

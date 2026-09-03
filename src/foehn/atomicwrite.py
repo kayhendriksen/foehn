@@ -22,6 +22,7 @@ import contextlib
 import os
 import shutil
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -30,9 +31,38 @@ from pathlib import Path
 from foehn._locking import exclusive_directory_lock
 
 _STAGE_PREFIX = ".foehn-stage-"
+# The backup a directory publication parks its previous generation under. It
+# lives in foehn's own namespace because the publication deletes and moves it:
+# a plain ``<target>.previous`` sibling is a name a user can hold, and holding
+# it meant losing it.
+_BACKUP_PREFIX = ".foehn-previous-"
 _STALE_AFTER_SECONDS = 24 * 60 * 60
-_DEFAULT_PUBLISHED_FILE_MODE = 0o644
-_DEFAULT_PUBLISHED_DIRECTORY_MODE = 0o755
+# What ``open()`` and ``mkdir()`` would have produced. Publication applies the
+# process umask itself because it chmods explicitly, and a published file that
+# ignored the umask was more permissive than the caller asked for.
+_BASE_PUBLISHED_FILE_MODE = 0o666
+_BASE_PUBLISHED_DIRECTORY_MODE = 0o777
+
+# Reaping scans the whole parent directory, so doing it per write made a bulk
+# download quadratic in the number of files landing in one directory. Abandoned
+# stages are by definition older than a day and left by an earlier process, so
+# once per directory per process finds everything a per-write scan would.
+_reaped: set[Path] = set()
+_reaped_lock = threading.Lock()
+
+# Reading the umask means setting it, and foehn's downloads run on a thread
+# pool. The lock keeps foehn's own threads from probing while another is
+# mid-probe; a thread outside foehn creating files during those two syscalls is
+# not something this can guard, and is the same exposure any umask read has.
+_umask_lock = threading.Lock()
+
+
+def _current_umask() -> int:
+    """Read the process umask without leaving it changed."""
+    with _umask_lock:
+        mask = os.umask(0)
+        os.umask(mask)
+    return mask
 
 
 def _remove_tree(path: Path) -> None:
@@ -45,10 +75,22 @@ def _remove_tree(path: Path) -> None:
 def _reap_stale_stages(path: Path) -> None:
     """Remove abandoned stages old enough that no live write owns them.
 
+    Runs at most once per directory per process: the scan is over the whole
+    parent, so repeating it for every file written into that parent made a bulk
+    download quadratic. What it looks for — stages left by a process that died
+    at least a day ago — cannot appear while this process runs, so the first
+    scan of a directory finds everything a per-write scan would.
+
     Target-specific legacy patterns migrate workspaces created before the
     shared namespace was introduced. Their age gate avoids touching a live
     writer from an older foehn process during a rolling upgrade.
     """
+    parent = path.parent
+    with _reaped_lock:
+        if parent in _reaped:
+            return
+        _reaped.add(parent)
+
     cutoff = time.time() - _STALE_AFTER_SECONDS
     patterns = (
         f"{_STAGE_PREFIX}*",
@@ -57,12 +99,13 @@ def _reap_stale_stages(path: Path) -> None:
         f".{path.name}.*.transfer",
         f".{path.name}.staging-*",
     )
-    candidates = {candidate for pattern in patterns for candidate in path.parent.glob(pattern)}
+    candidates = {candidate for pattern in patterns for candidate in parent.glob(pattern)}
     for candidate in candidates:
         try:
             if candidate.stat().st_mtime < cutoff:
                 _remove_tree(candidate)
         except FileNotFoundError:
+            # The stage was claimed or cleaned between the glob and the stat.
             pass
 
 
@@ -84,11 +127,11 @@ def _new_stage_file(path: Path, suffix: str) -> Path:
 
 
 def _published_file_mode(path: Path) -> int:
-    """Preserve an existing target's permissions; use the legacy default for a new file."""
+    """Preserve an existing target's permissions; apply the umask to a new file."""
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _DEFAULT_PUBLISHED_FILE_MODE
+        return _BASE_PUBLISHED_FILE_MODE & ~_current_umask()
 
 
 def _new_stage_directory(path: Path) -> Path:
@@ -102,11 +145,11 @@ def _new_stage_directory(path: Path) -> Path:
 
 
 def _published_directory_mode(path: Path) -> int:
-    """Preserve an existing directory mode; use the normal shared-readable default."""
+    """Preserve an existing directory mode; apply the umask to a new one."""
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _DEFAULT_PUBLISHED_DIRECTORY_MODE
+        return _BASE_PUBLISHED_DIRECTORY_MODE & ~_current_umask()
 
 
 @contextlib.contextmanager
@@ -155,8 +198,13 @@ def staged_directory(path: Path) -> Iterator[Path]:
     The two final renames have a small missing-path window on filesystems without
     directory exchange, but readers can never observe a partial or mixed-version
     materialization. A backup left by process termination is restored on entry.
+
+    The previous generation is parked under ``_BACKUP_PREFIX``, inside foehn's
+    own namespace. It used to be a plain ``<target>.previous`` sibling, which
+    publication is free to move and delete — so a user directory that happened
+    to carry that name was destroyed by publishing next to it.
     """
-    backup_path = path.with_name(path.name + ".previous")
+    backup_path = path.with_name(_BACKUP_PREFIX + path.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     _reap_stale_stages(path)
     with _directory_lock(path.parent):

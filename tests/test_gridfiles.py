@@ -368,7 +368,7 @@ def test_the_cube_cap_explains_itself_differently_from_the_single_file_cap():
     """One-file kinds say "pick a single file"; the cube cap says why the set is bounded."""
     fake = _fake(_items_for(*[f"icon-{i}.grib2" for i in range(6)]))
 
-    with pytest.raises(ValueError, match="exceeds the 3-file cap for cubing"):
+    with pytest.raises(ValueError, match="exceeds the 3-file cap"):
         ensure_grid_files(
             "forecast_icon_ch1",
             Workspace(Path("unused")),
@@ -377,3 +377,44 @@ def test_the_cube_cap_explains_itself_differently_from_the_single_file_cap():
             max_files=3,
             fetcher=fake,
         )
+
+
+def test_a_refresh_that_fails_after_replacing_a_file_refuses_the_mixed_cache(tmp_path):
+    """A part-done refresh must not be handed back as "the complete local cache".
+
+    ``fetch_all`` replaces one asset at a time. When the second fails, the first
+    is already at the new generation and the second is still at the old one —
+    and because both files exist, the existence check called that complete and
+    returned it. A cube built from that set silently mixes generations.
+    """
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    first, second = out_dir / "a_rhiresd.nc", out_dir / "b_rhiresd.nc"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+
+    hrefs = [f"https://data.geo.admin.ch/x/{path.name}" for path in (first, second)]
+    items = [
+        {"assets": {"d": {"href": href}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for href in hrefs
+    ]
+    fake = _fake(items, body=b"generation two")
+    fake.fail(hrefs[1])  # the first refresh lands, the second does not
+
+    with pytest.raises(FetchError, match="mixes generations"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+    # The half-done state is reported, not silently read.
+    assert first.read_bytes() == b"generation two"
+    assert second.read_bytes() == b"generation one"
+
+
+def test_a_failed_refresh_with_files_still_missing_raises(tmp_path):
+    """No usable cache to fall back to, so the fetch error stands."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    hrefs = [f"https://data.geo.admin.ch/x/{name}_rhiresd.nc" for name in ("a", "b")]
+    fake = _fake(_items_for("a_rhiresd.nc", "b_rhiresd.nc"))
+    fake.fail(hrefs[0])
+
+    with pytest.raises(FetchError):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)

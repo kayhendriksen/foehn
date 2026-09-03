@@ -30,7 +30,7 @@ def test_text_is_written_as_utf8(tmp_path):
     assert target.read_bytes() == '{"station": "Zürich"}'.encode()
 
 
-def test_a_new_published_file_uses_the_shared_readable_default(tmp_path):
+def test_a_new_published_file_is_shared_readable_under_the_usual_umask(tmp_path):
     target = tmp_path / "shared.csv"
     previous = os.umask(0o022)
     try:
@@ -51,7 +51,30 @@ def test_an_unpublished_stage_is_private_even_with_a_permissive_umask(tmp_path):
     finally:
         os.umask(previous)
 
-    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    # Private in flight, then whatever the umask allows at publication —
+    # 0o666 here, exactly what open() would have produced under umask 0.
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666
+
+
+def test_a_published_file_honours_a_restrictive_umask(tmp_path):
+    """A new file must not be more permissive than the caller's umask asks for.
+
+    Publication chmods explicitly, so it has to apply the umask itself. Forcing
+    0o644 here published world-readable data for a caller who had asked, through
+    umask 0o077, for none of it — and the run state and ETag store, which carry
+    full asset URLs, go through this same path.
+    """
+    target = tmp_path / "private.csv"
+    reference = tmp_path / "reference.csv"
+    previous = os.umask(0o077)
+    try:
+        write_bytes(target, b"payload")
+        reference.write_bytes(b"payload")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
 
 
 def test_replacing_a_file_preserves_its_existing_mode(tmp_path):
@@ -136,7 +159,22 @@ def test_an_unpublished_directory_is_private_even_with_a_permissive_umask(tmp_pa
     finally:
         os.umask(previous)
 
-    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
+
+def test_a_published_directory_honours_a_restrictive_umask(tmp_path):
+    target = tmp_path / "cube.zarr"
+    reference = tmp_path / "reference"
+    previous = os.umask(0o077)
+    try:
+        with staged_directory(target) as staged_dir:
+            (staged_dir / "payload").write_text("complete")
+        reference.mkdir()
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
 
 
 def test_staged_directory_failure_preserves_the_previous_version(tmp_path):
@@ -197,3 +235,74 @@ def test_stale_legacy_staging_artifacts_are_reaped_during_upgrade(tmp_path):
 
     assert not stale_file.exists()
     assert not stale_dir.exists()
+
+
+def test_publishing_does_not_touch_a_user_directory_named_previous(tmp_path):
+    """Publication must not assume it owns ``<target>.previous``.
+
+    The backup lived at that exact sibling name, and publication moves and
+    deletes it freely. A user who kept their own ``cube.zarr.previous`` beside
+    the store lost it the next time the store was rewritten.
+    """
+    target = tmp_path / "cube.zarr"
+    target.mkdir()
+    (target / "old").write_text("old")
+
+    bystander = tmp_path / "cube.zarr.previous"
+    bystander.mkdir()
+    (bystander / "keepsake").write_text("mine")
+
+    with staged_directory(target) as staged_dir:
+        (staged_dir / "new").write_text("new")
+
+    assert (target / "new").read_text() == "new"
+    assert (bystander / "keepsake").read_text() == "mine"
+
+
+def test_a_directory_is_reaped_once_per_process_not_once_per_write(tmp_path):
+    """Reaping scans the whole parent, so per-write made bulk writes quadratic."""
+    from foehn import atomicwrite
+
+    atomicwrite._reaped.discard(tmp_path)
+    real_glob = Path.glob
+    scans = []
+
+    def counting_glob(self, pattern, *args, **kwargs):
+        scans.append(pattern)
+        return real_glob(self, pattern, *args, **kwargs)
+
+    with patch.object(Path, "glob", counting_glob):
+        for index in range(25):
+            write_bytes(tmp_path / f"asset_{index}.csv", b"payload")
+
+    # One reap pass (its handful of patterns), not one per file.
+    assert len(scans) < 25
+    assert all((tmp_path / f"asset_{index}.csv").exists() for index in range(25))
+
+
+def test_reaping_tolerates_a_stage_vanishing_mid_scan(tmp_path):
+    """The race the handler exists for: gone between the glob and the stat.
+
+    Two processes reap the same workspace, and the other one wins. Covered
+    explicitly because leaving it to chance made the whole suite's coverage
+    oscillate across the gate — it fired in roughly one run in five.
+    """
+    from foehn import atomicwrite
+
+    stale = tmp_path / ".foehn-stage-vanishing"
+    stale.write_bytes(b"partial")
+    atomicwrite._reaped.discard(tmp_path)
+
+    real_stat = Path.stat
+
+    def stat_that_loses_the_race(self, *args, **kwargs):
+        if self.name == ".foehn-stage-vanishing":
+            self.unlink(missing_ok=True)
+            raise FileNotFoundError(self)
+        return real_stat(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", stat_that_loses_the_race):
+        write_bytes(tmp_path / "asset.csv", b"payload")
+
+    assert (tmp_path / "asset.csv").read_bytes() == b"payload"
+    assert not stale.exists()

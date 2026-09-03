@@ -82,6 +82,25 @@ def test_compatibility_views_are_immutable():
         COLLECTION_META["smn"]["format"] = "changed"
 
 
+def test_compatibility_views_hold_the_values_v0_4_published():
+    """Immutable is half the contract; these names exist to stay value-compatible.
+
+    As mappingproxy-and-tuple they were immutable but no longer the values
+    callers had written against: ``json.dumps(COLLECTION_META)`` raised, and
+    ``meta["time_slices"] == ["historical", "recent", "now"]`` was False against
+    a tuple. Both spellings have to keep working.
+    """
+    import json
+
+    meta = COLLECTION_META["smn"]
+
+    assert meta["time_slices"] == ["historical", "recent", "now"]
+    assert meta["frequencies"] == ["t", "h", "d", "m", "y"]
+    assert meta == dict(meta)
+    assert json.loads(json.dumps(COLLECTION_META))["smn"]["format"] == "CSV"
+    assert json.loads(json.dumps(COLLECTIONS))["smn"] == "ch.meteoschweiz.ogd-smn"
+
+
 def test_every_kind_is_used():
     """A kind nothing maps to is a branch no caller can reach."""
     assert set(KIND_OF.values()) == set(DatasetKind)

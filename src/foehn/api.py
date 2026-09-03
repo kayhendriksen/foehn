@@ -298,6 +298,7 @@ def open_dataset(
     variables: str | list[str] | None = None,
     match: str | None = None,
     data_dir: Path | str | None = None,
+    engine: str | None = None,
 ) -> xr.Dataset:
     """Open a gridded dataset as an xarray Dataset.
 
@@ -337,6 +338,9 @@ def open_dataset(
             to the station/frequency filters on load(). Required for GRIB2 and
             radar collections, where it must select a single file.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
+        engine: xarray backend to open the file(s) with (e.g. "h5netcdf"). Leave
+            unset to let xarray choose, which is right for every published
+            collection; name one only to work around a backend-specific fault.
 
     Returns:
         An xarray Dataset backed by the local file(s), downloaded in full first
@@ -345,8 +349,11 @@ def open_dataset(
 
     Raises:
         ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
-            collection opened without a single-file ``match``, or if its files
+            collection opened without a single-file ``match``, if the match
+            selects more files than the kind will open at once, or if its files
             cannot be combined into a single Dataset (narrow it with ``match``).
+        OSError: If one of the matched files cannot be read — a corrupt entry in
+            the local cache. The message names the file; delete it and retry.
         ImportError: If the optional 'grids' dependencies are not installed.
             Raised before anything is downloaded.
 
@@ -370,6 +377,7 @@ def open_dataset(
         variables=variables,
         workspace=Workspace.resolve(data_dir),
         fetcher=default_fetcher(),
+        engine=engine,
     )
 
 
