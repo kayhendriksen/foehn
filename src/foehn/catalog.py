@@ -266,6 +266,47 @@ DATASETS: Mapping[str, DatasetSpec] = MappingProxyType(
 )
 
 
+class _ReadOnlyList(list):
+    """A list that refuses mutation but is still a list to ``json`` and ``==``.
+
+    The nested frequency and time-slice values. A tuple would be immutable but
+    would also stop comparing equal to the list literals v0.4.0 callers wrote,
+    which is the whole reason these views exist.
+    """
+
+    __slots__ = ()
+
+    def _read_only(self, *_args: object, **_kwargs: object):
+        raise TypeError("catalog values are read-only; change catalog.DATASETS instead.")
+
+    __setitem__ = _read_only
+    __delitem__ = _read_only
+    __iadd__ = _read_only
+    __imul__ = _read_only
+    append = _read_only
+    extend = _read_only
+    insert = _read_only
+    remove = _read_only
+    pop = _read_only
+    clear = _read_only
+    sort = _read_only
+    reverse = _read_only
+
+    # copy/deepcopy/pickle hand back plain builtins: a caller who copies a view
+    # wants something they can work with, and reconstructing this type would go
+    # through the very methods that are closed off.
+    def __copy__(self) -> list:
+        return list(self)
+
+    def __deepcopy__(self, memo: dict) -> list:
+        import copy as _copy
+
+        return [_copy.deepcopy(item, memo) for item in self]
+
+    def __reduce__(self):
+        return (list, (list(self),))
+
+
 class _ReadOnlyDict(dict):
     """A dict that refuses mutation but is still a dict to ``json`` and ``==``.
 
@@ -289,11 +330,25 @@ class _ReadOnlyDict(dict):
 
     __setitem__ = _read_only
     __delitem__ = _read_only
+    # ``|=`` is a mutation like any other. dict supplies __ior__, so leaving it
+    # alone left a way straight past every other guard here.
+    __ior__ = _read_only
     update = _read_only
     setdefault = _read_only
     pop = _read_only
     popitem = _read_only
     clear = _read_only
+
+    def __copy__(self) -> dict:
+        return dict(self)
+
+    def __deepcopy__(self, memo: dict) -> dict:
+        import copy as _copy
+
+        return {key: _copy.deepcopy(value, memo) for key, value in self.items()}
+
+    def __reduce__(self):
+        return (dict, (dict(self),))
 
 
 # Backwards-compatible names: read-only views derived from DATASETS, which stays
@@ -310,8 +365,8 @@ COLLECTION_META: Mapping[str, dict[str, object]] = _ReadOnlyDict(
                 "subcategory": row.subcategory,
                 "description": row.description,
                 "format": row.format,
-                "frequencies": list(row.frequencies),
-                "time_slices": list(row.time_slices),
+                "frequencies": _ReadOnlyList(row.frequencies),
+                "time_slices": _ReadOnlyList(row.time_slices),
             }
         )
         for key, row in DATASETS.items()

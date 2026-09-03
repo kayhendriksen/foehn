@@ -541,10 +541,23 @@ def open_netcdf(files: list[Path], *, dataset: str, engine: str | None = None, *
         raise
 
 
-def open_grib2(files: list[Path], *, dataset: str, workspace: Workspace, fetcher: Fetcher, **_: object) -> xr.Dataset:
-    """Open one GRIB2 field via cfgrib, geo-referenced onto the ICON cell grid."""
+def open_grib2(
+    files: list[Path],
+    *,
+    dataset: str,
+    workspace: Workspace,
+    fetcher: Fetcher,
+    engine: str | None = None,
+    **_: object,
+) -> xr.Dataset:
+    """Open one GRIB2 field via cfgrib, geo-referenced onto the ICON cell grid.
+
+    ``engine`` defaults to cfgrib, which is the only backend that reads these
+    files today. An explicit one is honoured rather than silently replaced: a
+    caller who names a backend and gets a different one has no way to tell.
+    """
     xr = _require_xarray()
-    ds = _open_grid(xr, files, engine="cfgrib", backend_kwargs={"indexpath": ""})
+    ds = _open_grid(xr, files, engine=engine or "cfgrib", backend_kwargs={"indexpath": ""})
     return icon.attach_lonlat(
         ds,
         dataset,
@@ -581,6 +594,12 @@ def _time_keys(ds) -> frozenset:
     return frozenset(ds["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist())
 
 
+def _source_fingerprint(path: Path) -> str:
+    """Identify the exact revision of a source file."""
+    info = path.stat()
+    return f"{info.st_mtime_ns}:{info.st_size}"
+
+
 def _cube_times(xr, store: Path) -> frozenset:
     """The timestamps an existing cube already holds, or nothing if it has none.
 
@@ -605,6 +624,56 @@ def _cube_times(xr, store: Path) -> frozenset:
         return frozenset()
 
 
+def _cube_time_index(xr, store: Path) -> dict[int, int]:
+    """Map each stored timestamp to its position on the cube's time axis."""
+    if not store.exists():
+        return {}
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+            with xr.open_zarr(store) as existing:
+                if "time" not in existing.coords:
+                    return {}
+                stamps = existing["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist()
+        return {stamp: position for position, stamp in enumerate(stamps)}
+    except Exception as exc:
+        logger.debug("Could not index the time axis of %s (%s)", store, exc)
+        return {}
+
+
+def _stored_sources(store: Path) -> dict[str, str]:
+    """Which revision of which file produced each stored timestep.
+
+    Kept in the store's own attributes so it survives the process. Without it an
+    append can only ask whether a timestamp is present, and MeteoSwiss restates
+    a timestamp's *values* under the same name — CombiPrecip reanalysis replaces
+    the original hourly file about eight days later. Presence alone would skip
+    that file forever and leave the cube on the superseded numbers.
+    """
+    try:
+        import zarr
+
+        recorded = zarr.open_group(str(store), mode="r").attrs.get("foehn_sources")
+        return {str(key): str(value) for key, value in recorded.items()} if isinstance(recorded, dict) else {}
+    except Exception as exc:
+        logger.debug("Could not read source fingerprints from %s (%s)", store, exc)
+        return {}
+
+
+def _record_sources(store: Path, recorded: dict[str, str]) -> None:
+    """Note which file revision produced the timesteps just written."""
+    try:
+        import zarr
+
+        group = zarr.open_group(str(store), mode="a")
+        existing = group.attrs.get("foehn_sources")
+        merged = {str(key): str(value) for key, value in existing.items()} if isinstance(existing, dict) else {}
+        merged.update(recorded)
+        group.attrs["foehn_sources"] = merged
+    except Exception as exc:  # pragma: no cover - never worth failing a good write over
+        logger.debug("Could not record source fingerprints in %s (%s)", store, exc)
+
+
 def cube_radar(
     files: list[Path],
     store: Path,
@@ -618,18 +687,28 @@ def cube_radar(
     Written incrementally — one timestep appended at a time along ``time`` — so
     peak memory stays at a single file no matter how many timesteps the match
     spans, and no dask is needed.
+
+    On an extending write, a timestep already in the store is skipped when the
+    file that produced it has not changed, and rewritten in place when it has.
+    Both matter: a ``match``'s listing is cumulative, so the same files come back
+    every time, and MeteoSwiss restates a timestamp's values under its original
+    name days later.
     """
     xr = _require_xarray()
 
-    # An append is scoped by a ``match``, and a match spans everything upstream
-    # has published under it — not just what arrived since the last append. So
-    # the file list overlaps whatever the store already holds, and appending it
-    # wholesale writes those timesteps a second time: append [00:00], then a
-    # listing of [00:00, 00:05], and the cube reads [00:00, 00:00, 00:05].
-    # Nothing downstream de-duplicates a Zarr append, so it is checked here.
-    already_stored = _cube_times(xr, store) if mode == "a" else frozenset()
+    # "w" and "w-" build a store from nothing; everything else extends one, and
+    # so has to reckon with what is already there. The caller's mode is passed
+    # through untouched — coercing anything that was not "a" into "w" turned
+    # "w-" (create, never clobber) and "r+" (modify, never truncate) into a
+    # silent overwrite of the store they were chosen to protect.
+    extending = mode not in {"w", "w-"}
+    stored_times = _cube_times(xr, store) if extending else frozenset()
+    stored_sources = _stored_sources(store) if extending else {}
 
     written = 0
+    # Collected and written once at the end: xarray restates the group's
+    # attributes on every append, so recording them per file left only the last.
+    recorded: dict[str, str] = {}
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
     for path in sorted(files):
         ds = odim.open_composite(xr, path)
@@ -639,15 +718,52 @@ def cube_radar(
         # in memory. Same rule as everywhere else, hence the same call.
         ds = select_variables(ds, variables).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
-        if already_stored and _time_keys(ds) <= already_stored:
-            logger.debug("%s: already in %s, not appending again", path.name, store.name)
+
+        keys = _time_keys(ds)
+        fingerprint = _source_fingerprint(path)
+        if keys and keys <= stored_times:
+            if all(stored_sources.get(str(key)) == fingerprint for key in keys):
+                logger.debug("%s: already in %s and unchanged, not appending again", path.name, store.name)
+                continue
+            _revise_in_place(xr, ds, store, keys)
+            recorded.update({str(key): fingerprint for key in keys})
             continue
-        # "w" creates the store on the first write of a replacement — and on an
-        # append whose target does not exist yet, where "a" has nothing to
-        # extend. Everything after the first write extends what it just made.
-        write_mode = "a" if written or (mode == "a" and store.exists()) else "w"
-        _write_zarr(ds, store, write_mode, append_dim="time" if write_mode == "a" else None)
+
+        write_mode = "a" if written else mode
+        # "a" against a path that does not exist yet creates the store, and there
+        # is no axis to extend on that first write.
+        creating = write_mode in {"w", "w-"} or not store.exists()
+        _write_zarr(ds, store, write_mode, append_dim=None if creating else "time")
+        recorded.update({str(key): fingerprint for key in keys})
         written += 1
+
+    if recorded:
+        _record_sources(store, recorded)
+
+
+def _revise_in_place(xr, ds, store: Path, keys: frozenset) -> None:
+    """Overwrite the timesteps *ds* covers, leaving the rest of the cube alone.
+
+    A region write rather than an append: the timestamps already exist, so
+    appending them would duplicate the axis instead of correcting it.
+    """
+    positions = _cube_time_index(xr, store)
+    missing = sorted(key for key in keys if key not in positions)
+    if missing:
+        raise ValueError(f"Cannot revise {store.name}: its time axis no longer holds the timestep being rewritten.")
+
+    ordered = sorted(positions[key] for key in keys)
+    if ordered != list(range(ordered[0], ordered[0] + len(ordered))):
+        raise ValueError(f"Cannot revise {store.name}: the timesteps being rewritten are not contiguous.")
+
+    region = {"time": slice(ordered[0], ordered[0] + len(ordered))}
+    # Coordinates are not part of a region write — they already exist and must
+    # not be restated.
+    payload = ds.drop_vars([name for name in ds.coords if name in ds.variables])
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+        payload.to_zarr(store, region=region)
+    logger.debug("Revised %d timestep(s) in %s in place", len(ordered), store.name)
 
 
 def cube_grib2(

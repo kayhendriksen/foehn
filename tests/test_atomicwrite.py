@@ -306,3 +306,85 @@ def test_reaping_tolerates_a_stage_vanishing_mid_scan(tmp_path):
 
     assert (tmp_path / "asset.csv").read_bytes() == b"payload"
     assert not stale.exists()
+
+
+def test_reading_the_umask_never_widens_another_thread_s_files(tmp_path):
+    """Deriving the mode must not change it for anyone else.
+
+    ``os.umask(0)`` then putting it back is the obvious way to read the umask,
+    and it is process-wide: anything creating a file inside those two syscalls
+    gets no umask at all. foehn's downloads run on a thread pool, so that window
+    is reachable — a concurrent probe caught an unrelated file at 0666 under an
+    intended umask of 0077.
+    """
+    import threading
+
+    leaked = []
+    stop = threading.Event()
+
+    def bystander():
+        index = 0
+        while not stop.is_set():
+            probe = tmp_path / f"bystander_{index}"
+            index += 1
+            try:
+                os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+                if stat.S_IMODE(probe.stat().st_mode) & 0o077:
+                    leaked.append(probe.name)
+                probe.unlink()
+            except OSError:
+                pass
+
+    previous = os.umask(0o077)
+    try:
+        watcher = threading.Thread(target=bystander)
+        watcher.start()
+        for index in range(200):
+            write_bytes(tmp_path / f"asset_{index}.csv", b"payload")
+        stop.set()
+        watcher.join()
+    finally:
+        os.umask(previous)
+
+    assert leaked == []
+
+
+def test_private_content_is_private_whatever_the_umask_allows(tmp_path):
+    """Some content's sensitivity is a property of the content.
+
+    The ETag store's entries are full asset URLs and can carry query tokens, so
+    it is not for the umask to decide — and preserving an existing target's mode
+    left a store already at 0644 from an older foehn readable forever.
+    """
+    from foehn.atomicwrite import PRIVATE_FILE_MODE
+
+    target = tmp_path / "_etags.json"
+    target.write_text("{}")
+    target.chmod(0o644)
+
+    previous = os.umask(0o022)
+    try:
+        write_text(target, '{"https://example.test/a.csv?token=x": "\\"v1\\""}', mode=PRIVATE_FILE_MODE)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE_MODE
+
+
+def test_an_unprobeable_directory_publishes_privately(tmp_path):
+    """Being wrong about permissions should mean too strict, not too loose."""
+    from foehn.atomicwrite import _umask_applied
+
+    with patch.object(Path, "mkdir", side_effect=OSError("read-only")):
+        assert _umask_applied(0o777, directory=True, near=tmp_path) == 0o700
+    with patch("foehn.atomicwrite.os.open", side_effect=OSError("read-only")):
+        assert _umask_applied(0o666, directory=False, near=tmp_path) == 0o600
+
+
+def test_write_bytes_accepts_an_explicit_mode(tmp_path):
+    from foehn.atomicwrite import PRIVATE_FILE_MODE
+
+    target = tmp_path / "state.bin"
+    write_bytes(target, b"secret", mode=PRIVATE_FILE_MODE)
+
+    assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE_MODE

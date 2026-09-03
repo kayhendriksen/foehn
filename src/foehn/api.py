@@ -381,6 +381,24 @@ def open_dataset(
     )
 
 
+def _stack_flag(stack: bool | str) -> bool:
+    """Normalise ``stack=`` and reject a value that means nothing.
+
+    v0.4.0 took ``"auto"``/``"time"`` and raised ValueError on anything else.
+    Narrowing it to a bool made every other string truthy instead, so
+    ``stack="bogus"`` quietly cubed rather than complaining. Both v0.4.0 tokens
+    still resolve to True — the dataset's kind decides the method now.
+    """
+    if isinstance(stack, bool):
+        return stack
+    if stack in {"auto", "time"}:
+        return True
+    raise ValueError(
+        f"stack={stack!r} is not a valid value. Pass a bool; the v0.4 tokens 'auto' and 'time' are "
+        "also accepted and mean True (the dataset's kind decides how to cube)."
+    )
+
+
 def to_zarr(
     dataset: str,
     *,
@@ -390,7 +408,7 @@ def to_zarr(
     store: Path | str | None = None,
     rechunk: dict[str, int] | None = None,
     mode: str = "w",
-    stack: bool = False,
+    stack: bool | str = False,
 ) -> Path:
     """Materialise a gridded dataset to a Zarr store on disk.
 
@@ -450,7 +468,7 @@ def to_zarr(
         variables=variables,
         rechunk=rechunk,
         mode=mode,
-        stack=stack,
+        stack=_stack_flag(stack),
         workspace=workspace,
         fetcher=default_fetcher(),
     )

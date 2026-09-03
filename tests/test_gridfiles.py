@@ -418,3 +418,59 @@ def test_a_failed_refresh_with_files_still_missing_raises(tmp_path):
 
     with pytest.raises(FetchError):
         ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+
+def _mixed_cache(tmp_path):
+    """Leave a cache where one file is refreshed and the other is not."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    first, second = out_dir / "a_rhiresd.nc", out_dir / "b_rhiresd.nc"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+    hrefs = [f"https://data.geo.admin.ch/x/{p.name}" for p in (first, second)]
+    items = [{"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs]
+    fake = _fake(items, body=b"generation two")
+    fake.fail(hrefs[1])
+    with pytest.raises(FetchError, match=r"mixes generations|part-way"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+    return out_dir, items, hrefs
+
+
+def test_a_mixed_cache_stays_refused_on_the_next_attempt(tmp_path):
+    """The next run must not re-baseline against the mix it inherited.
+
+    Judging coherence by what *this* run replaced only catches the run that
+    causes the mix. The following attempt measures a cache nothing has touched
+    since it started, finds it unchanged, and hands the mix back as complete.
+    """
+    out_dir, items, hrefs = _mixed_cache(tmp_path)
+    assert (out_dir / "a_rhiresd.nc").read_bytes() == b"generation two"
+    assert (out_dir / "b_rhiresd.nc").read_bytes() == b"generation one"
+
+    again = _fake(items, body=b"generation two")
+    again.fail(hrefs[0])
+    again.fail(hrefs[1])
+    with pytest.raises(FetchError, match="mixes file generations"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=again)
+
+
+def test_a_mixed_cache_stays_refused_when_the_collection_is_unreachable(tmp_path):
+    """Offline there is no Asset metadata to judge coherence with, only the marker."""
+    _mixed_cache(tmp_path)
+
+    offline = _fake([])
+    offline.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
+    with pytest.raises(FetchError, match="mixes file generations"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=offline)
+
+
+def test_a_completed_refresh_clears_the_mixed_cache_marker(tmp_path):
+    """The set is coherent again once every file is at the same generation."""
+    out_dir, items, _ = _mixed_cache(tmp_path)
+
+    healed = _fake(items, body=b"generation two")
+    result = ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=healed)
+
+    assert len(result) == 2
+    assert all(p.read_bytes() == b"generation two" for p in result)
+    assert not (out_dir / ".foehn-incoherent").exists()

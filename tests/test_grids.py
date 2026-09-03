@@ -1,5 +1,6 @@
 """Tests for the gridded read path (foehn.open_dataset)."""
 
+import contextlib
 from unittest.mock import patch
 
 import pytest
@@ -885,3 +886,153 @@ def test_append_dedup_ignores_a_store_without_a_time_axis(tmp_path):
     xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_zarr(store, consolidated=False)
 
     assert grids_mod._cube_times(xr, store) == frozenset()
+
+
+def _radar_cube(tmp_path, times=("000000", "000500")):
+    from foehn.grids import cube_radar
+
+    files = []
+    for stamp in times:
+        path = tmp_path / f"cpc2613{stamp}.h5"
+        write_odim_composite(path, time=stamp)
+        files.append(path)
+    store = tmp_path / "cube.zarr"
+    cube_radar(files, store, mode="w")
+    return store, files
+
+
+@pytest.mark.parametrize("mode", ["w-", "a-", "r+"])
+def test_a_non_overwriting_mode_never_truncates_the_store(tmp_path, mode):
+    """Only "w" means "replace what is there".
+
+    Coercing every mode that was not "a" into "w" turned "w-" (create, never
+    clobber) and "r+" (modify, never truncate) into a silent overwrite of the
+    store they were chosen to protect — "r+" reduced a two-timestep cube to one.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+    assert xr.open_zarr(store).sizes["time"] == 2
+
+    with contextlib.suppress(Exception):
+        cube_radar(files[:1], store, mode=mode)
+
+    # Whether the mode refused or was a no-op, the existing cube survives.
+    assert xr.open_zarr(store).sizes["time"] == 2
+
+
+def test_a_restated_observation_is_rewritten_rather_than_skipped(tmp_path):
+    """MeteoSwiss republishes a timestamp's values under its original name.
+
+    CombiPrecip reanalysis replaces the original hourly file about eight days
+    later, which is why the download path compares STAC ``updated`` rather than
+    mere existence. De-duplicating an append on the timestamp alone undid that:
+    bronze refreshed and the cube kept the superseded numbers forever.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    source = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    store = tmp_path / "cube.zarr"
+    cube_radar([source], store, mode="w")
+    assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 1.5
+
+    write_odim_composite(source, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    cube_radar([source], store, mode="a")
+
+    revised = xr.open_zarr(store)
+    assert float(revised.acrr.values.ravel()[1]) == 42.0
+    assert revised.sizes["time"] == 1  # rewritten in place, not appended alongside
+
+
+def test_an_unchanged_source_is_still_skipped_on_append(tmp_path):
+    """The common re-run: same listing, same files, nothing to do."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+    cube_radar(files, store, mode="a")
+
+    appended = xr.open_zarr(store)
+    assert appended.sizes["time"] == 2
+    assert len(set(appended.time.values.tolist())) == 2
+
+
+def test_source_fingerprints_survive_in_the_store(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+
+    from foehn.grids import _stored_sources
+
+    store, _ = _radar_cube(tmp_path)
+
+    assert len(_stored_sources(store)) == 2
+    assert _stored_sources(tmp_path / "missing.zarr") == {}
+
+
+def test_grib2_honours_an_explicit_engine(tmp_path):
+    """A caller who names a backend and silently gets another cannot tell."""
+    pytest.importorskip("xarray")
+    import foehn.grids as grids_mod
+
+    with (
+        patch.object(grids_mod, "_open_grid") as opened,
+        patch.object(grids_mod.icon, "attach_lonlat", lambda ds, *a, **k: ds),
+    ):
+        grids_mod.open_grib2(
+            [tmp_path / "x.grib2"],
+            dataset="forecast_icon_ch1",
+            workspace=Workspace(tmp_path),
+            fetcher=None,
+            engine="cfgrib-custom",
+        )
+
+    assert opened.call_args.kwargs["engine"] == "cfgrib-custom"
+
+
+def test_source_fingerprints_tolerate_a_store_they_cannot_read(tmp_path):
+    """Bookkeeping must never be the thing that fails a good write."""
+    from foehn.grids import _cube_time_index, _record_sources, _stored_sources
+
+    broken = tmp_path / "broken.zarr"
+    broken.mkdir()
+    (broken / "zarr.json").write_text("{ not json")
+
+    assert _stored_sources(broken) == {}
+    assert _cube_time_index(None, broken) == {}
+    _record_sources(broken, {"1": "x"})  # logs and moves on
+
+
+def test_revising_a_timestep_the_cube_no_longer_holds_is_refused(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import _revise_in_place
+
+    store, _files = _radar_cube(tmp_path)
+    ds = xr.open_zarr(store).isel(time=[0])
+
+    with pytest.raises(ValueError, match="no longer holds"):
+        _revise_in_place(xr, ds, store, frozenset({-1}))

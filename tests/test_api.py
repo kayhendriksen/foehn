@@ -1142,3 +1142,23 @@ def test_to_zarr_refuses_rechunk_together_with_stack():
     """The cube is written straight to the store, so there is no Dataset left to chunk."""
     with pytest.raises(ValueError, match="rechunk= is not supported with stack="):
         foehn.to_zarr("radar_precip", stack=True, rechunk={"time": 24})
+
+
+@pytest.mark.parametrize(("given", "expected"), [(True, True), (False, False), ("auto", True), ("time", True)])
+def test_stack_accepts_bools_and_the_v0_4_tokens(given, expected):
+    from foehn.api import _stack_flag
+
+    assert _stack_flag(given) is expected
+
+
+@pytest.mark.parametrize("given", ["bogus", "", 3, None])
+def test_stack_rejects_a_value_that_means_nothing(given):
+    """v0.4.0 raised ValueError on an unknown token.
+
+    Narrowing the parameter to a bool made every other string truthy instead, so
+    ``stack="bogus"`` quietly cubed rather than complaining.
+    """
+    from foehn.api import _stack_flag
+
+    with pytest.raises(ValueError, match="not a valid value"):
+        _stack_flag(given)

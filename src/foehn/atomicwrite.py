@@ -42,6 +42,11 @@ _STALE_AFTER_SECONDS = 24 * 60 * 60
 # ignored the umask was more permissive than the caller asked for.
 _BASE_PUBLISHED_FILE_MODE = 0o666
 _BASE_PUBLISHED_DIRECTORY_MODE = 0o777
+# For content that should not be shared whatever the umask allows: the run state
+# and the ETag store, whose entries are full asset URLs and can carry query
+# tokens. Passed explicitly, and applied to an existing target too — a store
+# already sitting at 0644 from an older foehn stays readable otherwise.
+PRIVATE_FILE_MODE = 0o600
 
 # Reaping scans the whole parent directory, so doing it per write made a bulk
 # download quadratic in the number of files landing in one directory. Abandoned
@@ -50,19 +55,35 @@ _BASE_PUBLISHED_DIRECTORY_MODE = 0o777
 _reaped: set[Path] = set()
 _reaped_lock = threading.Lock()
 
-# Reading the umask means setting it, and foehn's downloads run on a thread
-# pool. The lock keeps foehn's own threads from probing while another is
-# mid-probe; a thread outside foehn creating files during those two syscalls is
-# not something this can guard, and is the same exposure any umask read has.
-_umask_lock = threading.Lock()
 
+def _umask_applied(base_mode: int, *, directory: bool, near: Path) -> int:
+    """What the OS would grant a new file or directory created at *base_mode*.
 
-def _current_umask() -> int:
-    """Read the process umask without leaving it changed."""
-    with _umask_lock:
-        mask = os.umask(0)
-        os.umask(mask)
-    return mask
+    Derived by creating a throwaway beside the target and reading the mode the
+    kernel actually gave it. The obvious way to get this is ``os.umask(0)``
+    followed by putting it back — but that is a *process-wide* setting, and
+    foehn's downloads run on a thread pool: anything else creating a file inside
+    those two syscalls gets no umask at all. A concurrent probe demonstrated an
+    unrelated file landing at 0666 under an intended umask of 0077. Creating a
+    probe asks the same question without ever changing the answer for anyone
+    else.
+
+    Falls back to the conservative private mode if the probe cannot be created,
+    which is the right way to be wrong about permissions.
+    """
+    probe = near / f"{_STAGE_PREFIX}umask-{uuid.uuid4().hex}"
+    try:
+        if directory:
+            probe.mkdir(mode=base_mode)
+        else:
+            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, base_mode))
+        granted = stat.S_IMODE(probe.stat().st_mode)
+    except OSError:
+        return 0o700 if directory else 0o600
+    finally:
+        with contextlib.suppress(OSError):
+            probe.rmdir() if directory else probe.unlink()
+    return granted
 
 
 def _remove_tree(path: Path) -> None:
@@ -131,7 +152,7 @@ def _published_file_mode(path: Path) -> int:
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _BASE_PUBLISHED_FILE_MODE & ~_current_umask()
+        return _umask_applied(_BASE_PUBLISHED_FILE_MODE, directory=False, near=path.parent)
 
 
 def _new_stage_directory(path: Path) -> Path:
@@ -149,11 +170,11 @@ def _published_directory_mode(path: Path) -> int:
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _BASE_PUBLISHED_DIRECTORY_MODE & ~_current_umask()
+        return _umask_applied(_BASE_PUBLISHED_DIRECTORY_MODE, directory=True, near=path.parent)
 
 
 @contextlib.contextmanager
-def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
+def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Iterator[Path]:
     """Yield a sibling path to write to, then move it onto *path*.
 
     The move happens when the block completes; the temp file is removed when it
@@ -163,13 +184,17 @@ def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
     The suffix is visible in the directory while the write is in flight, so it
     is worth naming for what it is — the fetcher stages ``.part``. The middle
     token is unique, so concurrent processes never share a partial file.
+
+    ``mode`` forces the published permissions instead of preserving an existing
+    target's or deriving them from the umask. Use it for content whose
+    sensitivity is a property of the content, not of the caller's environment.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     _reap_stale_stages(path)
     tmp = _new_stage_file(path, suffix)
     try:
         yield tmp
-        tmp.chmod(_published_file_mode(path))
+        tmp.chmod(_published_file_mode(path) if mode is None else mode)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -230,15 +255,15 @@ def staged_directory(path: Path) -> Iterator[Path]:
         raise
 
 
-def write_bytes(path: Path, data: bytes | memoryview) -> None:
+def write_bytes(path: Path, data: bytes | memoryview, *, mode: int | None = None) -> None:
     """Write bytes to *path* so readers never see a torn write."""
-    with staged(path) as tmp:
+    with staged(path, mode=mode) as tmp:
         tmp.write_bytes(data)
 
 
-def write_text(path: Path, text: str) -> None:
+def write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     """Write UTF-8 text to *path* so readers never see a torn write."""
-    write_bytes(path, text.encode("utf-8"))
+    write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
-__all__ = ["staged", "staged_directory", "write_bytes", "write_text"]
+__all__ = ["PRIVATE_FILE_MODE", "staged", "staged_directory", "write_bytes", "write_text"]

@@ -239,3 +239,44 @@ def test_every_advertised_frequency_is_in_the_vocabulary():
     for key, meta in COLLECTION_META.items():
         assert set(meta["frequencies"]) <= set(GRANULARITIES), key
         assert set(meta["time_slices"]) <= set(TIME_SLICES), key
+
+
+def test_compatibility_views_refuse_every_route_to_mutation():
+    """Blocking __setitem__ alone leaves ``|=`` and the nested lists wide open."""
+    import pytest
+
+    row = COLLECTION_META["smn"]
+    for mutate in (
+        lambda: COLLECTION_META.__setitem__("smn", {}),
+        lambda: COLLECTION_META.__ior__({"smn": {}}),
+        lambda: COLLECTIONS.__ior__({"smn": "changed"}),
+        lambda: row.__ior__({"format": "changed"}),
+        lambda: row["time_slices"].append("changed"),
+        lambda: row["time_slices"].__setitem__(0, "changed"),
+        lambda: row["time_slices"].__iadd__(["changed"]),
+        lambda: row["frequencies"].clear(),
+    ):
+        with pytest.raises(TypeError):
+            mutate()
+
+    assert COLLECTION_META["smn"]["time_slices"] == ["historical", "recent", "now"]
+    assert COLLECTIONS["smn"] == "ch.meteoschweiz.ogd-smn"
+
+
+def test_compatibility_views_survive_copy_deepcopy_and_pickle():
+    """These round-trips worked on the plain dicts v0.4.0 published.
+
+    Reconstructing a read-only view goes through the very methods that are
+    closed off, so each hands back the plain builtin a caller can work with.
+    """
+    import copy
+    import pickle
+
+    def round_trip(mapping):
+        return pickle.loads(pickle.dumps(mapping))  # noqa: S301 - our own object, round-tripped
+
+    for produce in (copy.copy, copy.deepcopy, round_trip):
+        clone = produce(COLLECTION_META)
+        assert clone == COLLECTION_META
+        assert type(clone) is dict
+        clone["smn"] = {"mine": True}  # a copy is the caller's to change

@@ -67,3 +67,31 @@ def test_a_relocated_download_helper_names_its_replacement():
 
     with pytest.raises(AttributeError, match="has no attribute"):
         _ = client.never_existed
+
+
+def test_the_documented_spelling_works_after_a_plain_import(tmp_path):
+    """v0.4.0 documented ``import foehn`` then ``foehn.client.load_last_run(...)``.
+
+    A submodule is not an attribute of its package until something imports it.
+    v0.4.0's __init__ imported client for its own reasons, so the documented
+    call resolved there; here nothing did, and it raised AttributeError. Run in
+    a subprocess because the rest of this module imports foehn.client directly,
+    which would bind the attribute and hide the bug.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(f"""
+        import warnings
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import foehn
+        foehn.client.save_last_run({str(tmp_path)!r}, "2026-09-03T00:00:00+00:00")
+        print(foehn.client.load_last_run({str(tmp_path)!r}))
+    """)
+    done = subprocess.run(  # noqa: S603 - our own interpreter running a literal script
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "2026-09-03T00:00:00+00:00"

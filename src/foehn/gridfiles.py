@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from foehn.assets import Asset, assets_of, other_extensions
+from foehn.atomicwrite import write_text
 from foehn.collections import COLLECTIONS
 from foehn.fetch import Fetcher, FetchError
 from foehn.transfer import already_current, fetch_all
@@ -67,6 +68,14 @@ def _run_datetime_filter(match: str | None) -> str | None:
     return run.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# A refresh that fails part-way can leave a set where some files are the new
+# generation and the rest the old one. That fact has to outlive the process: the
+# next attempt would otherwise measure the mixed cache it inherited, find nothing
+# changed since *it* started, and hand it back as complete — and an attempt that
+# cannot reach the listing at all has no Asset metadata to judge coherence with.
+_INCOHERENT_MARKER = ".foehn-incoherent"
+
+
 def _fingerprint(path: Path) -> tuple[int, int] | None:
     """What a file looks like right now, or None if it is not there."""
     try:
@@ -74,6 +83,36 @@ def _fingerprint(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return (info.st_mtime_ns, info.st_size)
+
+
+def _mark_incoherent(out_dir: Path, detail: str) -> None:
+    """Record that this dataset's cache mixes generations."""
+    try:
+        write_text(out_dir / _INCOHERENT_MARKER, f"{datetime.now(UTC).isoformat()}\n{detail}\n")
+    except OSError:  # pragma: no cover - a cache we cannot write to is one we cannot mark
+        logger.debug("Could not write the incoherence marker in %s", out_dir)
+
+
+def _clear_incoherent(out_dir: Path) -> None:
+    """A complete refresh puts every file at the same generation again."""
+    (out_dir / _INCOHERENT_MARKER).unlink(missing_ok=True)
+
+
+def _raise_if_incoherent(dataset: str, out_dir: Path) -> None:
+    """Refuse to *hand back* a cache a previous run recorded as mixed.
+
+    Checked where the cache would be returned, never before the fetch: a marker
+    that blocked the refresh too would make the mix permanent, since finishing
+    the download is exactly what repairs it.
+    """
+    marker = out_dir / _INCOHERENT_MARKER
+    if not marker.exists():
+        return
+    raise FetchError(
+        f"The local cache for {dataset!r} mixes file generations: a previous refresh failed part-way "
+        f"through and the set was never completed. It is not safe to read. Re-run with the collection "
+        f"reachable to finish the refresh, or delete {out_dir} to start clean."
+    )
 
 
 def _raise_if_too_many(dataset: str, match: str | None, names: list[str], max_files: int | None) -> None:
@@ -145,6 +184,9 @@ def ensure_grid_files(
         if cached:
             # Offline: can't check the collection, but still enforce the cap on
             # what's cached so an over-broad match can't slip through silently.
+            # The marker is the only thing that can speak for coherence here —
+            # there is no Asset metadata to compare the files against.
+            _raise_if_incoherent(dataset, out_dir)
             _raise_if_too_many(dataset, match, [f.name for f in cached], max_files)
             warnings.warn(
                 f"Could not reach the STAC API to verify the {dataset!r} cache "
@@ -175,8 +217,7 @@ def ensure_grid_files(
     # (e.g. a whole forecast run) can't pull hundreds of files off the network.
     _raise_if_too_many(dataset, match, [a.name for a in matched], max_files)
 
-    # Recorded before the fetch so the failure path can tell an untouched cache
-    # from one this run has already started replacing.
+    # Recorded before the fetch so the failure path can see what it replaced.
     before = {asset.name: _fingerprint(out_dir / asset.name) for asset in matched}
 
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
@@ -196,25 +237,47 @@ def ensure_grid_files(
         if not all(path.exists() for path in cached):
             raise
         # Presence is not coherence. ``fetch_all`` refreshes assets one at a
-        # time, so a failure part-way through leaves the files it already
-        # replaced at the new generation and the rest at the old one — and every
-        # one of them exists. Falling back then hands back a set that silently
-        # mixes generations, which for a multi-file cube is worse than failing.
+        # time, so a failure part-way through can leave some files at the new
+        # generation and the rest at the old one — all of them present. Reading
+        # that set builds a Dataset that silently mixes generations.
         #
-        # An untouched cache is a different case and still usable: nothing was
-        # replaced, so every file is the same generation it was before the run.
-        # That is the offline fallback this branch was written for.
-        if replaced := [path.name for path in cached if _fingerprint(path) != before.get(path.name)]:
+        # Coherence is a property of the cache against the Collection, not of
+        # what this run happened to touch. Judging it by what this run replaced
+        # only caught the failure on the run that made it: the next attempt
+        # re-baselined against the mixed cache it inherited, found nothing
+        # changed, and handed it back as complete. A same-size, same-mtime
+        # replacement slipped past that check too.
+        #
+        # So compare each file against its own Asset. Every file current is
+        # coherent; every file stale is also coherent — that is the offline
+        # cache, one whole generation behind, and the fallback this branch
+        # exists for. A mix of the two is the state no reader can use.
+        #
+        # Two independent signals, because neither covers the other. What this
+        # run replaced catches the failure on the run that causes it, whatever
+        # the Asset metadata says. Comparing each file against its own Asset
+        # catches a set already mixed on arrival, and does not care whether a
+        # replacement happened to land on the same size and mtime. Either one
+        # means no reader can use this set.
+        replaced = [path.name for path in cached if _fingerprint(path) != before.get(path.name)]
+        stale = [asset.name for asset in matched if not already_current(asset, out_dir / asset.name)]
+        if (0 < len(replaced) < len(cached)) or (0 < len(stale) < len(matched)):
+            detail = f"{dataset}: replaced {len(replaced)}/{len(cached)}, {len(stale)} still behind"
+            _mark_incoherent(out_dir, detail)
             raise FetchError(
-                f"Could not refresh {dataset!r} ({type(exc).__name__}: {exc}) after replacing "
-                f"{len(replaced)} of {len(cached)} file(s). The local set now mixes generations, so it is "
-                "not safe to read; re-run to finish the refresh."
+                f"Could not refresh {dataset!r} ({type(exc).__name__}: {exc}) part-way through: "
+                f"{len(replaced)} of {len(cached)} file(s) were replaced. A set that mixes generations "
+                "is not safe to read; re-run to finish the refresh."
             ) from exc
+        # Nothing this run replaced, and every file agrees with its Asset — but
+        # an earlier run may have left the mix that this one could not repair.
+        _raise_if_incoherent(dataset, out_dir)
         warnings.warn(
             f"Could not refresh {dataset!r} ({type(exc).__name__}); using the complete local cache.",
             stacklevel=2,
         )
         return sorted(cached)
+    _clear_incoherent(out_dir)
     return sorted({out_dir / asset.name for asset in matched})
 
 
