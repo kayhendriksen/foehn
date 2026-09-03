@@ -178,10 +178,38 @@ def materialization_current(asset: Asset, out_dir: Path) -> bool:
         return False
     # "href" is the pre-0.5 spelling. Still honoured on read so an existing
     # workspace is not re-downloaded; only ever written as a digest.
-    identified = recorded.get("href_sha256") == _href_digest(asset.href) or recorded.get("href") == asset.href
-    if not identified:
+    legacy = recorded.get("href") == asset.href
+    if not (recorded.get("href_sha256") == _href_digest(asset.href) or legacy):
         return False
-    return not asset.updated or recorded.get("updated") == asset.updated
+    if asset.updated and recorded.get("updated") != asset.updated:
+        return False
+    if legacy:
+        # Accepting it is not enough: the URL it holds can carry a query token,
+        # and it was written world-readable. Rewrite it before saying "current",
+        # so the credential stops being at rest the first time we look at it.
+        # If that rewrite fails, the token is still there — swallowing the error
+        # and reporting "current" would leave it there for good, so report not
+        # current instead and let the archive be materialized again.
+        return _migrate_marker(marker, asset)
+    return True
+
+
+def _migrate_marker(marker: Path, asset: Asset) -> bool:
+    """Replace a pre-0.5 marker with the digest schema, privately."""
+    try:
+        atomicwrite.write_text(
+            marker,
+            json.dumps({"href_sha256": _href_digest(asset.href), "updated": asset.updated}, sort_keys=True),
+            mode=atomicwrite.PRIVATE_FILE_MODE,
+        )
+    except OSError:
+        logger.warning(
+            "Could not rewrite the legacy materialization marker at %s, which holds the source URL "
+            "verbatim. Treating the archive as not materialized so it is written afresh.",
+            marker,
+        )
+        return False
+    return True
 
 
 def materialize_archive(

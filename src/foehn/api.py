@@ -395,7 +395,10 @@ def _stack_flag(stack: bool | str | None) -> bool:
         return False
     if isinstance(stack, bool):
         return stack
-    if stack in {"auto", "time"}:
+    # isinstance before the membership test: ``stack=["auto"]`` is invalid, and
+    # asking whether an unhashable value is in a set raises TypeError rather
+    # than the ValueError that describes the actual problem.
+    if isinstance(stack, str) and stack in {"auto", "time"}:
         return True
     raise ValueError(
         f"stack={stack!r} is not a valid value. Pass a bool; the v0.4 tokens 'auto' and 'time' are "

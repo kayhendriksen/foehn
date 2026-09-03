@@ -1091,3 +1091,89 @@ def test_a_restatement_that_keeps_size_and_mtime_still_reaches_the_cube(tmp_path
     cube_radar([source], store, mode="a")
 
     assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 42.0
+
+
+def test_the_fingerprint_always_describes_the_values_that_were_decoded(tmp_path):
+    """The pair has to be consistent even if the file changes A -> B -> A.
+
+    Hashing the path on both sides of the decode matches on an A -> B -> A
+    sequence, so B's values get stored under A's fingerprint and every later
+    append skips the correction for good. Reading the bytes once and both
+    hashing and decoding *those* makes the race structurally impossible.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    import hashlib
+
+    import xarray as xr
+
+    from foehn import odim
+    from foehn.grids import _open_composite_snapshot
+
+    source = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    original_bytes = source.read_bytes()
+
+    real_open = odim.open_composite
+
+    def replace_during_decode(xr_module, path, *, data=None):
+        opened = real_open(xr_module, path, data=data)
+        # Another process publishes a different revision mid-decode.
+        write_odim_composite(path, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+        return opened
+
+    with patch.object(odim, "open_composite", replace_during_decode):
+        ds, fingerprint = _open_composite_snapshot(xr, source)
+
+    # The fingerprint names the revision the values actually came from, not
+    # whatever happens to be at the path now.
+    assert fingerprint == hashlib.blake2b(original_bytes, digest_size=16).hexdigest()
+    assert float(ds["acrr"].values.ravel()[1]) == 1.5
+    assert source.read_bytes() != original_bytes  # the path really did move on
+
+
+def test_revising_non_contiguous_timesteps_is_refused(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import _cube_time_index, _revise_in_place
+
+    store, _files = _radar_cube(tmp_path, times=("000000", "000500", "001000"))
+    positions = _cube_time_index(xr, store)
+    first, last = sorted(positions)[0], sorted(positions)[2]
+    ds = xr.open_zarr(store).isel(time=[0])
+
+    with pytest.raises(ValueError, match="not contiguous"):
+        _revise_in_place(xr, ds, store, frozenset({first, last}))
+
+
+def test_an_append_keeps_the_fingerprints_of_timesteps_it_did_not_touch(tmp_path):
+    """xarray restates the group's attributes on every append.
+
+    Recording only the current call's entries dropped every earlier one, so the
+    next incremental write had no history to skip against and rewrote regions
+    that had not changed.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+
+    from foehn.grids import _stored_sources, cube_radar
+
+    store = tmp_path / "cube.zarr"
+    first = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(first, time="000000")
+    cube_radar([first], store, mode="w")
+    assert len(_stored_sources(store)) == 1
+
+    second = tmp_path / "cpc2613000500.h5"
+    write_odim_composite(second, time="000500")
+    cube_radar([first, second], store, mode="a")
+
+    # Both timesteps are still accounted for, so neither is rewritten next time.
+    assert len(_stored_sources(store)) == 2

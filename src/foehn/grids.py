@@ -558,7 +558,9 @@ def open_grib2(
     caller who names a backend and gets a different one has no way to tell.
     """
     xr = _require_xarray()
-    ds = _open_grid(xr, files, engine=engine or "cfgrib", backend_kwargs={"indexpath": ""})
+    # ``is None``, not falsiness: an explicit engine="" is a caller saying
+    # something, and quietly substituting cfgrib for it hides the mistake.
+    ds = _open_grid(xr, files, engine="cfgrib" if engine is None else engine, backend_kwargs={"indexpath": ""})
     return icon.attach_lonlat(
         ds,
         dataset,
@@ -609,11 +611,7 @@ def _source_fingerprint(path: Path) -> str:
     Radar composites are a few hundred KB, so reading one to hash it costs
     less than the open and decode that follows it.
     """
-    digest = hashlib.blake2b(digest_size=16)
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return hashlib.blake2b(path.read_bytes(), digest_size=16).hexdigest()
 
 
 def _cube_times(xr, store: Path) -> frozenset:
@@ -690,6 +688,20 @@ def _record_sources(store: Path, recorded: dict[str, str]) -> None:
         logger.debug("Could not record source fingerprints in %s (%s)", store, exc)
 
 
+def _open_composite_snapshot(xr, path: Path):
+    """Decode a composite and the fingerprint of the exact bytes decoded.
+
+    Read once, then hashed and decoded from that one copy. Hashing the path on
+    both sides of the decode looked equivalent and is not: a source that goes
+    A -> B -> A while it is being read matches on both hashes, so B's values are
+    stored under A's fingerprint and every later append skips the correction for
+    good. Bytes already in hand cannot change underneath us.
+    """
+    data = path.read_bytes()
+    digest = hashlib.blake2b(data, digest_size=16).hexdigest()
+    return odim.open_composite(xr, path, data=data), digest
+
+
 def cube_radar(
     files: list[Path],
     store: Path,
@@ -730,7 +742,7 @@ def cube_radar(
     recorded: dict[str, str] = {}
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
     for path in sorted(files):
-        ds = odim.open_composite(xr, path)
+        ds, fingerprint = _open_composite_snapshot(xr, path)
         if "time" not in ds.coords:
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
         # Narrowed per file rather than once at the end: only one timestep is ever
@@ -739,7 +751,6 @@ def cube_radar(
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
 
         keys = _time_keys(ds)
-        fingerprint = _source_fingerprint(path)
         if keys and keys <= stored_times:
             if all(stored_sources.get(str(key)) == fingerprint for key in keys):
                 logger.debug("%s: already in %s and unchanged, not appending again", path.name, store.name)
@@ -757,7 +768,11 @@ def cube_radar(
         written += 1
 
     if recorded:
-        _record_sources(store, recorded)
+        # Merged over what the store held when this call started: an append
+        # restates the group's attributes, so recording only this call's entries
+        # dropped every earlier one — and the next incremental write then had no
+        # history to skip against and rewrote regions that had not changed.
+        _record_sources(store, {**stored_sources, **recorded})
 
 
 def _revise_in_place(xr, ds, store: Path, keys: frozenset) -> None:

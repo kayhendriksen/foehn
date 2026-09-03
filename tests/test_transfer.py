@@ -203,3 +203,78 @@ def test_an_unparseable_updated_stamp_counts_as_current(tmp_path):
 def test_a_missing_file_is_never_current(tmp_path):
     asset = Asset.from_stac("d", {"href": "https://x/f.h5", "updated": "2026-01-01T00:00:00+00:00"})
     assert already_current(asset, tmp_path / "absent.h5") is False
+
+
+def test_a_legacy_marker_is_rewritten_before_it_is_trusted(tmp_path):
+    """Accepting a pre-0.5 marker is not enough to make it safe.
+
+    It holds the source URL verbatim — which can carry a query token — and was
+    written world-readable. Reading it is the moment to replace it.
+    """
+    import json
+    import stat
+
+    from foehn.assets import Asset
+    from foehn.transfer import _MATERIALIZATION_MARKER, _href_digest, materialization_current
+
+    out_dir = tmp_path / "archive"
+    out_dir.mkdir()
+    href = "https://data.geo.admin.ch/x/bundle.zip?token=secret"
+    asset = Asset(
+        href=href,
+        name="bundle.zip",
+        key="data",
+        updated="2026-01-01T00:00:00+00:00",
+        item_id="bundle",
+        time_slice=None,
+        granularity=None,
+        forecast_run=None,
+    )
+
+    marker = out_dir / _MATERIALIZATION_MARKER
+    marker.write_text(json.dumps({"href": href, "updated": asset.updated}))
+    marker.chmod(0o644)
+
+    assert materialization_current(asset, out_dir) is True
+
+    rewritten = json.loads(marker.read_text())
+    assert "href" not in rewritten
+    assert rewritten["href_sha256"] == _href_digest(href)
+    assert "secret" not in marker.read_text()
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+    # Still recognised after the rewrite, so nothing re-downloads.
+    assert materialization_current(asset, out_dir) is True
+
+
+def test_a_legacy_marker_that_cannot_be_rewritten_is_not_reported_current(tmp_path):
+    """Swallowing the rewrite failure leaves the token there for good.
+
+    The marker holds the source URL verbatim and is world-readable. If it cannot
+    be replaced, saying "current" means nothing ever revisits it — so say not
+    current and let the archive be written afresh.
+    """
+    import json
+    from unittest.mock import patch
+
+    from foehn import atomicwrite
+    from foehn.assets import Asset
+    from foehn.transfer import _MATERIALIZATION_MARKER, materialization_current
+
+    out_dir = tmp_path / "archive"
+    out_dir.mkdir()
+    href = "https://data.geo.admin.ch/x/bundle.zip?token=secret"
+    asset = Asset(
+        href=href,
+        name="bundle.zip",
+        key="data",
+        updated="2026-01-01T00:00:00+00:00",
+        item_id="bundle",
+        time_slice=None,
+        granularity=None,
+        forecast_run=None,
+    )
+    marker = out_dir / _MATERIALIZATION_MARKER
+    marker.write_text(json.dumps({"href": href, "updated": asset.updated}))
+
+    with patch.object(atomicwrite, "write_text", side_effect=PermissionError("read-only")):
+        assert materialization_current(asset, out_dir) is False
