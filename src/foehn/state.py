@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from foehn._locking import exclusive_lock
-from foehn.atomicwrite import write_text
+from foehn.atomicwrite import PRIVATE_FILE_MODE, write_text
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ def load_etags(workspace: Workspace) -> dict[str, str]:
 def _save_etags_unlocked(workspace: Workspace, etags: dict[str, str]) -> None:
     path = workspace.etags
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_text(path, json.dumps(etags, indent=2))
+    write_text(path, json.dumps(etags, indent=2), mode=PRIVATE_FILE_MODE)
 
 
 def save_etags(workspace: Workspace, etags: dict[str, str]) -> None:
@@ -140,7 +140,7 @@ def save_last_run(workspace: Workspace, timestamp: str | None = None) -> None:
                 current_parsed = None
             if current_parsed is not None and current_parsed.tzinfo is not None and current_parsed > parsed:
                 value = current
-        write_text(path, json.dumps({"timestamp": value}))
+        write_text(path, json.dumps({"timestamp": value}), mode=PRIVATE_FILE_MODE)
 
 
 __all__ = ["EtagRun", "load_etags", "load_last_run", "run_watermark", "save_etags", "save_last_run"]

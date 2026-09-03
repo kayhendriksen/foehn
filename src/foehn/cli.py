@@ -216,7 +216,7 @@ def cmd_to_zarr(args: argparse.Namespace) -> None:
         match=args.match,
         data_dir=Workspace.resolve(args.data_dir).root,
         store=args.out,
-        stack=args.stack,
+        stack=args.stack is not None,
     )
     print(f"Zarr store written to: {store}")
 
@@ -381,8 +381,16 @@ def main():
     sub_zarr.add_argument("--out", help="Explicit output path for the .zarr store (overrides the default location)")
     sub_zarr.add_argument(
         "--stack",
-        action="store_true",
-        help="Combine the matched files into one cube, by whichever method the dataset's kind uses",
+        nargs="?",
+        const="auto",
+        choices=["auto", "time"],
+        default=None,
+        # The dataset's kind now decides how to cube, so the value carries
+        # nothing --stack on its own does not. It is still accepted because
+        # v0.4.0 documented `--stack time` and `--stack auto`, and turning the
+        # option into a bare flag made every such command line fail outright.
+        help="Combine the matched files into one cube. Takes no value; 'auto' and 'time' are accepted "
+        "for compatibility with v0.4 and choose nothing the dataset's kind does not already decide",
     )
     _add_common_args(sub_zarr)
     sub_zarr.set_defaults(func=cmd_to_zarr)

@@ -251,6 +251,14 @@ KINDS: dict[DatasetKind, KindSpec] = {
             # No cube builder: a multi-file ``match`` already combines on read,
             # so ``stack`` has nothing left to assemble.
             cube=None,
+            # Uncapped, an unfiltered read downloaded the whole collection —
+            # 3,698 files and 30 GB for surface_derived_grid — because nothing
+            # stopped it before the network. The cap has to clear the legitimate
+            # uses: the largest single-parameter match published today is 170
+            # files, and climate_scenarios_grid is meant to open unfiltered at
+            # 512. 1000 clears both and is the same "whole set in memory at
+            # once" number the GRIB2 cube already uses.
+            max_files=1000,
         ),
         supports_granularity=False,
         supports_calendar_filters=False,
@@ -410,6 +418,7 @@ def open_grid(
     variables: str | list[str] | None = None,
     workspace: Workspace,
     fetcher: Fetcher,
+    engine: str | None = None,
 ) -> xr.Dataset:
     """Open *dataset* as an xarray Dataset, by whichever grid reader its kind uses.
 
@@ -423,6 +432,7 @@ def open_grid(
         variables=variables,
         workspace=workspace,
         fetcher=fetcher,
+        engine=engine,
     )
 
 

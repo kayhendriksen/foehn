@@ -315,8 +315,16 @@ _Avoid_: query, params, options
   primitive that was never the download path's to own. Resolved: `atomicwrite`
   sits on the cross-platform `_locking` leaf and `test_layering` fails a module
   that hand-rolls the move itself. Unpublished files and directories are always
-  private; new published materialisations use shared-readable defaults,
-  replacements preserve the target mode, and stale namespaced stages are reaped.
+  private; new published materialisations honour the process umask, exactly as
+  the `open()`/`mkdir()` they replaced did, and replacements preserve the target
+  mode. Forcing 0644/0755 instead published data a caller had asked, through
+  their umask, to keep to themselves — the **Run state** and ETag store, which
+  carry full asset URLs, go through this same path. The previous generation of a
+  directory is parked under foehn's own prefix rather than `<target>.previous`,
+  a name a user can hold and publication is free to delete. Stale namespaced
+  stages are reaped once per directory per process: the scan is over the whole
+  parent, so doing it per write made a bulk download quadratic in the files
+  landing beside each other.
 - The default **Time slice** was the token `"recent"`, written at four code sites
   — the `Filters` field, its builder, `registry.download` and the CLI — and again
   as prose in four docstrings. Resolved: `collections.DEFAULT_TIME_SLICE` is the
@@ -388,7 +396,11 @@ _Avoid_: query, params, options
   Resolved: replacement directory **Staging** publishes only complete
   materialisations, append mode updates Zarr in place without copying the whole
   store, and STAC `updated` metadata decides freshness with existing local data
-  as the offline fallback.
+  as the offline fallback. Two things the fallback and the append each have to
+  know: a refresh that failed *after* replacing some files leaves a set that
+  mixes generations, so it is refused rather than warned about — presence is not
+  coherence — and an append's listing is cumulative, so timesteps already in the
+  store are skipped instead of written twice.
 - The registry selected a **Grid reader** but still sequenced its acquisition,
   cube decision and Zarr recipe. Resolved: the registry only routes and injects
   acquisition; the Grid reader owns the orchestration, stages replacement stores

@@ -409,10 +409,13 @@ def describe_grid(
     or narrowed with match.
 
     **Cost warning:** foehn is download-then-lazy — the first call downloads the
-    *entire* matched file(s) to the local cache before it can report anything
-    (hundreds of MB for some NetCDF collections, ~900 MB for
-    climate_scenarios_grid; a single GRIB2/radar file is only a few MB). Requires
-    the optional 'grids' dependencies (pip install foehn[grids]).
+    *entire* matched file(s) to the local cache before it can report anything. An
+    unfiltered NetCDF collection means the whole collection: surface_derived_grid
+    is ~30 GB over 3,698 files, satellite_derived_grid ~9 GB. Pass `match` unless
+    you mean it. climate_scenarios_grid is ~900 MB unfiltered, and a single
+    GRIB2/radar file is only a few MB. Above 1,000 files the call is refused
+    rather than started. Requires the optional 'grids' dependencies
+    (pip install foehn[grids]).
 
     Args:
         dataset: Grid dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",

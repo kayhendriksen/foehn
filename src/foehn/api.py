@@ -298,6 +298,7 @@ def open_dataset(
     variables: str | list[str] | None = None,
     match: str | None = None,
     data_dir: Path | str | None = None,
+    engine: str | None = None,
 ) -> xr.Dataset:
     """Open a gridded dataset as an xarray Dataset.
 
@@ -337,6 +338,9 @@ def open_dataset(
             to the station/frequency filters on load(). Required for GRIB2 and
             radar collections, where it must select a single file.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
+        engine: xarray backend to open the file(s) with (e.g. "h5netcdf"). Leave
+            unset to let xarray choose, which is right for every published
+            collection; name one only to work around a backend-specific fault.
 
     Returns:
         An xarray Dataset backed by the local file(s), downloaded in full first
@@ -345,8 +349,11 @@ def open_dataset(
 
     Raises:
         ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
-            collection opened without a single-file ``match``, or if its files
+            collection opened without a single-file ``match``, if the match
+            selects more files than the kind will open at once, or if its files
             cannot be combined into a single Dataset (narrow it with ``match``).
+        OSError: If one of the matched files cannot be read — a corrupt entry in
+            the local cache. The message names the file; delete it and retry.
         ImportError: If the optional 'grids' dependencies are not installed.
             Raised before anything is downloaded.
 
@@ -370,6 +377,32 @@ def open_dataset(
         variables=variables,
         workspace=Workspace.resolve(data_dir),
         fetcher=default_fetcher(),
+        engine=engine,
+    )
+
+
+def _stack_flag(stack: bool | str | None) -> bool:
+    """Normalise ``stack=`` and reject a value that means nothing.
+
+    v0.4.0 typed this ``str | None`` and defaulted to None, so ``stack=None``
+    was an ordinary way to spell "do not cube" — and it took ``"auto"``/``"time"``
+    and raised ValueError on anything else. Narrowing it to a bool made every
+    other string truthy instead, so ``stack="bogus"`` quietly cubed; rejecting
+    None then broke a call that had always been valid. Both v0.4.0 tokens still
+    resolve to True — the dataset's kind decides the method now.
+    """
+    if stack is None:
+        return False
+    if isinstance(stack, bool):
+        return stack
+    # isinstance before the membership test: ``stack=["auto"]`` is invalid, and
+    # asking whether an unhashable value is in a set raises TypeError rather
+    # than the ValueError that describes the actual problem.
+    if isinstance(stack, str) and stack in {"auto", "time"}:
+        return True
+    raise ValueError(
+        f"stack={stack!r} is not a valid value. Pass a bool; the v0.4 tokens 'auto' and 'time' are "
+        "also accepted and mean True (the dataset's kind decides how to cube)."
     )
 
 
@@ -382,7 +415,7 @@ def to_zarr(
     store: Path | str | None = None,
     rechunk: dict[str, int] | None = None,
     mode: str = "w",
-    stack: bool = False,
+    stack: bool | str | None = False,
 ) -> Path:
     """Materialise a gridded dataset to a Zarr store on disk.
 
@@ -442,7 +475,7 @@ def to_zarr(
         variables=variables,
         rechunk=rechunk,
         mode=mode,
-        stack=stack,
+        stack=_stack_flag(stack),
         workspace=workspace,
         fetcher=default_fetcher(),
     )

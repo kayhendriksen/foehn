@@ -101,7 +101,16 @@ foehn.stations("smn")
 
 # What each station measures and since when
 foehn.inventory("smn")
+
+# The same three tables by name, for code that picks one at runtime
+foehn.metadata("smn", "parameters")
+foehn.metadata("smn", "stations")
+foehn.metadata("smn", "inventory")
 ```
+
+`metadata()` is the generic form of the three functions above — useful when the
+table is a variable rather than a literal. It raises `ValueError` for an unknown
+table name.
 
 ---
 

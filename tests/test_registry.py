@@ -83,14 +83,22 @@ def test_direct_zip_is_the_only_kind_with_no_read_path():
     assert registry.KINDS[DatasetKind.DIRECT_ZIP].convert is not None
 
 
-def test_only_the_single_file_kinds_cap_an_open():
-    """The cap is what makes match= mandatory, and it differs from the cube's."""
+def test_every_grid_kind_caps_an_open():
+    """The cap is what makes match= mandatory, and it differs from the cube's.
+
+    NetCDF was uncapped on the grounds that it combines cleanly, which is true
+    and beside the point: nothing stopped an unfiltered open before the network,
+    so it downloaded the whole collection — 3,698 files for
+    surface_derived_grid. Its cap is loose rather than absent, because the
+    legitimate unfiltered reads are real (climate_scenarios_grid is 512 files)
+    and so are large single-parameter matches (170 today).
+    """
     grib2 = registry.KINDS[DatasetKind.GRIB2_GRID].grid
     radar = registry.KINDS[DatasetKind.RADAR_GRID].grid
     netcdf = registry.KINDS[DatasetKind.NETCDF_GRID].grid
 
     assert grib2.max_files == 1 and radar.max_files == 1
-    assert netcdf.max_files is None  # combines cleanly, so an unfiltered open is fine
+    assert netcdf.max_files == 1000
 
     # The cube caps are a different per-kind fact: GRIB2 holds the whole set in
     # memory, radar appends one timestep at a time and wants every file.

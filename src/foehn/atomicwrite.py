@@ -22,6 +22,7 @@ import contextlib
 import os
 import shutil
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -30,9 +31,62 @@ from pathlib import Path
 from foehn._locking import exclusive_directory_lock
 
 _STAGE_PREFIX = ".foehn-stage-"
+# The backup a directory publication parks its previous generation under. It
+# lives in foehn's own namespace because the publication deletes and moves it:
+# a plain ``<target>.previous`` sibling is a name a user can hold, and holding
+# it meant losing it.
+_BACKUP_PREFIX = ".foehn-previous-"
 _STALE_AFTER_SECONDS = 24 * 60 * 60
-_DEFAULT_PUBLISHED_FILE_MODE = 0o644
-_DEFAULT_PUBLISHED_DIRECTORY_MODE = 0o755
+# Publication applies the process umask itself, because it chmods explicitly:
+# a published file that ignored the umask was more permissive than the caller
+# asked for. What the umask allows is measured, not written down — see
+# _umask_applied.
+# For content that should not be shared whatever the umask allows: the run state
+# and the ETag store, whose entries are full asset URLs and can carry query
+# tokens. Passed explicitly, and applied to an existing target too — a store
+# already sitting at 0644 from an older foehn stays readable otherwise.
+PRIVATE_FILE_MODE = 0o600
+
+# Reaping scans the whole parent directory, so doing it per write made a bulk
+# download quadratic in the number of files landing in one directory. Abandoned
+# stages are by definition older than a day and left by an earlier process, so
+# once per directory per process finds everything a per-write scan would.
+_reaped: set[Path] = set()
+_reaped_lock = threading.Lock()
+
+
+def _umask_applied(*, directory: bool, near: Path) -> int:
+    """What the OS would grant a new file or directory created here.
+
+    Derived by creating a throwaway beside the target and reading the mode the
+    kernel actually gave it. The obvious way to get this is ``os.umask(0)``
+    followed by putting it back — but that is a *process-wide* setting, and
+    foehn's downloads run on a thread pool: anything else creating a file inside
+    those two syscalls gets no umask at all. A concurrent probe caught an
+    unrelated file at 0666 under an intended umask of 0077.
+
+    ``touch()`` and ``mkdir()`` rather than ``os.open``/``os.mkdir`` with an
+    explicit 0o666/0o777 mask. The result is identical — those are the defaults
+    the kernel then masks — but the permissive mask is no longer written here,
+    which is both what a reader should see and what the "overly permissive file
+    permissions" analysis is looking for.
+
+    Falls back to the conservative private mode if the probe cannot be created,
+    which is the right way to be wrong about permissions.
+    """
+    probe = near / f"{_STAGE_PREFIX}umask-{uuid.uuid4().hex}"
+    try:
+        if directory:
+            probe.mkdir()
+        else:
+            probe.touch(exist_ok=False)
+        granted = stat.S_IMODE(probe.stat().st_mode)
+    except OSError:
+        return 0o700 if directory else 0o600
+    finally:
+        with contextlib.suppress(OSError):
+            probe.rmdir() if directory else probe.unlink()
+    return granted
 
 
 def _remove_tree(path: Path) -> None:
@@ -45,10 +99,22 @@ def _remove_tree(path: Path) -> None:
 def _reap_stale_stages(path: Path) -> None:
     """Remove abandoned stages old enough that no live write owns them.
 
+    Runs at most once per directory per process: the scan is over the whole
+    parent, so repeating it for every file written into that parent made a bulk
+    download quadratic. What it looks for — stages left by a process that died
+    at least a day ago — cannot appear while this process runs, so the first
+    scan of a directory finds everything a per-write scan would.
+
     Target-specific legacy patterns migrate workspaces created before the
     shared namespace was introduced. Their age gate avoids touching a live
     writer from an older foehn process during a rolling upgrade.
     """
+    parent = path.parent
+    with _reaped_lock:
+        if parent in _reaped:
+            return
+        _reaped.add(parent)
+
     cutoff = time.time() - _STALE_AFTER_SECONDS
     patterns = (
         f"{_STAGE_PREFIX}*",
@@ -57,12 +123,13 @@ def _reap_stale_stages(path: Path) -> None:
         f".{path.name}.*.transfer",
         f".{path.name}.staging-*",
     )
-    candidates = {candidate for pattern in patterns for candidate in path.parent.glob(pattern)}
+    candidates = {candidate for pattern in patterns for candidate in parent.glob(pattern)}
     for candidate in candidates:
         try:
             if candidate.stat().st_mtime < cutoff:
                 _remove_tree(candidate)
         except FileNotFoundError:
+            # The stage was claimed or cleaned between the glob and the stat.
             pass
 
 
@@ -84,11 +151,11 @@ def _new_stage_file(path: Path, suffix: str) -> Path:
 
 
 def _published_file_mode(path: Path) -> int:
-    """Preserve an existing target's permissions; use the legacy default for a new file."""
+    """Preserve an existing target's permissions; apply the umask to a new file."""
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _DEFAULT_PUBLISHED_FILE_MODE
+        return _umask_applied(directory=False, near=path.parent)
 
 
 def _new_stage_directory(path: Path) -> Path:
@@ -102,15 +169,15 @@ def _new_stage_directory(path: Path) -> Path:
 
 
 def _published_directory_mode(path: Path) -> int:
-    """Preserve an existing directory mode; use the normal shared-readable default."""
+    """Preserve an existing directory mode; apply the umask to a new one."""
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _DEFAULT_PUBLISHED_DIRECTORY_MODE
+        return _umask_applied(directory=True, near=path.parent)
 
 
 @contextlib.contextmanager
-def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
+def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Iterator[Path]:
     """Yield a sibling path to write to, then move it onto *path*.
 
     The move happens when the block completes; the temp file is removed when it
@@ -120,13 +187,17 @@ def staged(path: Path, *, suffix: str = ".tmp") -> Iterator[Path]:
     The suffix is visible in the directory while the write is in flight, so it
     is worth naming for what it is — the fetcher stages ``.part``. The middle
     token is unique, so concurrent processes never share a partial file.
+
+    ``mode`` forces the published permissions instead of preserving an existing
+    target's or deriving them from the umask. Use it for content whose
+    sensitivity is a property of the content, not of the caller's environment.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     _reap_stale_stages(path)
     tmp = _new_stage_file(path, suffix)
     try:
         yield tmp
-        tmp.chmod(_published_file_mode(path))
+        tmp.chmod(_published_file_mode(path) if mode is None else mode)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -155,8 +226,13 @@ def staged_directory(path: Path) -> Iterator[Path]:
     The two final renames have a small missing-path window on filesystems without
     directory exchange, but readers can never observe a partial or mixed-version
     materialization. A backup left by process termination is restored on entry.
+
+    The previous generation is parked under ``_BACKUP_PREFIX``, inside foehn's
+    own namespace. It used to be a plain ``<target>.previous`` sibling, which
+    publication is free to move and delete — so a user directory that happened
+    to carry that name was destroyed by publishing next to it.
     """
-    backup_path = path.with_name(path.name + ".previous")
+    backup_path = path.with_name(_BACKUP_PREFIX + path.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     _reap_stale_stages(path)
     with _directory_lock(path.parent):
@@ -182,15 +258,15 @@ def staged_directory(path: Path) -> Iterator[Path]:
         raise
 
 
-def write_bytes(path: Path, data: bytes | memoryview) -> None:
+def write_bytes(path: Path, data: bytes | memoryview, *, mode: int | None = None) -> None:
     """Write bytes to *path* so readers never see a torn write."""
-    with staged(path) as tmp:
+    with staged(path, mode=mode) as tmp:
         tmp.write_bytes(data)
 
 
-def write_text(path: Path, text: str) -> None:
+def write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     """Write UTF-8 text to *path* so readers never see a torn write."""
-    write_bytes(path, text.encode("utf-8"))
+    write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
-__all__ = ["staged", "staged_directory", "write_bytes", "write_text"]
+__all__ = ["PRIVATE_FILE_MODE", "staged", "staged_directory", "write_bytes", "write_text"]
