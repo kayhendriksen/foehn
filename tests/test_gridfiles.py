@@ -366,14 +366,14 @@ def test_ensure_netcdf_files_offline_no_cache_reraises(tmp_path):
         ensure_grid_files("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
 
-def test_the_cube_cap_explains_itself_differently_from_the_single_file_cap():
+def test_the_cube_cap_explains_itself_differently_from_the_single_file_cap(tmp_path):
     """One-file kinds say "pick a single file"; the cube cap says why the set is bounded."""
     fake = _fake(_items_for(*[f"icon-{i}.grib2" for i in range(6)]))
 
     with pytest.raises(ValueError, match="exceeds the 3-file cap"):
         ensure_grid_files(
             "forecast_icon_ch1",
-            Workspace(Path("unused")),
+            Workspace(tmp_path),
             suffixes=(".grib2",),
             match="icon-",
             max_files=3,
