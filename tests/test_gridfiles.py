@@ -474,3 +474,47 @@ def test_a_completed_refresh_clears_the_mixed_cache_marker(tmp_path):
     assert len(result) == 2
     assert all(p.read_bytes() == b"generation two" for p in result)
     assert not (out_dir / ".foehn-incoherent").exists()
+
+
+def test_an_unrelated_match_does_not_release_the_files_still_mixed(tmp_path):
+    """One collection holds many independent parameter sets.
+
+    A completed ``tabs`` refresh says nothing about whether ``rhiresd`` was ever
+    finished, so clearing a dataset-wide flag on it handed back exactly the
+    files still known to be mixed.
+    """
+    out_dir, _items, _hrefs = _mixed_cache(tmp_path)
+
+    # A different parameter, refreshed cleanly and completely.
+    tabs = out_dir / "c_tabsd.nc"
+    tabs.write_bytes(b"generation one")
+    tabs_href = f"https://data.geo.admin.ch/x/{tabs.name}"
+    tabs_items = [{"assets": {"d": {"href": tabs_href}}, "properties": {"updated": "2000-01-01T00:00:00+00:00"}}]
+    ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="tabsd", fetcher=_fake(tabs_items))
+
+    # rhiresd is still half-refreshed, and still refused.
+    offline = _fake([])
+    offline.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
+    with pytest.raises(FetchError, match="mixes file generations"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=offline)
+
+
+def test_an_interrupted_refresh_is_recorded_like_a_failed_one(tmp_path):
+    """Ctrl-C leaves the same half-done set a network error does."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    first, second = out_dir / "a_rhiresd.nc", out_dir / "b_rhiresd.nc"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+    hrefs = [f"https://data.geo.admin.ch/x/{p.name}" for p in (first, second)]
+    items = [{"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs]
+    fake = _fake(items, body=b"generation two")
+    fake.fail(hrefs[1], KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+    offline = _fake([])
+    offline.fail(COLLECTIONS["surface_derived_grid"], FetchError("offline"))
+    with pytest.raises(FetchError, match="mixes file generations"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=offline)

@@ -48,6 +48,7 @@ into memory) is future work.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import warnings
 from collections.abc import Callable
@@ -594,10 +595,25 @@ def _time_keys(ds) -> frozenset:
     return frozenset(ds["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist())
 
 
+# Every Zarr write mode xarray accepts. Validated before anything branches on
+# it: an unrecognised value used to fall through to the extending path, where it
+# could skip a file as already stored or take the in-place region update.
+_ZARR_MODES = ("w", "w-", "a", "a-", "r+")
+
+
 def _source_fingerprint(path: Path) -> str:
-    """Identify the exact revision of a source file."""
-    info = path.stat()
-    return f"{info.st_mtime_ns}:{info.st_size}"
+    """Identify the exact revision of a source file, by its contents.
+
+    Size and mtime are metadata a restatement can reproduce exactly — same
+    length, mtime restored — and then the revised values never reach the cube.
+    Radar composites are a few hundred KB, so reading one to hash it costs
+    less than the open and decode that follows it.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _cube_times(xr, store: Path) -> frozenset:
@@ -695,6 +711,9 @@ def cube_radar(
     name days later.
     """
     xr = _require_xarray()
+
+    if mode not in _ZARR_MODES:
+        raise ValueError(f"mode={mode!r} is not a Zarr write mode. Use one of: {', '.join(_ZARR_MODES)}.")
 
     # "w" and "w-" build a store from nothing; everything else extends one, and
     # so has to reckon with what is already there. The caller's mode is passed

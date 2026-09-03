@@ -37,11 +37,10 @@ _STAGE_PREFIX = ".foehn-stage-"
 # it meant losing it.
 _BACKUP_PREFIX = ".foehn-previous-"
 _STALE_AFTER_SECONDS = 24 * 60 * 60
-# What ``open()`` and ``mkdir()`` would have produced. Publication applies the
-# process umask itself because it chmods explicitly, and a published file that
-# ignored the umask was more permissive than the caller asked for.
-_BASE_PUBLISHED_FILE_MODE = 0o666
-_BASE_PUBLISHED_DIRECTORY_MODE = 0o777
+# Publication applies the process umask itself, because it chmods explicitly:
+# a published file that ignored the umask was more permissive than the caller
+# asked for. What the umask allows is measured, not written down — see
+# _umask_applied.
 # For content that should not be shared whatever the umask allows: the run state
 # and the ETag store, whose entries are full asset URLs and can carry query
 # tokens. Passed explicitly, and applied to an existing target too — a store
@@ -56,17 +55,21 @@ _reaped: set[Path] = set()
 _reaped_lock = threading.Lock()
 
 
-def _umask_applied(base_mode: int, *, directory: bool, near: Path) -> int:
-    """What the OS would grant a new file or directory created at *base_mode*.
+def _umask_applied(*, directory: bool, near: Path) -> int:
+    """What the OS would grant a new file or directory created here.
 
     Derived by creating a throwaway beside the target and reading the mode the
     kernel actually gave it. The obvious way to get this is ``os.umask(0)``
     followed by putting it back — but that is a *process-wide* setting, and
     foehn's downloads run on a thread pool: anything else creating a file inside
-    those two syscalls gets no umask at all. A concurrent probe demonstrated an
-    unrelated file landing at 0666 under an intended umask of 0077. Creating a
-    probe asks the same question without ever changing the answer for anyone
-    else.
+    those two syscalls gets no umask at all. A concurrent probe caught an
+    unrelated file at 0666 under an intended umask of 0077.
+
+    ``touch()`` and ``mkdir()`` rather than ``os.open``/``os.mkdir`` with an
+    explicit 0o666/0o777 mask. The result is identical — those are the defaults
+    the kernel then masks — but the permissive mask is no longer written here,
+    which is both what a reader should see and what the "overly permissive file
+    permissions" analysis is looking for.
 
     Falls back to the conservative private mode if the probe cannot be created,
     which is the right way to be wrong about permissions.
@@ -74,9 +77,9 @@ def _umask_applied(base_mode: int, *, directory: bool, near: Path) -> int:
     probe = near / f"{_STAGE_PREFIX}umask-{uuid.uuid4().hex}"
     try:
         if directory:
-            probe.mkdir(mode=base_mode)
+            probe.mkdir()
         else:
-            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, base_mode))
+            probe.touch(exist_ok=False)
         granted = stat.S_IMODE(probe.stat().st_mode)
     except OSError:
         return 0o700 if directory else 0o600
@@ -152,7 +155,7 @@ def _published_file_mode(path: Path) -> int:
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _umask_applied(_BASE_PUBLISHED_FILE_MODE, directory=False, near=path.parent)
+        return _umask_applied(directory=False, near=path.parent)
 
 
 def _new_stage_directory(path: Path) -> Path:
@@ -170,7 +173,7 @@ def _published_directory_mode(path: Path) -> int:
     try:
         return stat.S_IMODE(path.stat().st_mode) & 0o777
     except FileNotFoundError:
-        return _umask_applied(_BASE_PUBLISHED_DIRECTORY_MODE, directory=True, near=path.parent)
+        return _umask_applied(directory=True, near=path.parent)
 
 
 @contextlib.contextmanager

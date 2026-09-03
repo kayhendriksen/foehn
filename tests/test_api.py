@@ -1144,14 +1144,22 @@ def test_to_zarr_refuses_rechunk_together_with_stack():
         foehn.to_zarr("radar_precip", stack=True, rechunk={"time": 24})
 
 
-@pytest.mark.parametrize(("given", "expected"), [(True, True), (False, False), ("auto", True), ("time", True)])
-def test_stack_accepts_bools_and_the_v0_4_tokens(given, expected):
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [(True, True), (False, False), ("auto", True), ("time", True), (None, False)],
+)
+def test_stack_accepts_bools_none_and_the_v0_4_tokens(given, expected):
+    """v0.4.0 typed stack as ``str | None`` defaulting to None.
+
+    So ``stack=None`` was an ordinary way to spell "do not cube", and rejecting
+    it broke a call that had always been valid.
+    """
     from foehn.api import _stack_flag
 
     assert _stack_flag(given) is expected
 
 
-@pytest.mark.parametrize("given", ["bogus", "", 3, None])
+@pytest.mark.parametrize("given", ["bogus", "", 3])
 def test_stack_rejects_a_value_that_means_nothing(given):
     """v0.4.0 raised ValueError on an unknown token.
 

@@ -381,14 +381,18 @@ def open_dataset(
     )
 
 
-def _stack_flag(stack: bool | str) -> bool:
+def _stack_flag(stack: bool | str | None) -> bool:
     """Normalise ``stack=`` and reject a value that means nothing.
 
-    v0.4.0 took ``"auto"``/``"time"`` and raised ValueError on anything else.
-    Narrowing it to a bool made every other string truthy instead, so
-    ``stack="bogus"`` quietly cubed rather than complaining. Both v0.4.0 tokens
-    still resolve to True — the dataset's kind decides the method now.
+    v0.4.0 typed this ``str | None`` and defaulted to None, so ``stack=None``
+    was an ordinary way to spell "do not cube" — and it took ``"auto"``/``"time"``
+    and raised ValueError on anything else. Narrowing it to a bool made every
+    other string truthy instead, so ``stack="bogus"`` quietly cubed; rejecting
+    None then broke a call that had always been valid. Both v0.4.0 tokens still
+    resolve to True — the dataset's kind decides the method now.
     """
+    if stack is None:
+        return False
     if isinstance(stack, bool):
         return stack
     if stack in {"auto", "time"}:
@@ -408,7 +412,7 @@ def to_zarr(
     store: Path | str | None = None,
     rechunk: dict[str, int] | None = None,
     mode: str = "w",
-    stack: bool | str = False,
+    stack: bool | str | None = False,
 ) -> Path:
     """Materialise a gridded dataset to a Zarr store on disk.
 

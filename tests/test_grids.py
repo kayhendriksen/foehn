@@ -1036,3 +1036,58 @@ def test_revising_a_timestep_the_cube_no_longer_holds_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="no longer holds"):
         _revise_in_place(xr, ds, store, frozenset({-1}))
+
+
+def test_an_unknown_radar_mode_is_rejected_before_anything_branches_on_it(tmp_path):
+    """An unrecognised mode used to fall through to the extending path.
+
+    From there it could skip a file as already stored, or take the in-place
+    region update — both on the strength of a value that means nothing.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+
+    with pytest.raises(ValueError, match="not a Zarr write mode"):
+        cube_radar(files, store, mode="bogus")
+
+    assert xr.open_zarr(store).sizes["time"] == 2
+
+
+def test_a_restatement_that_keeps_size_and_mtime_still_reaches_the_cube(tmp_path):
+    """Metadata is reproducible; contents are the thing that changed.
+
+    A source replaced with different same-length bytes and its mtime restored is
+    indistinguishable by stat, and the revised values never reached the cube.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import os
+
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    source = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    original = source.stat()
+    store = tmp_path / "cube.zarr"
+    cube_radar([source], store, mode="w")
+    assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 1.5
+
+    write_odim_composite(source, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    # Same length, and put the timestamps back exactly as they were.
+    assert source.stat().st_size == original.st_size
+    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    cube_radar([source], store, mode="a")
+
+    assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 42.0

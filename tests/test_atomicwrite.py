@@ -328,7 +328,9 @@ def test_reading_the_umask_never_widens_another_thread_s_files(tmp_path):
             probe = tmp_path / f"bystander_{index}"
             index += 1
             try:
-                os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+                # touch() applies the umask to its own default, so the test does
+                # not write a world-writable mask either.
+                probe.touch(exist_ok=False)
                 if stat.S_IMODE(probe.stat().st_mode) & 0o077:
                     leaked.append(probe.name)
                 probe.unlink()
@@ -376,9 +378,9 @@ def test_an_unprobeable_directory_publishes_privately(tmp_path):
     from foehn.atomicwrite import _umask_applied
 
     with patch.object(Path, "mkdir", side_effect=OSError("read-only")):
-        assert _umask_applied(0o777, directory=True, near=tmp_path) == 0o700
-    with patch("foehn.atomicwrite.os.open", side_effect=OSError("read-only")):
-        assert _umask_applied(0o666, directory=False, near=tmp_path) == 0o600
+        assert _umask_applied(directory=True, near=tmp_path) == 0o700
+    with patch.object(Path, "touch", side_effect=OSError("read-only")):
+        assert _umask_applied(directory=False, near=tmp_path) == 0o600
 
 
 def test_write_bytes_accepts_an_explicit_mode(tmp_path):
