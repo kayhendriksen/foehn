@@ -9,10 +9,43 @@ from __future__ import annotations
 
 import importlib
 import os
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+_reentrant = threading.local()
+
+
+@contextmanager
+def reentrant_lock(path: Path) -> Iterator[None]:
+    """:func:`exclusive_lock`, but a thread may take it again while holding it.
+
+    A file lock is held by the *file descriptor*, so a thread that opens the
+    same lock file twice deadlocks against itself. That matters wherever one
+    scope has to cover two operations that each want the lock — acquiring a
+    grid dataset's files and then opening them, say. Nesting is counted here so
+    only the outermost scope touches the file, and other threads and processes
+    still block as they should.
+    """
+    key = str(path)
+    depths = getattr(_reentrant, "depths", None)
+    if depths is None:
+        depths = _reentrant.depths = {}
+    if depths.get(key, 0) > 0:
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
+    with exclusive_lock(path):
+        depths[key] = 1
+        try:
+            yield
+        finally:
+            depths[key] = 0
 
 
 @contextmanager
@@ -69,4 +102,4 @@ def exclusive_directory_lock(path: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-__all__ = ["exclusive_directory_lock", "exclusive_lock"]
+__all__ = ["exclusive_directory_lock", "exclusive_lock", "reentrant_lock"]

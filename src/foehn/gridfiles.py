@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from foehn._locking import exclusive_lock
+from foehn._locking import reentrant_lock
 from foehn.assets import Asset, assets_of, other_extensions
 from foehn.atomicwrite import write_text
 from foehn.collections import COLLECTIONS
@@ -88,7 +88,11 @@ def _run_datetime_filter(match: str | None) -> str | None:
 # ``rhiresd`` was ever finished — clearing the whole dataset on it released
 # exactly the files still known to be mixed.
 _INCOHERENT_MARKER = ".foehn-incoherent.json"
-_REFRESH_LOCK = ".foehn-refresh.lock"
+
+
+def _lock_path(out_dir: Path) -> Path:
+    """Where the refresh lock lives, spelled once — see Workspace.grid_refresh_lock."""
+    return out_dir / ".foehn-refresh.lock"
 
 
 @contextmanager
@@ -105,9 +109,14 @@ def _refresh_lock(out_dir: Path) -> Iterator[None]:
     Serializing a whole refresh means a second caller waits for a download it
     would otherwise have duplicated. That is the cost; the alternative is a
     Dataset assembled from two generations at once.
+
+    Reentrant, because the reader above holds this same lock across acquiring
+    the files *and* opening them: returning validated paths and only then
+    letting go left a window in which another process could refresh them before
+    the reader ever opened one.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    with exclusive_lock(out_dir / _REFRESH_LOCK):
+    with reentrant_lock(_lock_path(out_dir)):
         yield
 
 

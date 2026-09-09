@@ -90,6 +90,16 @@ class Workspace:
         """The incremental cursor the CLI advances only after a fully clean run."""
         return self.root / "_last_run.json"
 
+    def grid_refresh_lock(self, dataset: str) -> Path:
+        """Serializes one grid dataset's refresh against readers of the same files.
+
+        Named here rather than in either module that takes it: the reader and
+        the acquisition sit on opposite sides of a seam that forbids them
+        importing each other, and a lock they each spell for themselves is a
+        lock they will eventually spell differently.
+        """
+        return self.bronze(dataset) / ".foehn-refresh.lock"
+
     @property
     def state_lock(self) -> Path:
         """The short-lived lock serializing Run state transitions."""

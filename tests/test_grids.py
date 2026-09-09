@@ -7,6 +7,7 @@ import pytest
 from conftest import write_odim_composite
 
 import foehn
+from foehn import grids
 from foehn.api import open_dataset, to_zarr
 from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
@@ -1177,3 +1178,69 @@ def test_an_append_keeps_the_fingerprints_of_timesteps_it_did_not_touch(tmp_path
 
     # Both timesteps are still accounted for, so neither is rewritten next time.
     assert len(_stored_sources(store)) == 2
+
+
+def test_a_refresh_cannot_land_between_validating_the_files_and_opening_them(fetcher, tmp_path):
+    """The acquisition validates the set, then hands back paths.
+
+    Letting go of its lock at that point left the reader holding names rather
+    than files: another refresh could publish between the check and the open, and
+    open_dataset returned a Dataset mixing generations that had each been
+    coherent when checked — [101, 2] for a set that should read [1, 2].
+
+    The intruder holds foehn's own refresh lock, which is what the lock can
+    speak for. A writer that bypasses foehn entirely is outside its reach.
+    """
+    import threading
+
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    from foehn.gridfiles import _refresh_lock
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+
+    def write_grid(name, value, coord):
+        xr.Dataset({"v": ("x", np.array([value], "float64"))}, coords={"x": [coord]}).to_netcdf(
+            base / name, engine="h5netcdf"
+        )
+
+    write_grid("a_rhiresd.nc", 1.0, 0)
+    write_grid("b_rhiresd.nc", 2.0, 1)
+    fetcher.any_items = _items_for("a_rhiresd.nc", "b_rhiresd.nc")
+
+    window_open = threading.Event()
+    half_refreshed = threading.Event()
+    reader_finished = threading.Event()
+
+    def partial_refresh():
+        """A concurrent refresh, paused with one file replaced and one not."""
+        window_open.wait(timeout=5)
+        with _refresh_lock(base):
+            write_grid("a_rhiresd.nc", 101.0, 0)
+            half_refreshed.set()
+            reader_finished.wait(timeout=5)
+
+    real_open_grid = grids._open_grid
+
+    def open_after_opening_the_window(*args, **kwargs):
+        # Validated, not yet opened. Give the other refresh every chance to
+        # publish into the set before the files are opened.
+        window_open.set()
+        half_refreshed.wait(timeout=1.5)
+        return real_open_grid(*args, **kwargs)
+
+    intruder = threading.Thread(target=partial_refresh)
+    intruder.start()
+    try:
+        with patch.object(grids, "_open_grid", open_after_opening_the_window):
+            ds = open_dataset("surface_derived_grid", data_dir=tmp_path, match="rhiresd")
+        values = sorted(ds["v"].values.ravel().tolist())
+    finally:
+        reader_finished.set()
+        intruder.join(timeout=15)
+
+    # One generation, not a mix. [1.0, 101.0] is the failure this covers.
+    assert values == [1.0, 2.0]

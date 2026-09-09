@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from foehn import atomicwrite, icon, odim
+from foehn._locking import reentrant_lock
 from foehn.collections import COLLECTION_META
 from foehn.fetch import Fetcher
 from foehn.workspace import Workspace
@@ -282,18 +283,24 @@ class GridReader:
                 f'foehn.open_dataset({dataset!r}, match="{self.match_example}").'
             )
         self.require()
-        files = self.acquire(
-            dataset,
-            workspace,
-            suffixes=self.suffixes,
-            match=match,
-            max_files=self.max_files,
-            run_datetime=self.run_datetime,
-            fetcher=fetcher,
-        )
-        return select_variables(
-            self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher, engine=engine), variables
-        )
+        # The acquisition validates the set and then hands back paths. Letting go
+        # of its lock at that point left the reader holding names, not files: a
+        # refresh could land between the check and the open, and the Dataset came
+        # back mixing generations that had each been coherent when checked. Held
+        # until the files are open, after which each reader has its own handles
+        # and a later replacement cannot reach them.
+        with reentrant_lock(workspace.grid_refresh_lock(dataset)):
+            files = self.acquire(
+                dataset,
+                workspace,
+                suffixes=self.suffixes,
+                match=match,
+                max_files=self.max_files,
+                run_datetime=self.run_datetime,
+                fetcher=fetcher,
+            )
+            opened = self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher, engine=engine)
+        return select_variables(opened, variables)
 
     def write_store(
         self,
@@ -318,36 +325,40 @@ class GridReader:
                     f'stack= needs match= to scope the cube for {dataset!r}, e.g. match="{self.cube_match_example}".'
                 )
             self.require()
-            files = self.acquire(
-                dataset,
-                workspace,
-                suffixes=self.suffixes,
-                match=match,
-                max_files=self.cube_max_files,
-                run_datetime=self.run_datetime,
-                fetcher=fetcher,
-            )
-            if mode == "w":
-                with atomicwrite.staged_directory(store) as staged:
+            # Held across the cube as well as the acquisition: a cube reads every
+            # matched file, so a refresh landing part-way through builds a store
+            # from two generations exactly as a plain read would.
+            with reentrant_lock(workspace.grid_refresh_lock(dataset)):
+                files = self.acquire(
+                    dataset,
+                    workspace,
+                    suffixes=self.suffixes,
+                    match=match,
+                    max_files=self.cube_max_files,
+                    run_datetime=self.run_datetime,
+                    fetcher=fetcher,
+                )
+                if mode == "w":
+                    with atomicwrite.staged_directory(store) as staged:
+                        self.cube(
+                            files,
+                            staged,
+                            dataset=dataset,
+                            workspace=workspace,
+                            fetcher=fetcher,
+                            variables=variables,
+                            mode=mode,
+                        )
+                else:
                     self.cube(
                         files,
-                        staged,
+                        store,
                         dataset=dataset,
                         workspace=workspace,
                         fetcher=fetcher,
                         variables=variables,
                         mode=mode,
                     )
-            else:
-                self.cube(
-                    files,
-                    store,
-                    dataset=dataset,
-                    workspace=workspace,
-                    fetcher=fetcher,
-                    variables=variables,
-                    mode=mode,
-                )
             return
 
         ds = self.open_dataset(
