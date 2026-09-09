@@ -1288,20 +1288,30 @@ def test_a_lazy_read_is_not_reopened_from_a_replaced_file(fetcher, tmp_path):
         assert float(ds["v"].values[0]) == 1.0
 
 
-def test_a_snapshot_falls_back_to_the_originals_when_links_are_unavailable(tmp_path):
-    """A filesystem without hard links is one where this protection is not on offer.
+def test_a_snapshot_copies_when_hard_links_are_unavailable(tmp_path):
+    """Falling back to the originals put the race straight back, silently.
 
-    Failing the read outright would be worse than the race it protects against.
+    A filesystem without hard links still has to give the reader something that
+    cannot change underneath it, so the files are copied. It is slower, which is
+    why it says so.
     """
     from foehn.grids import _snapshot
 
     source = tmp_path / "a.nc"
-    source.write_bytes(b"payload")
+    source.write_bytes(b"generation one")
 
     with patch("foehn.grids.os.link", side_effect=OSError("not supported")):
-        assert _snapshot([source], tmp_path) == [source]
+        linked = _snapshot([source], tmp_path)
 
-    assert not list(tmp_path.glob(".foehn-snapshot-*"))
+    assert linked != [source]
+    assert linked[0].read_bytes() == b"generation one"
+
+    # The point of the snapshot: replacing the original leaves it alone.
+    replacement = tmp_path / ".staged"
+    replacement.write_bytes(b"generation two")
+    replacement.replace(source)
+
+    assert linked[0].read_bytes() == b"generation one"
 
 
 def test_stale_snapshots_are_reaped_and_live_ones_left(tmp_path):
@@ -1374,3 +1384,83 @@ def test_snapshots_are_removed_when_the_process_exits(tmp_path):
 
     assert not snapshot.exists()
     assert source.exists()  # the original is untouched
+
+
+def test_an_old_snapshot_still_in_use_is_not_deleted(tmp_path):
+    """Age is not abandonment.
+
+    A process can outlive the snapshot lifetime and still be reading through it.
+    Deleting one out from under a live Dataset turns a stale directory into a
+    FileNotFoundError in the middle of a read.
+    """
+    import os
+    import time
+
+    from foehn.grids import _reap_stale_snapshots, _snapshot, _snapshots_in_use
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+    linked = _snapshot([source], tmp_path)
+    snapshot = linked[0].parent
+
+    # Make it look long abandoned, while this process still holds it.
+    long_ago = time.time() - (48 * 60 * 60)
+    os.utime(snapshot, (long_ago, long_ago))
+
+    _reap_stale_snapshots(tmp_path)
+
+    assert snapshot.exists()
+    assert linked[0].read_bytes() == b"payload"
+
+    # Once released, the same scan takes it away.
+    for held, hold in list(_snapshots_in_use):
+        if held == snapshot:
+            hold.close()
+            _snapshots_in_use.remove((held, hold))
+    os.utime(snapshot, (long_ago, long_ago))
+    _reap_stale_snapshots(tmp_path)
+
+    assert not snapshot.exists()
+
+
+def test_a_snapshot_that_cannot_be_built_leaves_nothing_behind(tmp_path):
+    """A half-linked snapshot is not something to hand a reader, or to leave lying about."""
+    from foehn.grids import _SNAPSHOT_PREFIX, _snapshot
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with (
+        patch("foehn.grids.os.link", side_effect=OSError("no links")),
+        patch("foehn.grids.shutil.copy2", side_effect=OSError("no space")),
+        pytest.raises(OSError, match="no space"),
+    ):
+        _snapshot([source], tmp_path)
+
+    assert not list(tmp_path.glob(f"{_SNAPSHOT_PREFIX}*"))
+
+
+def test_the_time_index_skips_a_store_without_a_time_axis(tmp_path):
+    """Nothing to place, so nothing to revise."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    from foehn.grids import _cube_time_index
+
+    store = tmp_path / "no_time.zarr"
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_zarr(store, consolidated=False)
+
+    assert _cube_time_index(xr, store) == {}
+
+
+def test_rechunking_needs_dask(tmp_path):
+    """dask is not part of the 'grids' extra, and the message says so."""
+    xr = pytest.importorskip("xarray")
+    import numpy as np
+
+    from foehn.grids import _write_zarr
+
+    ds = xr.Dataset({"v": ("x", np.arange(4.0))}, coords={"x": [0, 1, 2, 3]})
+    with patch("foehn.grids._require_dask", side_effect=ImportError("no dask")), pytest.raises(ImportError):
+        _write_zarr(ds, tmp_path / "s.zarr", "w", rechunk={"x": 2})

@@ -278,3 +278,33 @@ def test_a_legacy_marker_that_cannot_be_rewritten_is_not_reported_current(tmp_pa
 
     with patch.object(atomicwrite, "write_text", side_effect=PermissionError("read-only")):
         assert materialization_current(asset, out_dir) is False
+
+
+def test_a_current_archive_is_not_materialized_again(tmp_path):
+    """The marker is what makes a repeat run cheap."""
+    import json
+
+    from foehn.assets import Asset
+    from foehn.transfer import _MATERIALIZATION_MARKER, _href_digest, materialize_archive
+
+    out_dir = tmp_path / "archive"
+    out_dir.mkdir()
+    href = "https://data.geo.admin.ch/x/bundle.zip"
+    asset = Asset(
+        href=href,
+        name="bundle.zip",
+        key="data",
+        updated="2026-01-01T00:00:00+00:00",
+        item_id="bundle",
+        time_slice=None,
+        granularity=None,
+        forecast_run=None,
+    )
+    (out_dir / _MATERIALIZATION_MARKER).write_text(
+        json.dumps({"href_sha256": _href_digest(href), "updated": asset.updated})
+    )
+
+    result = materialize_archive(asset, out_dir, fetcher=InMemoryFetcher(), force=False)
+
+    assert result.skipped == 1
+    assert result.downloaded == 0

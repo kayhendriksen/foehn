@@ -280,3 +280,16 @@ def test_compatibility_views_survive_copy_deepcopy_and_pickle():
         assert clone == COLLECTION_META
         assert type(clone) is dict
         clone["smn"] = {"mine": True}  # a copy is the caller's to change
+
+
+def test_copying_a_nested_catalogue_list_hands_back_a_plain_list():
+    """``copy.copy`` on a read-only value gives the caller something they can work with."""
+    import copy
+
+    slices = COLLECTION_META["smn"]["time_slices"]
+    clone = copy.copy(slices)
+
+    assert clone == ["historical", "recent", "now"]
+    assert type(clone) is list
+    clone.append("mine")  # the copy is theirs to change
+    assert COLLECTION_META["smn"]["time_slices"] == ["historical", "recent", "now"]

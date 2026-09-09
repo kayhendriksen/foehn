@@ -61,6 +61,17 @@ def _updated_since(items: list[dict], since: str | None) -> list[dict]:
     return kept
 
 
+def _skip_except(skip: SkipRule | None, forced: set[str]) -> SkipRule:
+    """*skip*, but never for a file whose generation is in question."""
+
+    def decide(asset: Asset, path: Path) -> bool:
+        if path.name in forced:
+            return False
+        return bool(skip(asset, path)) if skip is not None else False
+
+    return decide
+
+
 def stac_download(
     *,
     suffixes: tuple[str, ...],
@@ -161,6 +172,14 @@ def stac_download(
         # set whose members have to agree.
         names = [asset.name for asset in wanted]
         with coherence.refresh_lock(out_dir) if coherent else nullcontext():
+            # Files a previous run left half-replaced are fetched again whatever
+            # the freshness rule says. Without this a retry found both current —
+            # the collection states no ``updated``, or the half-written file's
+            # mtime is newer than it — skipped everything, called that success
+            # and cleared a marker over a cache it had not repaired.
+            forced = coherence.blocked(out_dir, names) if coherent else set()
+            run_skip = _skip_except(skip, forced) if forced else skip
+
             if coherent and len(names) > 1:
                 coherence.mark(out_dir, names)
             fetched = fetch_all(
@@ -169,10 +188,11 @@ def stac_download(
                 fetcher=fetcher,
                 workers=workers,
                 write=write,
-                skip=skip,
+                skip=run_skip,
                 etags=store,
                 label=label,
             )
+            # Only a run that finished can say the set is whole again.
             if coherent and fetched.failed == 0:
                 coherence.clear(out_dir, names)
 

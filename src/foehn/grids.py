@@ -59,9 +59,10 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import IO, TYPE_CHECKING, Protocol
 
 from foehn import atomicwrite, coherence, icon, odim
+from foehn._locking import is_held, take_hold
 from foehn.collections import COLLECTION_META
 from foehn.fetch import Fetcher
 from foehn.workspace import Workspace
@@ -140,71 +141,97 @@ def require_radar() -> None:
 # --- A stable set of files to read from ------------------------------------
 
 _SNAPSHOT_PREFIX = ".foehn-snapshot-"
+_SNAPSHOT_HOLD = ".foehn-hold.lock"
 _SNAPSHOT_STALE_AFTER = 24 * 60 * 60
+
+# (directory, open hold handle) for every snapshot this process is using. The
+# handle is what tells another process the directory is still live.
+_snapshots_in_use: list[tuple[Path, IO[bytes]]] = []
 
 
 def _reap_stale_snapshots(out_dir: Path) -> None:
-    """Remove snapshots left by a process that died before its atexit ran."""
+    """Remove snapshots nobody holds any more.
+
+    Age alone is not abandonment. A process can outlive the lifetime below and
+    still be reading through its snapshot, and deleting one out from under a
+    live Dataset turns a stale directory into a FileNotFoundError mid-read — so
+    the hold is asked first, and old-but-held snapshots are left alone.
+    """
     cutoff = time.time() - _SNAPSHOT_STALE_AFTER
     for candidate in out_dir.glob(f"{_SNAPSHOT_PREFIX}*"):
         try:
-            if candidate.stat().st_mtime < cutoff:
-                shutil.rmtree(candidate, ignore_errors=True)
+            if candidate.stat().st_mtime >= cutoff:
+                continue
+            if is_held(candidate / _SNAPSHOT_HOLD):
+                logger.debug("%s is old but still in use; leaving it", candidate.name)
+                continue
+            shutil.rmtree(candidate, ignore_errors=True)
         except OSError:
             continue
 
 
 def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
-    """Hard-link *files* into a private directory and return the links.
+    """Give the reader a set of files that cannot change underneath it.
 
-    Holding the refresh lock until the files were open was not enough. xarray
+    Holding the refresh lock until the files were open is not enough. xarray
     keeps a bounded cache of open files and *closes* the ones it evicts, then
-    reopens them **by path** on the next lazy read — so a Dataset that had been
-    opened from a coherent set still returned a later generation once its handle
-    had been evicted and the file replaced underneath.
+    reopens them **by path** on the next lazy read — so a Dataset opened from a
+    coherent set still returned a later generation once its handle had been
+    evicted and the file replaced underneath.
 
     A hard link names the inode, not the path. Publication replaces a file by
     renaming over it, which leaves the inode this link holds untouched, so a
-    reopen through the snapshot reads the same bytes it opened. No data is
-    copied; the cost is one link per file, and the old generation stays on disk
-    until the snapshot goes.
+    reopen through the snapshot reads the bytes it opened. Nothing is copied.
 
-    Falls back to reading the originals where links cannot be made — a
-    filesystem without them is a filesystem where this protection is not
-    available, and failing the read outright would be worse than the race.
+    Where the filesystem has no hard links, the files are *copied* instead.
+    Falling back to the originals was silent and put the race straight back;
+    paying for a copy is the honest price of the same guarantee, and it is
+    announced because it is slow.
     """
     _reap_stale_snapshots(out_dir)
     snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{uuid.uuid4().hex}"
+    snapshot.mkdir(mode=0o700)
+    hold = take_hold(snapshot / _SNAPSHOT_HOLD)
     try:
-        snapshot.mkdir(mode=0o700)
-        linked = []
-        for source in files:
-            link = snapshot / source.name
-            os.link(source, link)
-            linked.append(link)
-    except OSError as exc:
-        logger.debug("Could not snapshot %s (%s); reading the originals", out_dir, exc)
+        linked = [_link_or_copy(source, snapshot / source.name) for source in files]
+    except BaseException:
+        hold.close()
         shutil.rmtree(snapshot, ignore_errors=True)
-        return files
-    _snapshots_to_clean.append(snapshot)
+        raise
+    _snapshots_in_use.append((snapshot, hold))
     return linked
 
 
-_snapshots_to_clean: list[Path] = []
+def _link_or_copy(source: Path, destination: Path) -> Path:
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        logger.warning(
+            "Could not hard-link %s into a read snapshot (%s); copying instead. This is slower, and "
+            "happens on filesystems without hard links.",
+            source.name,
+            exc,
+        )
+        shutil.copy2(source, destination)
+    return destination
 
 
-@atexit.register
 def _clean_snapshots() -> None:
-    """Drop this process's snapshots on the way out.
+    """Drop this process's snapshots.
 
-    Not tied to the Dataset's lifetime: a Dataset derived from another shares its
+    Not tied to a Dataset's lifetime: a Dataset derived from another shares its
     file handles but not its identity, so collecting the original would pull the
-    files out from under the derived one. Held until exit instead, and reaped by
-    age when a process does not get that far.
+    files out from under the derived one. Released at exit instead, and reaped
+    later by a process that finds them old and unheld.
     """
-    for snapshot in _snapshots_to_clean:
+    for snapshot, hold in _snapshots_in_use:
+        with contextlib.suppress(Exception):
+            hold.close()
         shutil.rmtree(snapshot, ignore_errors=True)
-    _snapshots_to_clean.clear()
+    _snapshots_in_use.clear()
+
+
+atexit.register(_clean_snapshots)
 
 
 # --- The adapter -----------------------------------------------------------
