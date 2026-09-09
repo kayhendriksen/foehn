@@ -125,6 +125,7 @@ _download_netcdf = stac_download(
     # Read and explicit download paths share the same freshness rule. If an
     # upstream asset is restated under its old name, both paths refresh it.
     skip=already_current,
+    coherent=True,
 )
 
 # The ephemeral collections only ever want the newest page, and MeteoSwiss
@@ -136,6 +137,7 @@ _download_grib2 = stac_download(
     label="binary file",
     skip=already_current,
     max_items=100,
+    coherent=True,
 )
 
 _download_radar = stac_download(
@@ -144,6 +146,7 @@ _download_radar = stac_download(
     label="binary file",
     skip=already_current,
     max_items=100,
+    coherent=True,
 )
 
 

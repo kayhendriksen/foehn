@@ -47,17 +47,21 @@ into memory) is future work.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import hashlib
 import logging
+import os
+import shutil
+import time
+import uuid
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from foehn import atomicwrite, icon, odim
-from foehn._locking import reentrant_lock
+from foehn import atomicwrite, coherence, icon, odim
 from foehn.collections import COLLECTION_META
 from foehn.fetch import Fetcher
 from foehn.workspace import Workspace
@@ -131,6 +135,76 @@ def require_radar() -> None:
             "'grids' dependencies. Install them with:\n\n"
             '  pip install "foehn[grids]"\n'
         ) from exc
+
+
+# --- A stable set of files to read from ------------------------------------
+
+_SNAPSHOT_PREFIX = ".foehn-snapshot-"
+_SNAPSHOT_STALE_AFTER = 24 * 60 * 60
+
+
+def _reap_stale_snapshots(out_dir: Path) -> None:
+    """Remove snapshots left by a process that died before its atexit ran."""
+    cutoff = time.time() - _SNAPSHOT_STALE_AFTER
+    for candidate in out_dir.glob(f"{_SNAPSHOT_PREFIX}*"):
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                shutil.rmtree(candidate, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
+    """Hard-link *files* into a private directory and return the links.
+
+    Holding the refresh lock until the files were open was not enough. xarray
+    keeps a bounded cache of open files and *closes* the ones it evicts, then
+    reopens them **by path** on the next lazy read — so a Dataset that had been
+    opened from a coherent set still returned a later generation once its handle
+    had been evicted and the file replaced underneath.
+
+    A hard link names the inode, not the path. Publication replaces a file by
+    renaming over it, which leaves the inode this link holds untouched, so a
+    reopen through the snapshot reads the same bytes it opened. No data is
+    copied; the cost is one link per file, and the old generation stays on disk
+    until the snapshot goes.
+
+    Falls back to reading the originals where links cannot be made — a
+    filesystem without them is a filesystem where this protection is not
+    available, and failing the read outright would be worse than the race.
+    """
+    _reap_stale_snapshots(out_dir)
+    snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{uuid.uuid4().hex}"
+    try:
+        snapshot.mkdir(mode=0o700)
+        linked = []
+        for source in files:
+            link = snapshot / source.name
+            os.link(source, link)
+            linked.append(link)
+    except OSError as exc:
+        logger.debug("Could not snapshot %s (%s); reading the originals", out_dir, exc)
+        shutil.rmtree(snapshot, ignore_errors=True)
+        return files
+    _snapshots_to_clean.append(snapshot)
+    return linked
+
+
+_snapshots_to_clean: list[Path] = []
+
+
+@atexit.register
+def _clean_snapshots() -> None:
+    """Drop this process's snapshots on the way out.
+
+    Not tied to the Dataset's lifetime: a Dataset derived from another shares its
+    file handles but not its identity, so collecting the original would pull the
+    files out from under the derived one. Held until exit instead, and reaped by
+    age when a process does not get that far.
+    """
+    for snapshot in _snapshots_to_clean:
+        shutil.rmtree(snapshot, ignore_errors=True)
+    _snapshots_to_clean.clear()
 
 
 # --- The adapter -----------------------------------------------------------
@@ -289,7 +363,8 @@ class GridReader:
         # back mixing generations that had each been coherent when checked. Held
         # until the files are open, after which each reader has its own handles
         # and a later replacement cannot reach them.
-        with reentrant_lock(workspace.grid_refresh_lock(dataset)):
+        out_dir = workspace.bronze(dataset)
+        with coherence.refresh_lock(out_dir):
             files = self.acquire(
                 dataset,
                 workspace,
@@ -299,7 +374,11 @@ class GridReader:
                 run_datetime=self.run_datetime,
                 fetcher=fetcher,
             )
-            opened = self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher, engine=engine)
+            # Snapshotted, not merely opened: see _snapshot. The lock covers
+            # taking it, so the set it links is the set that was validated.
+            opened = self.open(
+                _snapshot(files, out_dir), dataset=dataset, workspace=workspace, fetcher=fetcher, engine=engine
+            )
         return select_variables(opened, variables)
 
     def write_store(
@@ -328,7 +407,7 @@ class GridReader:
             # Held across the cube as well as the acquisition: a cube reads every
             # matched file, so a refresh landing part-way through builds a store
             # from two generations exactly as a plain read would.
-            with reentrant_lock(workspace.grid_refresh_lock(dataset)):
+            with coherence.refresh_lock(workspace.bronze(dataset)):
                 files = self.acquire(
                     dataset,
                     workspace,

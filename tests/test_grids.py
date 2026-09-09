@@ -1197,7 +1197,7 @@ def test_a_refresh_cannot_land_between_validating_the_files_and_opening_them(fet
     pytest.importorskip("h5netcdf")
     import numpy as np
 
-    from foehn.gridfiles import _refresh_lock
+    from foehn import coherence
 
     base = tmp_path / "bronze" / "surface_derived_grid"
     base.mkdir(parents=True)
@@ -1218,7 +1218,7 @@ def test_a_refresh_cannot_land_between_validating_the_files_and_opening_them(fet
     def partial_refresh():
         """A concurrent refresh, paused with one file replaced and one not."""
         window_open.wait(timeout=5)
-        with _refresh_lock(base):
+        with coherence.refresh_lock(base):
             write_grid("a_rhiresd.nc", 101.0, 0)
             half_refreshed.set()
             reader_finished.wait(timeout=5)
@@ -1244,3 +1244,133 @@ def test_a_refresh_cannot_land_between_validating_the_files_and_opening_them(fet
 
     # One generation, not a mix. [1.0, 101.0] is the failure this covers.
     assert values == [1.0, 2.0]
+
+
+def test_a_lazy_read_is_not_reopened_from_a_replaced_file(fetcher, tmp_path):
+    """xarray closes evicted handles and reopens them by path.
+
+    So holding the refresh lock until the files were open was not enough: once a
+    handle is evicted from xarray's bounded file cache, the next lazy read goes
+    back to the path, and a file replaced in the meantime is what it finds. The
+    snapshot is hard-linked, and a hard link names the inode rather than the
+    path.
+    """
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+
+    def write_grid(path, value):
+        xr.Dataset({"v": ("x", np.array([value] * 4, "float64"))}, coords={"x": [0, 1, 2, 3]}).to_netcdf(
+            path, engine="h5netcdf"
+        )
+
+    write_grid(base / "a_rhiresd.nc", 1.0)
+    fetcher.any_items = _items_for("a_rhiresd.nc")
+
+    with xr.set_options(file_cache_maxsize=1):
+        ds = open_dataset("surface_derived_grid", data_dir=tmp_path, match="rhiresd")
+
+        # Evict this dataset's handle by opening and touching another file.
+        other = tmp_path / "other.nc"
+        write_grid(other, 999.0)
+        evictor = xr.open_dataset(other)
+        _ = evictor["v"].values
+
+        # A new generation lands at the original path, exactly as a refresh
+        # publishes one: staged alongside, then renamed over.
+        staged = base / ".staged.nc"
+        write_grid(staged, 101.0)
+        staged.replace(base / "a_rhiresd.nc")
+
+        assert float(ds["v"].values[0]) == 1.0
+
+
+def test_a_snapshot_falls_back_to_the_originals_when_links_are_unavailable(tmp_path):
+    """A filesystem without hard links is one where this protection is not on offer.
+
+    Failing the read outright would be worse than the race it protects against.
+    """
+    from foehn.grids import _snapshot
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with patch("foehn.grids.os.link", side_effect=OSError("not supported")):
+        assert _snapshot([source], tmp_path) == [source]
+
+    assert not list(tmp_path.glob(".foehn-snapshot-*"))
+
+
+def test_stale_snapshots_are_reaped_and_live_ones_left(tmp_path):
+    """A process that dies before atexit leaves its links behind.
+
+    They hold the superseded generation's inodes alive, so they are reaped by
+    age — but only once no reader could still be using them.
+    """
+    import os
+    import time
+
+    from foehn.grids import _SNAPSHOT_PREFIX, _reap_stale_snapshots
+
+    stale = tmp_path / f"{_SNAPSHOT_PREFIX}dead"
+    fresh = tmp_path / f"{_SNAPSHOT_PREFIX}live"
+    for snapshot in (stale, fresh):
+        snapshot.mkdir()
+        (snapshot / "a.nc").write_bytes(b"payload")
+    long_ago = time.time() - (48 * 60 * 60)
+    os.utime(stale, (long_ago, long_ago))
+
+    _reap_stale_snapshots(tmp_path)
+
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_reaping_tolerates_a_snapshot_disappearing_mid_scan(tmp_path):
+    """Another process's atexit can win the race between the glob and the stat."""
+    from pathlib import Path
+
+    from foehn.grids import _SNAPSHOT_PREFIX, _reap_stale_snapshots
+
+    vanishing = tmp_path / f"{_SNAPSHOT_PREFIX}vanishing"
+    vanishing.mkdir()
+
+    real_stat = Path.stat
+
+    def stat_that_loses_the_race(self, *args, **kwargs):
+        if self.name.startswith(_SNAPSHOT_PREFIX):
+            raise OSError("gone")
+        return real_stat(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", stat_that_loses_the_race):
+        _reap_stale_snapshots(tmp_path)  # must not raise
+
+    assert vanishing.exists()
+
+
+def test_snapshots_are_removed_when_the_process_exits(tmp_path):
+    """Held until exit rather than tied to a Dataset's lifetime.
+
+    A Dataset derived from another shares its file handles but not its identity,
+    so cleaning up when the original is collected would pull the files out from
+    under the derived one.
+    """
+    from foehn import grids as grids_mod
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    linked = grids_mod._snapshot([source], tmp_path)
+    snapshot = linked[0].parent
+
+    assert snapshot.exists()
+    assert linked[0].read_bytes() == b"payload"
+    assert linked[0] != source
+
+    grids_mod._clean_snapshots()
+
+    assert not snapshot.exists()
+    assert source.exists()  # the original is untouched

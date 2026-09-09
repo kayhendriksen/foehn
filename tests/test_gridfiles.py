@@ -584,63 +584,6 @@ def test_a_corrupt_marker_blocks_rather_than_fails_open(tmp_path):
         ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=offline)
 
 
-def test_concurrent_marker_updates_do_not_lose_entries(tmp_path):
-    """Two failed refreshes for different matches each record their own names."""
-    import threading
-
-    from foehn.gridfiles import _mark_incoherent, _read_incoherent, _refresh_lock
-
-    out_dir = tmp_path / "bronze" / "surface_derived_grid"
-    out_dir.mkdir(parents=True)
-    start = threading.Barrier(2)
-
-    def record(names):
-        start.wait()
-        for _ in range(20):
-            with _refresh_lock(out_dir):
-                _mark_incoherent(out_dir, names)
-
-    threads = [
-        threading.Thread(target=record, args=(["a_rhiresd.nc", "b_rhiresd.nc"],)),
-        threading.Thread(target=record, args=(["c_tabsd.nc", "d_tabsd.nc"],)),
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    assert _read_incoherent(out_dir) == {"a_rhiresd.nc", "b_rhiresd.nc", "c_tabsd.nc", "d_tabsd.nc"}
-
-
-@pytest.mark.parametrize(
-    "content",
-    ['{"pending": "not-a-list"}', "[]", '"just a string"', "{ truncated"],
-)
-def test_a_marker_that_cannot_be_understood_blocks(tmp_path, content):
-    """Every unreadable shape has to fail closed, not just invalid JSON."""
-    from foehn.gridfiles import _read_incoherent
-
-    out_dir = tmp_path / "bronze" / "surface_derived_grid"
-    out_dir.mkdir(parents=True)
-    (out_dir / ".foehn-incoherent.json").write_text(content)
-
-    assert _read_incoherent(out_dir) is None
-
-
-def test_clearing_leaves_an_unreadable_marker_alone(tmp_path):
-    """Replacing it with a guess would release whatever it was protecting."""
-    from foehn.gridfiles import _clear_incoherent
-
-    out_dir = tmp_path / "bronze" / "surface_derived_grid"
-    out_dir.mkdir(parents=True)
-    marker = out_dir / ".foehn-incoherent.json"
-    marker.write_text("{ truncated")
-
-    _clear_incoherent(out_dir, ["a_rhiresd.nc"])
-
-    assert marker.read_text() == "{ truncated"
-
-
 def test_a_failed_refresh_keeps_its_mark_rather_than_guessing(tmp_path):
     """A refresh that did not finish cannot say whether it left the set mixed.
 
@@ -722,39 +665,6 @@ def test_overlapping_refreshes_of_one_match_never_interleave(tmp_path):
     assert first.read_bytes() == second.read_bytes()
     assert first.read_bytes() in (b"BBBB", b"CCCC")
     assert not (out_dir / ".foehn-incoherent.json").exists()
-
-
-def test_an_unreadable_marker_file_blocks_like_a_corrupt_one(tmp_path):
-    """A marker we cannot even open is state we do not know."""
-    from unittest.mock import patch
-
-    from foehn.gridfiles import _read_incoherent
-
-    out_dir = tmp_path / "bronze" / "surface_derived_grid"
-    out_dir.mkdir(parents=True)
-    (out_dir / ".foehn-incoherent.json").write_text('{"pending": ["a.nc"]}')
-
-    with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
-        assert _read_incoherent(out_dir) is None
-
-
-def test_marking_does_not_overwrite_a_marker_it_cannot_read(tmp_path):
-    """Merging into an unreadable marker turns "unknown" into a tidy empty set.
-
-    An unrelated successful refresh then deletes that set, releasing the files
-    the unreadable marker was protecting.
-    """
-    from foehn.gridfiles import _mark_incoherent, _refresh_lock
-
-    out_dir = tmp_path / "bronze" / "surface_derived_grid"
-    out_dir.mkdir(parents=True)
-    marker = out_dir / ".foehn-incoherent.json"
-    marker.write_text("{ truncated")
-
-    with _refresh_lock(out_dir):
-        _mark_incoherent(out_dir, ["a_rhiresd.nc"])
-
-    assert marker.read_text() == "{ truncated"
 
 
 def test_a_failed_refresh_with_a_file_missing_raises_the_original(tmp_path):

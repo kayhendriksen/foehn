@@ -13,18 +13,14 @@ means a model run are all facts about the kind, stated there.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import warnings
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from foehn._locking import reentrant_lock
+from foehn import coherence
 from foehn.assets import Asset, assets_of, other_extensions
-from foehn.atomicwrite import write_text
 from foehn.collections import COLLECTIONS
 from foehn.fetch import Fetcher, FetchError
 from foehn.transfer import already_current, fetch_all
@@ -83,120 +79,6 @@ def _run_datetime_filter(match: str | None) -> str | None:
 # changed since *it* started, and hand it back as complete — and an attempt that
 # cannot reach the listing at all has no Asset metadata to judge coherence with.
 #
-# Named files, not a dataset-wide flag. One collection holds many independent
-# parameter sets, and a completed ``tabs`` refresh says nothing about whether
-# ``rhiresd`` was ever finished — clearing the whole dataset on it released
-# exactly the files still known to be mixed.
-_INCOHERENT_MARKER = ".foehn-incoherent.json"
-
-
-def _lock_path(out_dir: Path) -> Path:
-    """Where the refresh lock lives, spelled once — see Workspace.grid_refresh_lock."""
-    return out_dir / ".foehn-refresh.lock"
-
-
-@contextmanager
-def _refresh_lock(out_dir: Path) -> Iterator[None]:
-    """Hold one dataset's refresh for its whole lifecycle.
-
-    Not just the marker's read-modify-write. Two refreshes of the *same* match
-    each checked coherence, each downloaded, and each published into the same
-    directory — interleaving their writes into a set neither one would have
-    produced, then both clearing the marker on the way out. An offline reader
-    could likewise pass the coherence check and return paths a refresh
-    republished while it was deciding.
-
-    Serializing a whole refresh means a second caller waits for a download it
-    would otherwise have duplicated. That is the cost; the alternative is a
-    Dataset assembled from two generations at once.
-
-    Reentrant, because the reader above holds this same lock across acquiring
-    the files *and* opening them: returning validated paths and only then
-    letting go left a window in which another process could refresh them before
-    the reader ever opened one.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with reentrant_lock(_lock_path(out_dir)):
-        yield
-
-
-def _read_incoherent(out_dir: Path) -> set[str] | None:
-    """Which files a previous run left at an unknown generation.
-
-    None means the marker exists but cannot be understood. That is not the same
-    as "nothing pending": a marker truncated by the crash it was recording would
-    otherwise fail open and release the very files it was written to protect.
-    """
-    marker = out_dir / _INCOHERENT_MARKER
-    try:
-        raw = marker.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return set()
-    except OSError:
-        return None
-    try:
-        recorded = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(recorded, dict):
-        return None
-    pending = recorded.get("pending")
-    if not isinstance(pending, list):
-        return None
-    return {str(name) for name in pending}
-
-
-def _write_incoherent(out_dir: Path, names: set[str]) -> None:
-    marker = out_dir / _INCOHERENT_MARKER
-    if not names:
-        marker.unlink(missing_ok=True)
-        return
-    write_text(marker, json.dumps({"pending": sorted(names)}, indent=2))
-
-
-def _mark_incoherent(out_dir: Path, names: list[str]) -> None:
-    """Record that these files may be at different generations from each other.
-
-    Written *before* the fetch, not after the failure. A process killed outright
-    between publishing one file and the next never reaches an exception handler,
-    and the set it leaves behind is exactly the one this is for. The cost is one
-    small write per refresh that actually has something to download.
-
-    Callers hold :func:`_refresh_lock`.
-    """
-    known = _read_incoherent(out_dir)
-    if known is None:
-        # Unreadable, and an unreadable marker already blocks everything it
-        # could name. Merging into it would turn "state unknown" into a tidy
-        # empty set that the next successful refresh of *any* set then deletes,
-        # releasing the files it was protecting.
-        return
-    _write_incoherent(out_dir, known | set(names))
-
-
-def _clear_incoherent(out_dir: Path, names: list[str]) -> None:
-    """Release only the files this run actually brought to one generation.
-
-    Callers hold :func:`_refresh_lock`, and reach here only after a refresh that
-    completed. A failed refresh never clears: whether it left the set mixed is
-    exactly what it cannot answer.
-    """
-    pending = _read_incoherent(out_dir)
-    if pending is None:
-        # Unreadable: leave it alone rather than replace it with a guess.
-        return
-    if pending & set(names):
-        _write_incoherent(out_dir, pending - set(names))
-
-
-def _blocked_names(out_dir: Path, names: list[str]) -> set[str]:
-    """The subset of *names* a previous run recorded as being at an unknown generation."""
-    pending = _read_incoherent(out_dir)
-    if pending is None:
-        return set(names)  # unreadable marker blocks everything it could have named
-    return pending & set(names)
-
-
 def _raise_if_incoherent(dataset: str, out_dir: Path, names: list[str]) -> None:
     """Refuse to *hand back* files a previous run recorded as mixed.
 
@@ -204,12 +86,12 @@ def _raise_if_incoherent(dataset: str, out_dir: Path, names: list[str]) -> None:
     that blocked the refresh too would make the mix permanent, since finishing
     the download is exactly what repairs it.
     """
-    blocked = _blocked_names(out_dir, names)
-    if not blocked:
+    stuck = coherence.blocked(out_dir, names)
+    if not stuck:
         return
     raise FetchError(
         f"The local cache for {dataset!r} mixes file generations: a previous refresh failed part-way "
-        f"through and {len(blocked)} of these file(s) were never completed. It is not safe to read. "
+        f"through and {len(stuck)} of these file(s) were never completed. It is not safe to read. "
         f"Re-run with the collection reachable to finish the refresh, or delete {out_dir} to start clean."
     )
 
@@ -276,7 +158,7 @@ def ensure_grid_files(
     # marker, and the decision to hand paths back — happens under one lock. The
     # checks are only worth anything if the set cannot change between making them
     # and returning.
-    with _refresh_lock(out_dir):
+    with coherence.refresh_lock(out_dir):
         return _refresh(
             dataset,
             out_dir,
@@ -298,7 +180,7 @@ def _refresh(
     run_datetime: bool,
     fetcher: Fetcher,
 ) -> list[Path]:
-    """One dataset's refresh, with :func:`_refresh_lock` held throughout."""
+    """One dataset's refresh, with :func:`coherence.refresh_lock` held throughout."""
     local = sorted(f for s in suffixes for f in out_dir.glob(f"*{s}"))
 
     sfx = "/".join(suffixes)
@@ -352,7 +234,7 @@ def _refresh(
     # — or states it in a form that will not parse — every local file counts as
     # current, the refresh skips the lot, and clearing the marker on that
     # "success" released the mix untouched.
-    forced = _blocked_names(out_dir, names)
+    forced = coherence.blocked(out_dir, names)
     skip = (
         already_current
         if not forced
@@ -365,7 +247,7 @@ def _refresh(
     refreshing = [asset.name for asset in matched if not skip(asset, out_dir / asset.name)]
     marked = len(matched) > 1 and bool(refreshing)
     if marked:
-        _mark_incoherent(out_dir, names)
+        coherence.mark(out_dir, names)
 
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
     # grid read cannot proceed on a partial set, so the first failure is fatal.
@@ -408,7 +290,7 @@ def _refresh(
     # Every file in *this* set is now at one generation. Files outside it stay
     # marked: finishing ``tabs`` says nothing about whether ``rhiresd`` ever
     # completed.
-    _clear_incoherent(out_dir, names)
+    coherence.clear(out_dir, names)
     return sorted(set(cached))
 
 

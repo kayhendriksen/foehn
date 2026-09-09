@@ -503,3 +503,71 @@ def test_indoor_zip_reports_nothing_when_the_collection_has_no_archive(tmp_path)
 
     assert result == DownloadResult()
     assert fake.streams == []
+
+
+def test_a_partial_grid_download_records_the_mix_it_leaves(tmp_path):
+    """foehn.download() writes into the directory a grid read opens from.
+
+    It replaces several files one at a time, so it has the same middle a refresh
+    for a read has — and while only the read path spoke the coherence protocol,
+    a download running beside it produced exactly that mixed set with nothing on
+    disk to say so.
+    """
+    from foehn import coherence, registry
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    first, second = out_dir / "a_rhiresd.nc", out_dir / "b_rhiresd.nc"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+
+    hrefs = [f"https://data.geo.admin.ch/x/{p.name}" for p in (first, second)]
+    fake = InMemoryFetcher()
+    fake.any_items = [
+        {"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs
+    ]
+    fake.default_body = b"generation two"
+    fake.fail(hrefs[1])
+
+    registry.download(
+        "surface_derived_grid",
+        Workspace(tmp_path),
+        time_slice=["recent"],
+        since=None,
+        workers=1,
+        force=False,
+        fetcher=fake,
+    )
+
+    # The download left a set it cannot vouch for, and said so.
+    assert coherence.blocked(out_dir, [first.name, second.name])
+
+
+def test_a_complete_grid_download_leaves_nothing_marked(tmp_path):
+    from foehn import coherence, registry
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    names = ["a_rhiresd.nc", "b_rhiresd.nc"]
+    for name in names:
+        (out_dir / name).write_bytes(b"generation one")
+
+    hrefs = [f"https://data.geo.admin.ch/x/{n}" for n in names]
+    fake = InMemoryFetcher()
+    fake.any_items = [
+        {"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs
+    ]
+    fake.default_body = b"generation two"
+
+    registry.download(
+        "surface_derived_grid",
+        Workspace(tmp_path),
+        time_slice=["recent"],
+        since=None,
+        workers=1,
+        force=False,
+        fetcher=fake,
+    )
+
+    assert not coherence.blocked(out_dir, names)
+    assert not (out_dir / coherence.MARKER).exists()
