@@ -223,7 +223,17 @@ def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
     Falling back to the originals was silent and put the race straight back;
     paying for a copy is the honest price of the same guarantee, and it is
     announced because it is slow.
+
+    Resolved once, here, before it names anything: ``out_dir`` reaches this
+    function as whatever spelling its caller used, and the ownership hold and
+    the reuse cache both key on it directly. Two spellings of one directory
+    otherwise look like two directories — worse, a second hold on the same
+    real directory opens a fresh handle on the same lock file and flocks it
+    against the handle this process already holds, so ``take_hold`` raises
+    ``BlockingIOError`` locking against itself rather than recognizing it
+    already owns the directory.
     """
+    out_dir = out_dir.resolve()
     _reap_stale_snapshots(out_dir)
 
     key = _inode_key(out_dir, files)

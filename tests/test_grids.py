@@ -1449,6 +1449,33 @@ def test_one_descriptor_serves_every_read_in_a_directory(tmp_path):
         assert len(list(descriptors.iterdir())) - before <= 2
 
 
+def test_equivalent_path_spellings_do_not_lock_against_each_other(tmp_path):
+    """A second read naming the same directory a different way must not self-deadlock.
+
+    ``take_hold`` opens a fresh file descriptor per call; flock's exclusivity is
+    per *open file description*, so a process that already holds a directory's
+    lock blocks against its own second descriptor the instant it reopens the
+    same lock file under a different spelling — non-blocking, so it surfaces as
+    ``BlockingIOError`` rather than a hang. Resolving ``out_dir`` before it is
+    used as a hold/cache key means the second read recognizes the directory it
+    already owns instead of racing itself for the same lock.
+    """
+    from foehn.grids import _clean_snapshots, _holds, _snapshot
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+    (tmp_path / "sub").mkdir()
+
+    equivalent = tmp_path / "sub" / ".."
+
+    first = _snapshot([source], tmp_path)
+    second = _snapshot([source], equivalent)
+
+    assert first == second
+    assert len(_holds) == 1
+
+
 def test_reads_of_the_same_inodes_share_one_snapshot(tmp_path):
     """Otherwise a loop over unchanged files leaves a directory per pass,
     each one pinning the generation it linked."""
