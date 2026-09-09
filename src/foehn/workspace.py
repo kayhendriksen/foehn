@@ -50,13 +50,20 @@ class Workspace:
         The one rule. A caller that passes ``data_dir`` is answered exactly; a
         caller that passes nothing gets ``$FOEHN_DATA_DIR`` whether it reached
         foehn through the CLI or through the Python API.
+
+        Resolved (symlinks followed, ``.``/``..`` collapsed) so that two spellings
+        of the same directory — a relative path here, an absolute or symlinked one
+        there — produce the same root. Every ownership and cache lock foehn takes
+        is filed under a path derived from this one; leaving it unresolved lets a
+        process lock against itself the moment it opens the same directory twice
+        under different spellings.
         """
         if data_dir is not None:
-            return cls(Path(data_dir))
+            return cls(Path(data_dir).resolve())
         env_dir = os.environ.get(DATA_DIR_ENV)
         if env_dir:
-            return cls(Path(env_dir))
-        return cls(Path.cwd().joinpath(*DEFAULT_ROOT))
+            return cls(Path(env_dir).resolve())
+        return cls(Path.cwd().joinpath(*DEFAULT_ROOT).resolve())
 
     def bronze(self, dataset: str | None = None) -> Path:
         """The raw download cache, or one dataset's folder inside it."""

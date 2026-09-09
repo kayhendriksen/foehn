@@ -14,8 +14,10 @@ which are :mod:`foehn.state` and :mod:`foehn.archives` now.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 
+from foehn import coherence
 from foehn.assets import Asset, assets_of, collection_assets, latest_run_of, select
 from foehn.collections import CLIMATE_NORMALS_ZIP_URL, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
@@ -59,6 +61,17 @@ def _updated_since(items: list[dict], since: str | None) -> list[dict]:
     return kept
 
 
+def _skip_except(skip: SkipRule | None, forced: set[str]) -> SkipRule:
+    """*skip*, but never for a file whose generation is in question."""
+
+    def decide(asset: Asset, path: Path) -> bool:
+        if path.name in forced:
+            return False
+        return bool(skip(asset, path)) if skip is not None else False
+
+    return decide
+
+
 def stac_download(
     *,
     suffixes: tuple[str, ...],
@@ -71,6 +84,7 @@ def stac_download(
     time_sliced: bool = False,
     latest_run: bool = False,
     with_metadata: bool = False,
+    coherent: bool = False,
 ):
     """Build the download adapter for a kind whose assets come from a STAC listing.
 
@@ -101,6 +115,10 @@ def stac_download(
             at ~30 MB, and the retained window is ~40 of them.
         with_metadata: Whether the collection-level metadata files are fetched
             in the same pass and reported as one result.
+        coherent: Whether this kind's files are read as a *set*, so a half-done
+            replacement of one member spoils the rest. True for the grid kinds,
+            whose readers open several files as one Dataset; false for the CSV
+            kinds, which are converted before anything reads them.
     """
 
     def download(
@@ -145,16 +163,38 @@ def stac_download(
         # so the ETag store is this kind's skip rule.
         etag_run = EtagRun.begin(workspace) if etags else None
         store = etag_run.values if etag_run is not None else None
-        fetched = fetch_all(
-            wanted,
-            out_dir,
-            fetcher=fetcher,
-            workers=workers,
-            write=write,
-            skip=skip,
-            etags=store,
-            label=label,
-        )
+
+        # The same coherence protocol the read path speaks. This writes into the
+        # very directory a grid read opens from, and replacing several files one
+        # at a time has a middle — so a download running beside a read used to
+        # produce a mixed set with nothing on disk to say so. Grid kinds only:
+        # the CSV kinds are converted before anything reads them, and there is no
+        # set whose members have to agree.
+        names = [asset.name for asset in wanted]
+        with coherence.refresh_lock(out_dir) if coherent else nullcontext():
+            # Files a previous run left half-replaced are fetched again whatever
+            # the freshness rule says. Without this a retry found both current —
+            # the collection states no ``updated``, or the half-written file's
+            # mtime is newer than it — skipped everything, called that success
+            # and cleared a marker over a cache it had not repaired.
+            forced = coherence.blocked(out_dir, names) if coherent else set()
+            run_skip = _skip_except(skip, forced) if forced else skip
+
+            if coherent and len(names) > 1:
+                coherence.mark(out_dir, names)
+            fetched = fetch_all(
+                wanted,
+                out_dir,
+                fetcher=fetcher,
+                workers=workers,
+                write=write,
+                skip=run_skip,
+                etags=store,
+                label=label,
+            )
+            # Only a run that finished can say the set is whole again.
+            if coherent and fetched.failed == 0:
+                coherence.clear(out_dir, names)
 
         if etag_run is not None:
             # Only on a clean full listing: with ``since`` the item list is

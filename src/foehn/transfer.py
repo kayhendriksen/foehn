@@ -21,6 +21,7 @@ one meaning, and ``downloaded + skipped + failed == total_assets`` holds.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Callable, Iterable
@@ -156,6 +157,16 @@ def csv_to_disk(fetcher: Fetcher, asset: Asset, path: Path, etag: str | None) ->
 _MATERIALIZATION_MARKER = ".foehn-complete.json"
 
 
+def _href_digest(href: str) -> str:
+    """Identify a source URL without keeping it.
+
+    The marker only ever compares this for equality, and the URL it used to hold
+    verbatim can carry a query token. A digest answers the same question and
+    leaves no credential on disk.
+    """
+    return hashlib.sha256(href.encode("utf-8")).hexdigest()
+
+
 def materialization_current(asset: Asset, out_dir: Path) -> bool:
     """Whether ``out_dir`` is a complete materialization of this Archive Asset."""
     marker = out_dir / _MATERIALIZATION_MARKER
@@ -163,9 +174,42 @@ def materialization_current(asset: Asset, out_dir: Path) -> bool:
         recorded = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    if not isinstance(recorded, dict) or recorded.get("href") != asset.href:
+    if not isinstance(recorded, dict):
         return False
-    return not asset.updated or recorded.get("updated") == asset.updated
+    # "href" is the pre-0.5 spelling. Still honoured on read so an existing
+    # workspace is not re-downloaded; only ever written as a digest.
+    legacy = recorded.get("href") == asset.href
+    if not (recorded.get("href_sha256") == _href_digest(asset.href) or legacy):
+        return False
+    if asset.updated and recorded.get("updated") != asset.updated:
+        return False
+    if legacy:
+        # Accepting it is not enough: the URL it holds can carry a query token,
+        # and it was written world-readable. Rewrite it before saying "current",
+        # so the credential stops being at rest the first time we look at it.
+        # If that rewrite fails, the token is still there — swallowing the error
+        # and reporting "current" would leave it there for good, so report not
+        # current instead and let the archive be materialized again.
+        return _migrate_marker(marker, asset)
+    return True
+
+
+def _migrate_marker(marker: Path, asset: Asset) -> bool:
+    """Replace a pre-0.5 marker with the digest schema, privately."""
+    try:
+        atomicwrite.write_text(
+            marker,
+            json.dumps({"href_sha256": _href_digest(asset.href), "updated": asset.updated}, sort_keys=True),
+            mode=atomicwrite.PRIVATE_FILE_MODE,
+        )
+    except OSError:
+        logger.warning(
+            "Could not rewrite the legacy materialization marker at %s, which holds the source URL "
+            "verbatim. Treating the archive as not materialized so it is written afresh.",
+            marker,
+        )
+        return False
+    return True
 
 
 def materialize_archive(
@@ -197,7 +241,8 @@ def materialize_archive(
         safe_extract(staged_dir / asset.name, staged_dir)
         atomicwrite.write_text(
             staged_dir / _MATERIALIZATION_MARKER,
-            json.dumps({"href": asset.href, "updated": asset.updated}, sort_keys=True),
+            json.dumps({"href_sha256": _href_digest(asset.href), "updated": asset.updated}, sort_keys=True),
+            mode=atomicwrite.PRIVATE_FILE_MODE,
         )
     return result
 
