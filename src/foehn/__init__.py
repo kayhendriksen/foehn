@@ -13,11 +13,19 @@ except Exception as exc:
         '  pip install "foehn[databricks]"   # or: pip install polars-lts-cpu\n'
     ) from exc
 
+# Imported for its side effect: binding ``foehn.client`` on the package, so the
+# v0.4.0 spelling ``import foehn; foehn.client.load_last_run(...)`` resolves. A
+# submodule is not an attribute of its package until something imports it, and
+# v0.4.0's __init__ imported client for its own reasons — so the documented
+# usage worked there and raised AttributeError here. The shim itself is
+# deprecated; see foehn/client.py.
+from foehn import client as client
 from foehn.api import (
     download,
     inventory,
     list_datasets,
     load,
+    metadata,
     open_dataset,
     parameters,
     stations,
@@ -29,10 +37,12 @@ from foehn.transfer import DownloadResult
 __all__ = [
     "DownloadResult",
     "__version__",
+    "client",
     "download",
     "inventory",
     "list_datasets",
     "load",
+    "metadata",
     "open_dataset",
     "parameters",
     "stations",

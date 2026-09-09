@@ -537,3 +537,32 @@ def test_named_datasets_are_used_as_given(tmp_path):
     mocks = _run("to-parquet", ["smn", "radar_precip"], tmp_path)
 
     assert _converted(mocks) == ["smn", "radar_precip"]
+
+
+@pytest.mark.parametrize(
+    ("argv_stack", "expected"),
+    [
+        (["--stack"], True),
+        (["--stack", "time"], True),
+        (["--stack", "auto"], True),
+        ([], False),
+    ],
+)
+def test_stack_still_accepts_the_v0_4_spellings(tmp_path, argv_stack, expected):
+    """v0.4.0 documented ``--stack time`` and ``--stack auto``.
+
+    The kind decides how to cube now, so the value carries nothing — but turning
+    the option into a bare flag made every documented command line fail outright
+    with "unrecognized arguments: time" rather than ignoring a redundant word.
+    """
+    store = tmp_path / "zarr" / "radar_precip__cpc26130.zarr"
+    with (
+        patch("foehn.api.to_zarr", return_value=store) as written,
+        patch(
+            "sys.argv",
+            ["foehn", "to-zarr", "radar_precip", "--match", "cpc26130", *argv_stack, "--data-dir", str(tmp_path)],
+        ),
+    ):
+        main()
+
+    assert written.call_args.kwargs["stack"] is expected

@@ -136,7 +136,7 @@ foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack    # GRIB2 -> (time, 
 | `--variables` | Restrict to these data variable(s) |
 | `--match` | Keep only source files whose name contains this substring |
 | `--out` | Explicit output path for the .zarr store |
-| `--stack` | Cube the matched files, by whichever method the dataset's kind uses (radar → time,y,x; GRIB2 → N-D) |
+| `--stack` | Cube the matched files, by whichever method the dataset's kind uses (radar → time,y,x; GRIB2 → N-D). Takes no value; the v0.4 spellings `--stack auto` and `--stack time` are still accepted and select nothing the kind does not already decide |
 
 ---
 
