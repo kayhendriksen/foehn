@@ -1386,24 +1386,24 @@ def test_snapshots_are_removed_when_the_process_exits(tmp_path):
     assert source.exists()  # the original is untouched
 
 
-def test_an_old_snapshot_still_in_use_is_not_deleted(tmp_path):
+def test_an_old_snapshot_whose_owner_is_running_is_not_deleted(tmp_path):
     """Age is not abandonment.
 
-    A process can outlive the snapshot lifetime and still be reading through it.
-    Deleting one out from under a live Dataset turns a stale directory into a
-    FileNotFoundError in the middle of a read.
+    A process can outlive the snapshot lifetime and still be reading through one.
+    Deleting it turns a stale directory into a FileNotFoundError in the middle of
+    a read, so the owner's hold is asked first.
     """
     import os
     import time
 
-    from foehn.grids import _reap_stale_snapshots, _snapshot, _snapshots_in_use
+    from foehn.grids import _clean_snapshots, _reap_stale_snapshots, _snapshot
 
     source = tmp_path / "a.nc"
     source.write_bytes(b"payload")
     linked = _snapshot([source], tmp_path)
     snapshot = linked[0].parent
 
-    # Make it look long abandoned, while this process still holds it.
+    # Make it look long abandoned, while this process still holds the directory.
     long_ago = time.time() - (48 * 60 * 60)
     os.utime(snapshot, (long_ago, long_ago))
 
@@ -1412,15 +1412,69 @@ def test_an_old_snapshot_still_in_use_is_not_deleted(tmp_path):
     assert snapshot.exists()
     assert linked[0].read_bytes() == b"payload"
 
-    # Once released, the same scan takes it away.
-    for held, hold in list(_snapshots_in_use):
-        if held == snapshot:
-            hold.close()
-            _snapshots_in_use.remove((held, hold))
-    os.utime(snapshot, (long_ago, long_ago))
+    # Once the owner is gone, the same scan takes it away.
+    _clean_snapshots()
+    orphan = tmp_path / snapshot.name
+    orphan.mkdir()
+    (orphan / "a.nc").write_bytes(b"payload")
+    os.utime(orphan, (long_ago, long_ago))
+
     _reap_stale_snapshots(tmp_path)
 
-    assert not snapshot.exists()
+    assert not orphan.exists()
+
+
+def test_one_descriptor_serves_every_read_in_a_directory(tmp_path):
+    """A hold per snapshot cost a descriptor per read and never gave it back.
+
+    Ninety-odd reads exhausted the process's descriptors even though every
+    Dataset had been closed, because ``close()`` says nothing about whether a
+    derived Dataset is still reading. Ownership is per process instead.
+    """
+    from pathlib import Path
+
+    from foehn.grids import _clean_snapshots, _holds, _snapshot
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    descriptors = Path("/dev/fd")
+    before = len(list(descriptors.iterdir())) if descriptors.is_dir() else None
+    for _ in range(50):
+        _snapshot([source], tmp_path)
+
+    assert len(_holds) == 1
+    if before is not None:
+        assert len(list(descriptors.iterdir())) - before <= 2
+
+
+def test_reads_of_the_same_inodes_share_one_snapshot(tmp_path):
+    """Otherwise a loop over unchanged files leaves a directory per pass,
+    each one pinning the generation it linked."""
+    from foehn.grids import _clean_snapshots, _made, _snapshot
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"generation one")
+
+    first = _snapshot([source], tmp_path)
+    again = _snapshot([source], tmp_path)
+
+    assert first == again
+    assert len(_made) == 1
+
+    # A replacement is a different inode, so it gets its own snapshot — and the
+    # one already handed out still reads what it was given.
+    staged = tmp_path / ".staged"
+    staged.write_bytes(b"generation two")
+    staged.replace(source)
+
+    after = _snapshot([source], tmp_path)
+
+    assert after != first
+    assert first[0].read_bytes() == b"generation one"
+    assert after[0].read_bytes() == b"generation two"
 
 
 def test_a_snapshot_that_cannot_be_built_leaves_nothing_behind(tmp_path):
@@ -1464,3 +1518,33 @@ def test_rechunking_needs_dask(tmp_path):
     ds = xr.Dataset({"v": ("x", np.arange(4.0))}, coords={"x": [0, 1, 2, 3]})
     with patch("foehn.grids._require_dask", side_effect=ImportError("no dask")), pytest.raises(ImportError):
         _write_zarr(ds, tmp_path / "s.zarr", "w", rechunk={"x": 2})
+
+
+def test_a_file_that_vanishes_before_snapshotting_does_not_break_reuse(tmp_path):
+    """The reuse key is the inodes; without them the read simply does not share."""
+    from foehn.grids import _inode_key
+
+    assert _inode_key(tmp_path, [tmp_path / "missing.nc"]) is None
+
+
+def test_the_source_fingerprint_is_the_file_contents(tmp_path):
+    """Two files with identical bytes fingerprint alike; a changed byte does not."""
+    import hashlib
+
+    from foehn.grids import _source_fingerprint
+
+    first, second = tmp_path / "a.h5", tmp_path / "b.h5"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+
+    assert _source_fingerprint(first) == _source_fingerprint(second)
+    assert _source_fingerprint(first) == hashlib.blake2b(b"generation one", digest_size=16).hexdigest()
+
+    second.write_bytes(b"generation two")
+    assert _source_fingerprint(first) != _source_fingerprint(second)
+
+
+def test_the_time_index_of_a_store_that_is_not_there_is_empty(tmp_path):
+    from foehn.grids import _cube_time_index
+
+    assert _cube_time_index(None, tmp_path / "absent.zarr") == {}

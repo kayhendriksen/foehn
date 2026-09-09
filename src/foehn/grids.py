@@ -141,33 +141,65 @@ def require_radar() -> None:
 # --- A stable set of files to read from ------------------------------------
 
 _SNAPSHOT_PREFIX = ".foehn-snapshot-"
-_SNAPSHOT_HOLD = ".foehn-hold.lock"
+_HOLD_PREFIX = ".foehn-hold-"
 _SNAPSHOT_STALE_AFTER = 24 * 60 * 60
 
-# (directory, open hold handle) for every snapshot this process is using. The
-# handle is what tells another process the directory is still live.
-_snapshots_in_use: list[tuple[Path, IO[bytes]]] = []
+# One id for this process, for its whole life. It names both the hold and the
+# snapshots the hold speaks for, so another process can ask "is the owner of
+# this snapshot still running?" with a single lock file rather than one per
+# snapshot. A hold per snapshot cost a descriptor per read and never gave it
+# back: ninety-odd reads exhausted the process's descriptors even though every
+# Dataset had been closed.
+_HOLD_ID = uuid.uuid4().hex
+
+_holds: dict[Path, IO[bytes]] = {}
+"""The one open hold per bronze directory this process has snapshotted into."""
+
+_reusable: dict[tuple, list[Path]] = {}
+"""Snapshots keyed by the inodes they link, so repeated reads share one."""
+
+_made: list[Path] = []
+"""Snapshot directories to remove on the way out."""
+
+
+def _hold_id_of(snapshot: Path) -> str:
+    return snapshot.name[len(_SNAPSHOT_PREFIX) :].split("-", 1)[0]
+
+
+def _take_process_hold(out_dir: Path) -> None:
+    """Say, once per directory, that this process has live snapshots here."""
+    if out_dir in _holds:
+        return
+    _holds[out_dir] = take_hold(out_dir / f"{_HOLD_PREFIX}{_HOLD_ID}.lock")
 
 
 def _reap_stale_snapshots(out_dir: Path) -> None:
-    """Remove snapshots nobody holds any more.
+    """Remove snapshots whose owner is gone.
 
     Age alone is not abandonment. A process can outlive the lifetime below and
     still be reading through its snapshot, and deleting one out from under a
     live Dataset turns a stale directory into a FileNotFoundError mid-read — so
-    the hold is asked first, and old-but-held snapshots are left alone.
+    the owner's hold is asked first.
     """
     cutoff = time.time() - _SNAPSHOT_STALE_AFTER
     for candidate in out_dir.glob(f"{_SNAPSHOT_PREFIX}*"):
         try:
             if candidate.stat().st_mtime >= cutoff:
                 continue
-            if is_held(candidate / _SNAPSHOT_HOLD):
-                logger.debug("%s is old but still in use; leaving it", candidate.name)
+            if is_held(out_dir / f"{_HOLD_PREFIX}{_hold_id_of(candidate)}.lock"):
+                logger.debug("%s is old but its owner is still running; leaving it", candidate.name)
                 continue
             shutil.rmtree(candidate, ignore_errors=True)
         except OSError:
             continue
+
+
+def _inode_key(out_dir: Path, files: list[Path]) -> tuple | None:
+    """What makes two reads the same read: the very inodes they would link."""
+    try:
+        return (str(out_dir), tuple(sorted((f.stat().st_dev, f.stat().st_ino) for f in files)))
+    except OSError:
+        return None
 
 
 def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
@@ -183,22 +215,32 @@ def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
     renaming over it, which leaves the inode this link holds untouched, so a
     reopen through the snapshot reads the bytes it opened. Nothing is copied.
 
+    Reads of the same inodes share one snapshot: a loop that opens the same
+    unchanged files would otherwise leave a directory per pass, each pinning the
+    generation it linked.
+
     Where the filesystem has no hard links, the files are *copied* instead.
     Falling back to the originals was silent and put the race straight back;
     paying for a copy is the honest price of the same guarantee, and it is
     announced because it is slow.
     """
     _reap_stale_snapshots(out_dir)
-    snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{uuid.uuid4().hex}"
+
+    key = _inode_key(out_dir, files)
+    if key is not None and (existing := _reusable.get(key)) and all(link.exists() for link in existing):
+        return existing
+
+    snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{_HOLD_ID}-{uuid.uuid4().hex}"
     snapshot.mkdir(mode=0o700)
-    hold = take_hold(snapshot / _SNAPSHOT_HOLD)
     try:
+        _take_process_hold(out_dir)
         linked = [_link_or_copy(source, snapshot / source.name) for source in files]
     except BaseException:
-        hold.close()
         shutil.rmtree(snapshot, ignore_errors=True)
         raise
-    _snapshots_in_use.append((snapshot, hold))
+    _made.append(snapshot)
+    if key is not None:
+        _reusable[key] = linked
     return linked
 
 
@@ -217,18 +259,23 @@ def _link_or_copy(source: Path, destination: Path) -> Path:
 
 
 def _clean_snapshots() -> None:
-    """Drop this process's snapshots.
+    """Drop this process's snapshots and release its holds.
 
     Not tied to a Dataset's lifetime: a Dataset derived from another shares its
     file handles but not its identity, so collecting the original would pull the
     files out from under the derived one. Released at exit instead, and reaped
-    later by a process that finds them old and unheld.
+    later by a process that finds them old and their owner gone.
     """
-    for snapshot, hold in _snapshots_in_use:
+    for snapshot in _made:
+        shutil.rmtree(snapshot, ignore_errors=True)
+    _made.clear()
+    _reusable.clear()
+    for out_dir, hold in _holds.items():
         with contextlib.suppress(Exception):
             hold.close()
-        shutil.rmtree(snapshot, ignore_errors=True)
-    _snapshots_in_use.clear()
+        with contextlib.suppress(OSError):
+            (out_dir / f"{_HOLD_PREFIX}{_HOLD_ID}.lock").unlink()
+    _holds.clear()
 
 
 atexit.register(_clean_snapshots)
