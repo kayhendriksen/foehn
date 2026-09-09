@@ -1,11 +1,13 @@
 """Tests for the gridded read path (foehn.open_dataset)."""
 
+import contextlib
 from unittest.mock import patch
 
 import pytest
 from conftest import write_odim_composite
 
 import foehn
+from foehn import grids
 from foehn.api import open_dataset, to_zarr
 from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
@@ -317,6 +319,61 @@ def test_to_zarr_radar_appends_new_timesteps_in_place(fetcher, tmp_path):
     appended = xr.open_zarr(store)
     assert appended.sizes["time"] == 2
     assert str(appended.time.values[1])[:16] == "2026-05-10T00:05"
+
+
+def test_to_zarr_radar_append_does_not_restack_timesteps_already_stored(fetcher, tmp_path):
+    """The listing an append sees is cumulative, not just what is new.
+
+    ``match`` scopes the STAC listing, and the listing returns everything
+    published under that match — so the second call sees the first timestep
+    again. Appending the whole set wrote it twice: [00:00] then [00:00, 00:05]
+    produced a cube reading [00:00, 00:00, 00:05]. The sibling test above feeds
+    back only the new file, which is the one listing shape that hides this.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import numpy as np
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "radar_precip"
+    first = "cpc26130000000.h5"
+    second = "cpc26130000500.h5"
+
+    write_odim_composite(base / first, time="000000")
+    fetcher.any_items = _items_for(first)
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True)
+
+    write_odim_composite(base / second, time="000500")
+    # What upstream actually returns for this match the second time round.
+    fetcher.any_items = _items_for(first, second)
+    to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True, mode="a")
+
+    appended = xr.open_zarr(store)
+    assert appended.sizes["time"] == 2
+    times = appended.time.values
+    assert len(set(times.tolist())) == 2
+    assert (np.diff(times).astype("int64") > 0).all()
+    assert str(times[0])[:16] == "2026-05-10T00:00"
+    assert str(times[1])[:16] == "2026-05-10T00:05"
+
+
+def test_to_zarr_radar_append_creates_the_store_when_none_exists(fetcher, tmp_path):
+    """mode="a" against a fresh workspace has nothing to extend, so it creates."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    base = tmp_path / "bronze" / "radar_precip"
+    write_odim_composite(base / "cpc26130000000.h5", time="000000")
+    fetcher.any_items = _items_for("cpc26130000000.h5")
+
+    store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc26130", stack=True, mode="a")
+
+    assert xr.open_zarr(store).sizes["time"] == 1
 
 
 def test_to_zarr_stack_requires_match(tmp_path):
@@ -759,3 +816,762 @@ def test_a_grib2_cube_recomputes_valid_time_after_combining(fetcher, tmp_path):
 
     assert "step" in cube.dims
     assert (cube["valid_time"] == cube["time"] + cube["step"]).all()
+
+
+def test_an_unreadable_netcdf_file_is_reported_as_itself(tmp_path):
+    """A corrupt file is not a heterogeneous set, and must not be described as one.
+
+    Every multi-file failure used to be relabelled "this set mixes
+    parameters/levels/resolutions — narrow with match=". For an unreadable file
+    that diagnosis is wrong and the remedy impossible: no match narrows away a
+    corrupt cache entry, and the caller is sent looking for a parameter split
+    that does not exist. The underlying error names the file; that is the useful
+    thing. A real one looks exactly like this — valid HDF5 magic, nothing behind
+    it — which is why the fixture is not simply random bytes.
+    """
+    xr = pytest.importorskip("xarray")
+    import numpy as np
+
+    from foehn.grids import open_netcdf
+
+    good = tmp_path / "a_rhiresd.nc"
+    corrupt = tmp_path / "b_rhiresd.nc"
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(good, engine="h5netcdf")
+    corrupt.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\x00" * 512)
+
+    with pytest.raises(OSError) as caught:
+        open_netcdf([good, corrupt], dataset="surface_derived_grid")
+
+    assert "mixes parameters" not in str(caught.value)
+    assert corrupt.name in str(caught.value)
+
+
+def test_open_netcdf_accepts_an_explicit_engine(tmp_path):
+    """``engine=`` was a documented v0.4.0 keyword; removing it broke those calls."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    from foehn.grids import open_netcdf
+
+    source = tmp_path / "grid.nc"
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(source, engine="h5netcdf")
+
+    opened = open_netcdf([source], dataset="surface_derived_grid", engine="h5netcdf")
+
+    assert list(opened["v"].values) == [0.0, 1.0, 2.0]
+
+
+def test_append_dedup_ignores_a_store_it_cannot_read(tmp_path):
+    """An unreadable store means "unknown", not "fail" — the append still runs."""
+    xr = pytest.importorskip("xarray")
+
+    from foehn import grids as grids_mod
+
+    unreadable = tmp_path / "broken.zarr"
+    unreadable.mkdir()
+    (unreadable / "zarr.json").write_text("{ not json")
+
+    assert grids_mod._cube_times(xr, unreadable) == frozenset()
+
+
+def test_append_dedup_ignores_a_store_without_a_time_axis(tmp_path):
+    """Nothing to compare against, so nothing is skipped."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    from foehn import grids as grids_mod
+
+    store = tmp_path / "no_time.zarr"
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_zarr(store, consolidated=False)
+
+    assert grids_mod._cube_times(xr, store) == frozenset()
+
+
+def _radar_cube(tmp_path, times=("000000", "000500")):
+    from foehn.grids import cube_radar
+
+    files = []
+    for stamp in times:
+        path = tmp_path / f"cpc2613{stamp}.h5"
+        write_odim_composite(path, time=stamp)
+        files.append(path)
+    store = tmp_path / "cube.zarr"
+    cube_radar(files, store, mode="w")
+    return store, files
+
+
+@pytest.mark.parametrize("mode", ["w-", "a-", "r+"])
+def test_a_non_overwriting_mode_never_truncates_the_store(tmp_path, mode):
+    """Only "w" means "replace what is there".
+
+    Coercing every mode that was not "a" into "w" turned "w-" (create, never
+    clobber) and "r+" (modify, never truncate) into a silent overwrite of the
+    store they were chosen to protect — "r+" reduced a two-timestep cube to one.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+    assert xr.open_zarr(store).sizes["time"] == 2
+
+    with contextlib.suppress(Exception):
+        cube_radar(files[:1], store, mode=mode)
+
+    # Whether the mode refused or was a no-op, the existing cube survives.
+    assert xr.open_zarr(store).sizes["time"] == 2
+
+
+def test_a_restated_observation_is_rewritten_rather_than_skipped(tmp_path):
+    """MeteoSwiss republishes a timestamp's values under its original name.
+
+    CombiPrecip reanalysis replaces the original hourly file about eight days
+    later, which is why the download path compares STAC ``updated`` rather than
+    mere existence. De-duplicating an append on the timestamp alone undid that:
+    bronze refreshed and the cube kept the superseded numbers forever.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    source = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    store = tmp_path / "cube.zarr"
+    cube_radar([source], store, mode="w")
+    assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 1.5
+
+    write_odim_composite(source, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    cube_radar([source], store, mode="a")
+
+    revised = xr.open_zarr(store)
+    assert float(revised.acrr.values.ravel()[1]) == 42.0
+    assert revised.sizes["time"] == 1  # rewritten in place, not appended alongside
+
+
+def test_an_unchanged_source_is_still_skipped_on_append(tmp_path):
+    """The common re-run: same listing, same files, nothing to do."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+    cube_radar(files, store, mode="a")
+
+    appended = xr.open_zarr(store)
+    assert appended.sizes["time"] == 2
+    assert len(set(appended.time.values.tolist())) == 2
+
+
+def test_source_fingerprints_survive_in_the_store(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+
+    from foehn.grids import _stored_sources
+
+    store, _ = _radar_cube(tmp_path)
+
+    assert len(_stored_sources(store)) == 2
+    assert _stored_sources(tmp_path / "missing.zarr") == {}
+
+
+def test_grib2_honours_an_explicit_engine(tmp_path):
+    """A caller who names a backend and silently gets another cannot tell."""
+    pytest.importorskip("xarray")
+    import foehn.grids as grids_mod
+
+    with (
+        patch.object(grids_mod, "_open_grid") as opened,
+        patch.object(grids_mod.icon, "attach_lonlat", lambda ds, *a, **k: ds),
+    ):
+        grids_mod.open_grib2(
+            [tmp_path / "x.grib2"],
+            dataset="forecast_icon_ch1",
+            workspace=Workspace(tmp_path),
+            fetcher=None,
+            engine="cfgrib-custom",
+        )
+
+    assert opened.call_args.kwargs["engine"] == "cfgrib-custom"
+
+
+def test_source_fingerprints_tolerate_a_store_they_cannot_read(tmp_path):
+    """Bookkeeping must never be the thing that fails a good write."""
+    from foehn.grids import _cube_time_index, _record_sources, _stored_sources
+
+    broken = tmp_path / "broken.zarr"
+    broken.mkdir()
+    (broken / "zarr.json").write_text("{ not json")
+
+    assert _stored_sources(broken) == {}
+    assert _cube_time_index(None, broken) == {}
+    _record_sources(broken, {"1": "x"})  # logs and moves on
+
+
+def test_revising_a_timestep_the_cube_no_longer_holds_is_refused(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import _revise_in_place
+
+    store, _files = _radar_cube(tmp_path)
+    ds = xr.open_zarr(store).isel(time=[0])
+
+    with pytest.raises(ValueError, match="no longer holds"):
+        _revise_in_place(xr, ds, store, frozenset({-1}))
+
+
+def test_an_unknown_radar_mode_is_rejected_before_anything_branches_on_it(tmp_path):
+    """An unrecognised mode used to fall through to the extending path.
+
+    From there it could skip a file as already stored, or take the in-place
+    region update — both on the strength of a value that means nothing.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+
+    with pytest.raises(ValueError, match="not a Zarr write mode"):
+        cube_radar(files, store, mode="bogus")
+
+    assert xr.open_zarr(store).sizes["time"] == 2
+
+
+def test_a_restatement_that_keeps_size_and_mtime_still_reaches_the_cube(tmp_path):
+    """Metadata is reproducible; contents are the thing that changed.
+
+    A source replaced with different same-length bytes and its mtime restored is
+    indistinguishable by stat, and the revised values never reached the cube.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import os
+
+    import xarray as xr
+
+    from foehn.grids import cube_radar
+
+    source = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    original = source.stat()
+    store = tmp_path / "cube.zarr"
+    cube_radar([source], store, mode="w")
+    assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 1.5
+
+    write_odim_composite(source, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    # Same length, and put the timestamps back exactly as they were.
+    assert source.stat().st_size == original.st_size
+    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    cube_radar([source], store, mode="a")
+
+    assert float(xr.open_zarr(store).acrr.values.ravel()[1]) == 42.0
+
+
+def test_the_fingerprint_always_describes_the_values_that_were_decoded(tmp_path):
+    """The pair has to be consistent even if the file changes A -> B -> A.
+
+    Hashing the path on both sides of the decode matches on an A -> B -> A
+    sequence, so B's values get stored under A's fingerprint and every later
+    append skips the correction for good. Reading the bytes once and both
+    hashing and decoding *those* makes the race structurally impossible.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    import hashlib
+
+    import xarray as xr
+
+    from foehn import odim
+    from foehn.grids import _open_composite_snapshot
+
+    source = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    original_bytes = source.read_bytes()
+
+    real_open = odim.open_composite
+
+    def replace_during_decode(xr_module, path, *, data=None):
+        opened = real_open(xr_module, path, data=data)
+        # Another process publishes a different revision mid-decode.
+        write_odim_composite(path, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+        return opened
+
+    with patch.object(odim, "open_composite", replace_during_decode):
+        ds, fingerprint = _open_composite_snapshot(xr, source)
+
+    # The fingerprint names the revision the values actually came from, not
+    # whatever happens to be at the path now.
+    assert fingerprint == hashlib.blake2b(original_bytes, digest_size=16).hexdigest()
+    assert float(ds["acrr"].values.ravel()[1]) == 1.5
+    assert source.read_bytes() != original_bytes  # the path really did move on
+
+
+def test_revising_non_contiguous_timesteps_is_refused(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+    import xarray as xr
+
+    from foehn.grids import _cube_time_index, _revise_in_place
+
+    store, _files = _radar_cube(tmp_path, times=("000000", "000500", "001000"))
+    positions = _cube_time_index(xr, store)
+    first, last = sorted(positions)[0], sorted(positions)[2]
+    ds = xr.open_zarr(store).isel(time=[0])
+
+    with pytest.raises(ValueError, match="not contiguous"):
+        _revise_in_place(xr, ds, store, frozenset({first, last}))
+
+
+def test_an_append_keeps_the_fingerprints_of_timesteps_it_did_not_touch(tmp_path):
+    """xarray restates the group's attributes on every append.
+
+    Recording only the current call's entries dropped every earlier one, so the
+    next incremental write had no history to skip against and rewrote regions
+    that had not changed.
+    """
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5py")
+    pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
+
+    from foehn.grids import _stored_sources, cube_radar
+
+    store = tmp_path / "cube.zarr"
+    first = tmp_path / "cpc2613000000.h5"
+    write_odim_composite(first, time="000000")
+    cube_radar([first], store, mode="w")
+    assert len(_stored_sources(store)) == 1
+
+    second = tmp_path / "cpc2613000500.h5"
+    write_odim_composite(second, time="000500")
+    cube_radar([first, second], store, mode="a")
+
+    # Both timesteps are still accounted for, so neither is rewritten next time.
+    assert len(_stored_sources(store)) == 2
+
+
+def test_a_refresh_cannot_land_between_validating_the_files_and_opening_them(fetcher, tmp_path):
+    """The acquisition validates the set, then hands back paths.
+
+    Letting go of its lock at that point left the reader holding names rather
+    than files: another refresh could publish between the check and the open, and
+    open_dataset returned a Dataset mixing generations that had each been
+    coherent when checked — [101, 2] for a set that should read [1, 2].
+
+    The intruder holds foehn's own refresh lock, which is what the lock can
+    speak for. A writer that bypasses foehn entirely is outside its reach.
+    """
+    import threading
+
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    from foehn import coherence
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+
+    def write_grid(name, value, coord):
+        xr.Dataset({"v": ("x", np.array([value], "float64"))}, coords={"x": [coord]}).to_netcdf(
+            base / name, engine="h5netcdf"
+        )
+
+    write_grid("a_rhiresd.nc", 1.0, 0)
+    write_grid("b_rhiresd.nc", 2.0, 1)
+    fetcher.any_items = _items_for("a_rhiresd.nc", "b_rhiresd.nc")
+
+    window_open = threading.Event()
+    half_refreshed = threading.Event()
+    reader_finished = threading.Event()
+
+    def partial_refresh():
+        """A concurrent refresh, paused with one file replaced and one not."""
+        window_open.wait(timeout=5)
+        with coherence.refresh_lock(base):
+            write_grid("a_rhiresd.nc", 101.0, 0)
+            half_refreshed.set()
+            reader_finished.wait(timeout=5)
+
+    real_open_grid = grids._open_grid
+
+    def open_after_opening_the_window(*args, **kwargs):
+        # Validated, not yet opened. Give the other refresh every chance to
+        # publish into the set before the files are opened.
+        window_open.set()
+        half_refreshed.wait(timeout=1.5)
+        return real_open_grid(*args, **kwargs)
+
+    intruder = threading.Thread(target=partial_refresh)
+    intruder.start()
+    try:
+        with patch.object(grids, "_open_grid", open_after_opening_the_window):
+            ds = open_dataset("surface_derived_grid", data_dir=tmp_path, match="rhiresd")
+        values = sorted(ds["v"].values.ravel().tolist())
+    finally:
+        reader_finished.set()
+        intruder.join(timeout=15)
+
+    # One generation, not a mix. [1.0, 101.0] is the failure this covers.
+    assert values == [1.0, 2.0]
+
+
+def test_a_lazy_read_is_not_reopened_from_a_replaced_file(fetcher, tmp_path):
+    """xarray closes evicted handles and reopens them by path.
+
+    So holding the refresh lock until the files were open was not enough: once a
+    handle is evicted from xarray's bounded file cache, the next lazy read goes
+    back to the path, and a file replaced in the meantime is what it finds. The
+    snapshot is hard-linked, and a hard link names the inode rather than the
+    path.
+    """
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+
+    def write_grid(path, value):
+        xr.Dataset({"v": ("x", np.array([value] * 4, "float64"))}, coords={"x": [0, 1, 2, 3]}).to_netcdf(
+            path, engine="h5netcdf"
+        )
+
+    write_grid(base / "a_rhiresd.nc", 1.0)
+    fetcher.any_items = _items_for("a_rhiresd.nc")
+
+    with xr.set_options(file_cache_maxsize=1):
+        ds = open_dataset("surface_derived_grid", data_dir=tmp_path, match="rhiresd")
+
+        # Evict this dataset's handle by opening and touching another file.
+        other = tmp_path / "other.nc"
+        write_grid(other, 999.0)
+        evictor = xr.open_dataset(other)
+        _ = evictor["v"].values
+
+        # A new generation lands at the original path, exactly as a refresh
+        # publishes one: staged alongside, then renamed over.
+        staged = base / ".staged.nc"
+        write_grid(staged, 101.0)
+        staged.replace(base / "a_rhiresd.nc")
+
+        assert float(ds["v"].values[0]) == 1.0
+
+
+def test_a_snapshot_copies_when_hard_links_are_unavailable(tmp_path):
+    """Falling back to the originals put the race straight back, silently.
+
+    A filesystem without hard links still has to give the reader something that
+    cannot change underneath it, so the files are copied. It is slower, which is
+    why it says so.
+    """
+    from foehn.grids import _snapshot
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"generation one")
+
+    with patch("foehn.grids.os.link", side_effect=OSError("not supported")):
+        linked = _snapshot([source], tmp_path)
+
+    assert linked != [source]
+    assert linked[0].read_bytes() == b"generation one"
+
+    # The point of the snapshot: replacing the original leaves it alone.
+    replacement = tmp_path / ".staged"
+    replacement.write_bytes(b"generation two")
+    replacement.replace(source)
+
+    assert linked[0].read_bytes() == b"generation one"
+
+
+def test_stale_snapshots_are_reaped_and_live_ones_left(tmp_path):
+    """A process that dies before atexit leaves its links behind.
+
+    They hold the superseded generation's inodes alive, so they are reaped by
+    age — but only once no reader could still be using them.
+    """
+    import os
+    import time
+
+    from foehn.grids import _SNAPSHOT_PREFIX, _reap_stale_snapshots
+
+    stale = tmp_path / f"{_SNAPSHOT_PREFIX}dead"
+    fresh = tmp_path / f"{_SNAPSHOT_PREFIX}live"
+    for snapshot in (stale, fresh):
+        snapshot.mkdir()
+        (snapshot / "a.nc").write_bytes(b"payload")
+    long_ago = time.time() - (48 * 60 * 60)
+    os.utime(stale, (long_ago, long_ago))
+
+    _reap_stale_snapshots(tmp_path)
+
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_reaping_tolerates_a_snapshot_disappearing_mid_scan(tmp_path):
+    """Another process's atexit can win the race between the glob and the stat."""
+    from pathlib import Path
+
+    from foehn.grids import _SNAPSHOT_PREFIX, _reap_stale_snapshots
+
+    vanishing = tmp_path / f"{_SNAPSHOT_PREFIX}vanishing"
+    vanishing.mkdir()
+
+    real_stat = Path.stat
+
+    def stat_that_loses_the_race(self, *args, **kwargs):
+        if self.name.startswith(_SNAPSHOT_PREFIX):
+            raise OSError("gone")
+        return real_stat(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", stat_that_loses_the_race):
+        _reap_stale_snapshots(tmp_path)  # must not raise
+
+    assert vanishing.exists()
+
+
+def test_snapshots_are_removed_when_the_process_exits(tmp_path):
+    """Held until exit rather than tied to a Dataset's lifetime.
+
+    A Dataset derived from another shares its file handles but not its identity,
+    so cleaning up when the original is collected would pull the files out from
+    under the derived one.
+    """
+    from foehn import grids as grids_mod
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    linked = grids_mod._snapshot([source], tmp_path)
+    snapshot = linked[0].parent
+
+    assert snapshot.exists()
+    assert linked[0].read_bytes() == b"payload"
+    assert linked[0] != source
+
+    grids_mod._clean_snapshots()
+
+    assert not snapshot.exists()
+    assert source.exists()  # the original is untouched
+
+
+def test_an_old_snapshot_whose_owner_is_running_is_not_deleted(tmp_path):
+    """Age is not abandonment.
+
+    A process can outlive the snapshot lifetime and still be reading through one.
+    Deleting it turns a stale directory into a FileNotFoundError in the middle of
+    a read, so the owner's hold is asked first.
+    """
+    import os
+    import time
+
+    from foehn.grids import _clean_snapshots, _reap_stale_snapshots, _snapshot
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+    linked = _snapshot([source], tmp_path)
+    snapshot = linked[0].parent
+
+    # Make it look long abandoned, while this process still holds the directory.
+    long_ago = time.time() - (48 * 60 * 60)
+    os.utime(snapshot, (long_ago, long_ago))
+
+    _reap_stale_snapshots(tmp_path)
+
+    assert snapshot.exists()
+    assert linked[0].read_bytes() == b"payload"
+
+    # Once the owner is gone, the same scan takes it away.
+    _clean_snapshots()
+    orphan = tmp_path / snapshot.name
+    orphan.mkdir()
+    (orphan / "a.nc").write_bytes(b"payload")
+    os.utime(orphan, (long_ago, long_ago))
+
+    _reap_stale_snapshots(tmp_path)
+
+    assert not orphan.exists()
+
+
+def test_one_descriptor_serves_every_read_in_a_directory(tmp_path):
+    """A hold per snapshot cost a descriptor per read and never gave it back.
+
+    Ninety-odd reads exhausted the process's descriptors even though every
+    Dataset had been closed, because ``close()`` says nothing about whether a
+    derived Dataset is still reading. Ownership is per process instead.
+    """
+    from pathlib import Path
+
+    from foehn.grids import _clean_snapshots, _holds, _snapshot
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    descriptors = Path("/dev/fd")
+    before = len(list(descriptors.iterdir())) if descriptors.is_dir() else None
+    for _ in range(50):
+        _snapshot([source], tmp_path)
+
+    assert len(_holds) == 1
+    if before is not None:
+        assert len(list(descriptors.iterdir())) - before <= 2
+
+
+def test_equivalent_path_spellings_do_not_lock_against_each_other(tmp_path):
+    """A second read naming the same directory a different way must not self-deadlock.
+
+    ``take_hold`` opens a fresh file descriptor per call; flock's exclusivity is
+    per *open file description*, so a process that already holds a directory's
+    lock blocks against its own second descriptor the instant it reopens the
+    same lock file under a different spelling — non-blocking, so it surfaces as
+    ``BlockingIOError`` rather than a hang. Resolving ``out_dir`` before it is
+    used as a hold/cache key means the second read recognizes the directory it
+    already owns instead of racing itself for the same lock.
+    """
+    from foehn.grids import _clean_snapshots, _holds, _snapshot
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+    (tmp_path / "sub").mkdir()
+
+    equivalent = tmp_path / "sub" / ".."
+
+    first = _snapshot([source], tmp_path)
+    second = _snapshot([source], equivalent)
+
+    assert first == second
+    assert len(_holds) == 1
+
+
+def test_reads_of_the_same_inodes_share_one_snapshot(tmp_path):
+    """Otherwise a loop over unchanged files leaves a directory per pass,
+    each one pinning the generation it linked."""
+    from foehn.grids import _clean_snapshots, _made, _snapshot
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"generation one")
+
+    first = _snapshot([source], tmp_path)
+    again = _snapshot([source], tmp_path)
+
+    assert first == again
+    assert len(_made) == 1
+
+    # A replacement is a different inode, so it gets its own snapshot — and the
+    # one already handed out still reads what it was given.
+    staged = tmp_path / ".staged"
+    staged.write_bytes(b"generation two")
+    staged.replace(source)
+
+    after = _snapshot([source], tmp_path)
+
+    assert after != first
+    assert first[0].read_bytes() == b"generation one"
+    assert after[0].read_bytes() == b"generation two"
+
+
+def test_a_snapshot_that_cannot_be_built_leaves_nothing_behind(tmp_path):
+    """A half-linked snapshot is not something to hand a reader, or to leave lying about."""
+    from foehn.grids import _SNAPSHOT_PREFIX, _snapshot
+
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with (
+        patch("foehn.grids.os.link", side_effect=OSError("no links")),
+        patch("foehn.grids.shutil.copy2", side_effect=OSError("no space")),
+        pytest.raises(OSError, match="no space"),
+    ):
+        _snapshot([source], tmp_path)
+
+    assert not list(tmp_path.glob(f"{_SNAPSHOT_PREFIX}*"))
+
+
+def test_the_time_index_skips_a_store_without_a_time_axis(tmp_path):
+    """Nothing to place, so nothing to revise."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    from foehn.grids import _cube_time_index
+
+    store = tmp_path / "no_time.zarr"
+    xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_zarr(store, consolidated=False)
+
+    assert _cube_time_index(xr, store) == {}
+
+
+def test_rechunking_needs_dask(tmp_path):
+    """dask is not part of the 'grids' extra, and the message says so."""
+    xr = pytest.importorskip("xarray")
+    import numpy as np
+
+    from foehn.grids import _write_zarr
+
+    ds = xr.Dataset({"v": ("x", np.arange(4.0))}, coords={"x": [0, 1, 2, 3]})
+    with patch("foehn.grids._require_dask", side_effect=ImportError("no dask")), pytest.raises(ImportError):
+        _write_zarr(ds, tmp_path / "s.zarr", "w", rechunk={"x": 2})
+
+
+def test_a_file_that_vanishes_before_snapshotting_does_not_break_reuse(tmp_path):
+    """The reuse key is the inodes; without them the read simply does not share."""
+    from foehn.grids import _inode_key
+
+    assert _inode_key(tmp_path, [tmp_path / "missing.nc"]) is None
+
+
+def test_the_source_fingerprint_is_the_file_contents(tmp_path):
+    """Two files with identical bytes fingerprint alike; a changed byte does not."""
+    import hashlib
+
+    from foehn.grids import _source_fingerprint
+
+    first, second = tmp_path / "a.h5", tmp_path / "b.h5"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+
+    assert _source_fingerprint(first) == _source_fingerprint(second)
+    assert _source_fingerprint(first) == hashlib.blake2b(b"generation one", digest_size=16).hexdigest()
+
+    second.write_bytes(b"generation two")
+    assert _source_fingerprint(first) != _source_fingerprint(second)
+
+
+def test_the_time_index_of_a_store_that_is_not_there_is_empty(tmp_path):
+    from foehn.grids import _cube_time_index
+
+    assert _cube_time_index(None, tmp_path / "absent.zarr") == {}

@@ -80,6 +80,7 @@ def write_odim_composite(
     time="000000",
     obj="COMP",
     long_name=None,
+    values=None,
 ):
     """Write a tiny ODIM-H5 Cartesian COMP composite (offline radar fixture).
 
@@ -90,7 +91,9 @@ def write_odim_composite(
     import numpy as np
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = np.array([[0.0, 1.5, nodata], [undetect, 2.0, 3.0]], dtype="float64")
+    # ``values`` restates the payload under the same timestamp, which is what
+    # MeteoSwiss does when it republishes a revised composite.
+    data = np.array(values if values is not None else [[0.0, 1.5, nodata], [undetect, 2.0, 3.0]], dtype="float64")
     with h5py.File(path, "w") as f:
         f.attrs["Conventions"] = "ODIM_H5/V2_4"
         what = f.create_group("what")
