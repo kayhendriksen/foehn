@@ -78,7 +78,7 @@ dev = [
     # the upgrade arrives as its own reviewable PR rather than landing on whoever
     # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
     # which CI reads — see scripts/hook_version.sh.)
-    "ty==0.0.74",
+    "ty==0.0.77",
     "numpy>=1.24",
     "pydantic>=2.0",
     # Strict YAML parsing for the workflow-structure test: PyYAML silently
