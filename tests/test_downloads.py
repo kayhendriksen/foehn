@@ -503,3 +503,133 @@ def test_indoor_zip_reports_nothing_when_the_collection_has_no_archive(tmp_path)
 
     assert result == DownloadResult()
     assert fake.streams == []
+
+
+def test_a_partial_grid_download_records_the_mix_it_leaves(tmp_path):
+    """foehn.download() writes into the directory a grid read opens from.
+
+    It replaces several files one at a time, so it has the same middle a refresh
+    for a read has — and while only the read path spoke the coherence protocol,
+    a download running beside it produced exactly that mixed set with nothing on
+    disk to say so.
+    """
+    from foehn import coherence, registry
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    first, second = out_dir / "a_rhiresd.nc", out_dir / "b_rhiresd.nc"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+
+    hrefs = [f"https://data.geo.admin.ch/x/{p.name}" for p in (first, second)]
+    fake = InMemoryFetcher()
+    fake.any_items = [
+        {"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs
+    ]
+    fake.default_body = b"generation two"
+    fake.fail(hrefs[1])
+
+    registry.download(
+        "surface_derived_grid",
+        Workspace(tmp_path),
+        time_slice=["recent"],
+        since=None,
+        workers=1,
+        force=False,
+        fetcher=fake,
+    )
+
+    # The download left a set it cannot vouch for, and said so.
+    assert coherence.blocked(out_dir, [first.name, second.name])
+
+
+def test_a_complete_grid_download_leaves_nothing_marked(tmp_path):
+    from foehn import coherence, registry
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    names = ["a_rhiresd.nc", "b_rhiresd.nc"]
+    for name in names:
+        (out_dir / name).write_bytes(b"generation one")
+
+    hrefs = [f"https://data.geo.admin.ch/x/{n}" for n in names]
+    fake = InMemoryFetcher()
+    fake.any_items = [
+        {"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs
+    ]
+    fake.default_body = b"generation two"
+
+    registry.download(
+        "surface_derived_grid",
+        Workspace(tmp_path),
+        time_slice=["recent"],
+        since=None,
+        workers=1,
+        force=False,
+        fetcher=fake,
+    )
+
+    assert not coherence.blocked(out_dir, names)
+    assert not (out_dir / coherence.MARKER).exists()
+
+
+def test_a_retry_does_not_clear_a_cache_it_never_repaired(tmp_path):
+    """A retry can find every file "current" and repair nothing.
+
+    The collection may state no ``updated`` at all, or the half-written file's
+    mtime may already be newer than it. Skipping the lot then counts as success,
+    and clearing the marker on that released a cache still holding two
+    generations.
+    """
+    from foehn import coherence, registry
+
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    first, second = out_dir / "a_rhiresd.nc", out_dir / "b_rhiresd.nc"
+    first.write_bytes(b"generation one")
+    second.write_bytes(b"generation one")
+    hrefs = [f"https://data.geo.admin.ch/x/{p.name}" for p in (first, second)]
+
+    def download(fetcher):
+        registry.download(
+            "surface_derived_grid",
+            Workspace(tmp_path),
+            time_slice=["recent"],
+            since=None,
+            workers=1,
+            force=False,
+            fetcher=fetcher,
+        )
+
+    # A partial run leaves the set half-replaced and marked.
+    partial = InMemoryFetcher()
+    partial.any_items = [
+        {"assets": {"d": {"href": h}}, "properties": {"updated": "2100-01-01T00:00:00+00:00"}} for h in hrefs
+    ]
+    partial.default_body = b"generation two"
+    partial.fail(hrefs[1])
+    download(partial)
+    assert coherence.blocked(out_dir, [first.name, second.name])
+
+    # The retry sees a collection with no usable "updated": everything current.
+    undated = InMemoryFetcher()
+    undated.any_items = [{"assets": {"d": {"href": h}}} for h in hrefs]
+    undated.default_body = b"generation two"
+    download(undated)
+
+    # Either it actually repaired the set, or it left the marker standing.
+    repaired = first.read_bytes() == second.read_bytes() == b"generation two"
+    assert repaired, "a retry that cleared the marker must have refetched the marked files"
+    assert not coherence.blocked(out_dir, [first.name, second.name])
+
+
+def test_forcing_a_refresh_works_for_a_kind_with_no_skip_rule():
+    """Some kinds fetch everything every time; forcing must still mean forcing."""
+    from pathlib import Path
+
+    from foehn.downloads import _skip_except
+
+    decide = _skip_except(None, {"a.nc"})
+
+    assert decide(None, Path("a.nc")) is False
+    assert decide(None, Path("b.nc")) is False

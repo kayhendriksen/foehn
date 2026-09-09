@@ -23,7 +23,7 @@ def _attr(group, key, default=None):
     return val.decode() if isinstance(val, bytes) else val
 
 
-def open_composite(xr, path: Path):
+def open_composite(xr, path: Path, *, data: bytes | None = None):
     """Read a MeteoSwiss ODIM-H5 Cartesian radar composite into an xarray Dataset.
 
     The OGD radar products (CombiPrecip precipitation, hail) are ODIM ``COMP``
@@ -33,11 +33,17 @@ def open_composite(xr, path: Path):
     detected) to 0, and turn the ``/where`` projection metadata into LV95 x/y
     coordinates via pyproj so the result lines up with the NetCDF Swiss grids.
     """
+    import io
+
     import h5py
     import numpy as np
     import pyproj
 
-    with h5py.File(path, "r") as f:
+    # ``data`` decodes one revision the caller already holds, rather than
+    # whatever is at *path* by the time we get there. ``path`` is still what the
+    # messages name.
+    source = io.BytesIO(data) if data is not None else path
+    with h5py.File(source, "r") as f:
         obj = _attr(f["what"], "object", "")
         if obj != "COMP":
             raise ValueError(f"{path.name}: expected an ODIM 'COMP' composite, got object={obj!r}.")

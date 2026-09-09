@@ -47,14 +47,22 @@ into memory) is future work.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
+import hashlib
 import logging
+import os
+import shutil
+import time
+import uuid
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import IO, TYPE_CHECKING, Protocol
 
-from foehn import atomicwrite, icon, odim
+from foehn import atomicwrite, coherence, icon, odim
+from foehn._locking import is_held, take_hold
 from foehn.collections import COLLECTION_META
 from foehn.fetch import Fetcher
 from foehn.workspace import Workspace
@@ -130,6 +138,159 @@ def require_radar() -> None:
         ) from exc
 
 
+# --- A stable set of files to read from ------------------------------------
+
+_SNAPSHOT_PREFIX = ".foehn-snapshot-"
+_HOLD_PREFIX = ".foehn-hold-"
+_SNAPSHOT_STALE_AFTER = 24 * 60 * 60
+
+# One id for this process, for its whole life. It names both the hold and the
+# snapshots the hold speaks for, so another process can ask "is the owner of
+# this snapshot still running?" with a single lock file rather than one per
+# snapshot. A hold per snapshot cost a descriptor per read and never gave it
+# back: ninety-odd reads exhausted the process's descriptors even though every
+# Dataset had been closed.
+_HOLD_ID = uuid.uuid4().hex
+
+_holds: dict[Path, IO[bytes]] = {}
+"""The one open hold per bronze directory this process has snapshotted into."""
+
+_reusable: dict[tuple, list[Path]] = {}
+"""Snapshots keyed by the inodes they link, so repeated reads share one."""
+
+_made: list[Path] = []
+"""Snapshot directories to remove on the way out."""
+
+
+def _hold_id_of(snapshot: Path) -> str:
+    return snapshot.name[len(_SNAPSHOT_PREFIX) :].split("-", 1)[0]
+
+
+def _take_process_hold(out_dir: Path) -> None:
+    """Say, once per directory, that this process has live snapshots here."""
+    if out_dir in _holds:
+        return
+    _holds[out_dir] = take_hold(out_dir / f"{_HOLD_PREFIX}{_HOLD_ID}.lock")
+
+
+def _reap_stale_snapshots(out_dir: Path) -> None:
+    """Remove snapshots whose owner is gone.
+
+    Age alone is not abandonment. A process can outlive the lifetime below and
+    still be reading through its snapshot, and deleting one out from under a
+    live Dataset turns a stale directory into a FileNotFoundError mid-read — so
+    the owner's hold is asked first.
+    """
+    cutoff = time.time() - _SNAPSHOT_STALE_AFTER
+    for candidate in out_dir.glob(f"{_SNAPSHOT_PREFIX}*"):
+        try:
+            if candidate.stat().st_mtime >= cutoff:
+                continue
+            if is_held(out_dir / f"{_HOLD_PREFIX}{_hold_id_of(candidate)}.lock"):
+                logger.debug("%s is old but its owner is still running; leaving it", candidate.name)
+                continue
+            shutil.rmtree(candidate, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _inode_key(out_dir: Path, files: list[Path]) -> tuple | None:
+    """What makes two reads the same read: the very inodes they would link."""
+    try:
+        return (str(out_dir), tuple(sorted((f.stat().st_dev, f.stat().st_ino) for f in files)))
+    except OSError:
+        return None
+
+
+def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
+    """Give the reader a set of files that cannot change underneath it.
+
+    Holding the refresh lock until the files were open is not enough. xarray
+    keeps a bounded cache of open files and *closes* the ones it evicts, then
+    reopens them **by path** on the next lazy read — so a Dataset opened from a
+    coherent set still returned a later generation once its handle had been
+    evicted and the file replaced underneath.
+
+    A hard link names the inode, not the path. Publication replaces a file by
+    renaming over it, which leaves the inode this link holds untouched, so a
+    reopen through the snapshot reads the bytes it opened. Nothing is copied.
+
+    Reads of the same inodes share one snapshot: a loop that opens the same
+    unchanged files would otherwise leave a directory per pass, each pinning the
+    generation it linked.
+
+    Where the filesystem has no hard links, the files are *copied* instead.
+    Falling back to the originals was silent and put the race straight back;
+    paying for a copy is the honest price of the same guarantee, and it is
+    announced because it is slow.
+
+    Resolved once, here, before it names anything: ``out_dir`` reaches this
+    function as whatever spelling its caller used, and the ownership hold and
+    the reuse cache both key on it directly. Two spellings of one directory
+    otherwise look like two directories — worse, a second hold on the same
+    real directory opens a fresh handle on the same lock file and flocks it
+    against the handle this process already holds, so ``take_hold`` raises
+    ``BlockingIOError`` locking against itself rather than recognizing it
+    already owns the directory.
+    """
+    out_dir = out_dir.resolve()
+    _reap_stale_snapshots(out_dir)
+
+    key = _inode_key(out_dir, files)
+    if key is not None and (existing := _reusable.get(key)) and all(link.exists() for link in existing):
+        return existing
+
+    snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{_HOLD_ID}-{uuid.uuid4().hex}"
+    snapshot.mkdir(mode=0o700)
+    try:
+        _take_process_hold(out_dir)
+        linked = [_link_or_copy(source, snapshot / source.name) for source in files]
+    except BaseException:
+        shutil.rmtree(snapshot, ignore_errors=True)
+        raise
+    _made.append(snapshot)
+    if key is not None:
+        _reusable[key] = linked
+    return linked
+
+
+def _link_or_copy(source: Path, destination: Path) -> Path:
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        logger.warning(
+            "Could not hard-link %s into a read snapshot (%s); copying instead. This is slower, and "
+            "happens on filesystems without hard links.",
+            source.name,
+            exc,
+        )
+        shutil.copy2(source, destination)
+    return destination
+
+
+def _clean_snapshots() -> None:
+    """Drop this process's snapshots and release its holds.
+
+    Not tied to a Dataset's lifetime: a Dataset derived from another shares its
+    file handles but not its identity, so collecting the original would pull the
+    files out from under the derived one. Released at exit instead, and reaped
+    later by a process that finds them old and their owner gone.
+    """
+    for snapshot in _made:
+        shutil.rmtree(snapshot, ignore_errors=True)
+    _made.clear()
+    _reusable.clear()
+    for out_dir, hold in _holds.items():
+        with contextlib.suppress(Exception):
+            hold.close()
+        with contextlib.suppress(OSError):
+            (out_dir / f"{_HOLD_PREFIX}{_HOLD_ID}.lock").unlink()
+    _holds.clear()
+
+
+atexit.register(_clean_snapshots)
+
+
 # --- The adapter -----------------------------------------------------------
 
 
@@ -158,6 +319,7 @@ class OpenAdapter(Protocol):
         dataset: str,
         workspace: Workspace,
         fetcher: Fetcher,
+        engine: str | None = None,
     ) -> xr.Dataset: ...
 
 
@@ -268,6 +430,7 @@ class GridReader:
         variables: str | list[str] | None,
         workspace: Workspace,
         fetcher: Fetcher,
+        engine: str | None = None,
     ) -> xr.Dataset:
         """Validate, materialize, and open one Grid Dataset."""
         if self.max_files == 1 and match is None:
@@ -278,16 +441,29 @@ class GridReader:
                 f'foehn.open_dataset({dataset!r}, match="{self.match_example}").'
             )
         self.require()
-        files = self.acquire(
-            dataset,
-            workspace,
-            suffixes=self.suffixes,
-            match=match,
-            max_files=self.max_files,
-            run_datetime=self.run_datetime,
-            fetcher=fetcher,
-        )
-        return select_variables(self.open(files, dataset=dataset, workspace=workspace, fetcher=fetcher), variables)
+        # The acquisition validates the set and then hands back paths. Letting go
+        # of its lock at that point left the reader holding names, not files: a
+        # refresh could land between the check and the open, and the Dataset came
+        # back mixing generations that had each been coherent when checked. Held
+        # until the files are open, after which each reader has its own handles
+        # and a later replacement cannot reach them.
+        out_dir = workspace.bronze(dataset)
+        with coherence.refresh_lock(out_dir):
+            files = self.acquire(
+                dataset,
+                workspace,
+                suffixes=self.suffixes,
+                match=match,
+                max_files=self.max_files,
+                run_datetime=self.run_datetime,
+                fetcher=fetcher,
+            )
+            # Snapshotted, not merely opened: see _snapshot. The lock covers
+            # taking it, so the set it links is the set that was validated.
+            opened = self.open(
+                _snapshot(files, out_dir), dataset=dataset, workspace=workspace, fetcher=fetcher, engine=engine
+            )
+        return select_variables(opened, variables)
 
     def write_store(
         self,
@@ -312,36 +488,40 @@ class GridReader:
                     f'stack= needs match= to scope the cube for {dataset!r}, e.g. match="{self.cube_match_example}".'
                 )
             self.require()
-            files = self.acquire(
-                dataset,
-                workspace,
-                suffixes=self.suffixes,
-                match=match,
-                max_files=self.cube_max_files,
-                run_datetime=self.run_datetime,
-                fetcher=fetcher,
-            )
-            if mode == "w":
-                with atomicwrite.staged_directory(store) as staged:
+            # Held across the cube as well as the acquisition: a cube reads every
+            # matched file, so a refresh landing part-way through builds a store
+            # from two generations exactly as a plain read would.
+            with coherence.refresh_lock(workspace.bronze(dataset)):
+                files = self.acquire(
+                    dataset,
+                    workspace,
+                    suffixes=self.suffixes,
+                    match=match,
+                    max_files=self.cube_max_files,
+                    run_datetime=self.run_datetime,
+                    fetcher=fetcher,
+                )
+                if mode == "w":
+                    with atomicwrite.staged_directory(store) as staged:
+                        self.cube(
+                            files,
+                            staged,
+                            dataset=dataset,
+                            workspace=workspace,
+                            fetcher=fetcher,
+                            variables=variables,
+                            mode=mode,
+                        )
+                else:
                     self.cube(
                         files,
-                        staged,
+                        store,
                         dataset=dataset,
                         workspace=workspace,
                         fetcher=fetcher,
                         variables=variables,
                         mode=mode,
                     )
-            else:
-                self.cube(
-                    files,
-                    store,
-                    dataset=dataset,
-                    workspace=workspace,
-                    fetcher=fetcher,
-                    variables=variables,
-                    mode=mode,
-                )
             return
 
         ds = self.open_dataset(
@@ -471,8 +651,23 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
             kwargs["backend_kwargs"] = backend_kwargs
         if len(files) == 1:
             return xr.open_dataset(files[0], **kwargs)
-        datasets = [xr.open_dataset(f, **kwargs) for f in files]
-        return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+        # Opened one at a time so a failure can close what is already open. The
+        # comprehension this replaces leaked a handle per file whenever the
+        # combine raised, which on a large set exhausts the descriptor limit and
+        # reports the exhaustion instead of the original fault. On success the
+        # handles stay open: the combined Dataset reads from them lazily.
+        datasets: list = []
+        try:
+            for source in files:
+                # Not a comprehension: the except below has to close whatever
+                # was opened before the failure, which needs the partial list.
+                datasets.append(xr.open_dataset(source, **kwargs))  # noqa: PERF401
+            return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+        except BaseException:
+            for opened in datasets:
+                with contextlib.suppress(Exception):
+                    opened.close()
+            raise
 
     try:
         return _do(decode_times=True)
@@ -491,11 +686,24 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
 # --- The open adapters -----------------------------------------------------
 
 
-def open_netcdf(files: list[Path], *, dataset: str, **_: object) -> xr.Dataset:
-    """Open one or more NetCDF files, combining them on their coordinates."""
+def open_netcdf(files: list[Path], *, dataset: str, engine: str | None = None, **_: object) -> xr.Dataset:
+    """Open one or more NetCDF files, combining them on their coordinates.
+
+    ``engine`` is passed to xarray, for a caller who needs to name a backend —
+    ``h5netcdf`` where netCDF4 chokes on a particular file. Left unset, xarray
+    picks. This was a documented keyword at v0.4.0 and its removal broke calls
+    that named a backend, so it stays.
+    """
     xr = _require_xarray()
     try:
-        return _open_grid(xr, files, engine=None)
+        return _open_grid(xr, files, engine=engine)
+    except OSError:
+        # An unreadable file is not a heterogeneous set, and telling its owner
+        # to narrow the match sends them somewhere the fix cannot be. The
+        # underlying error already names the file that would not open, so it is
+        # more use unchanged — a corrupt entry in the cache is deleted, not
+        # matched around.
+        raise
     except Exception as exc:
         if len(files) > 1:
             fmt = COLLECTION_META[dataset]["format"]
@@ -508,10 +716,25 @@ def open_netcdf(files: list[Path], *, dataset: str, **_: object) -> xr.Dataset:
         raise
 
 
-def open_grib2(files: list[Path], *, dataset: str, workspace: Workspace, fetcher: Fetcher, **_: object) -> xr.Dataset:
-    """Open one GRIB2 field via cfgrib, geo-referenced onto the ICON cell grid."""
+def open_grib2(
+    files: list[Path],
+    *,
+    dataset: str,
+    workspace: Workspace,
+    fetcher: Fetcher,
+    engine: str | None = None,
+    **_: object,
+) -> xr.Dataset:
+    """Open one GRIB2 field via cfgrib, geo-referenced onto the ICON cell grid.
+
+    ``engine`` defaults to cfgrib, which is the only backend that reads these
+    files today. An explicit one is honoured rather than silently replaced: a
+    caller who names a backend and gets a different one has no way to tell.
+    """
     xr = _require_xarray()
-    ds = _open_grid(xr, files, engine="cfgrib", backend_kwargs={"indexpath": ""})
+    # ``is None``, not falsiness: an explicit engine="" is a caller saying
+    # something, and quietly substituting cfgrib for it hides the mistake.
+    ds = _open_grid(xr, files, engine="cfgrib" if engine is None else engine, backend_kwargs={"indexpath": ""})
     return icon.attach_lonlat(
         ds,
         dataset,
@@ -536,6 +759,123 @@ def open_radar(files: list[Path], **_: object) -> xr.Dataset:
 _STACK_TIME_ENCODING = {"units": "seconds since 1970-01-01", "calendar": "proleptic_gregorian", "dtype": "int64"}
 
 
+def _time_keys(ds) -> frozenset:
+    """The timestamps *ds* carries, as integer nanoseconds.
+
+    Normalised to one unit because the two sides of the comparison do not share
+    one: an ODIM composite opens at ``datetime64[s]`` while the same instant read
+    back out of a Zarr store is ``datetime64[ns]``. Worse, ``.tolist()`` on those
+    two returns different *types* — ``datetime`` for seconds, ``int`` for
+    nanoseconds — so the sets never intersected and every timestep looked new.
+    """
+    return frozenset(ds["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist())
+
+
+# Every Zarr write mode xarray accepts. Validated before anything branches on
+# it: an unrecognised value used to fall through to the extending path, where it
+# could skip a file as already stored or take the in-place region update.
+_ZARR_MODES = ("w", "w-", "a", "a-", "r+")
+
+
+def _source_fingerprint(path: Path) -> str:
+    """Identify the exact revision of a source file, by its contents.
+
+    Size and mtime are metadata a restatement can reproduce exactly — same
+    length, mtime restored — and then the revised values never reach the cube.
+    Radar composites are a few hundred KB, so reading one to hash it costs
+    less than the open and decode that follows it.
+    """
+    return hashlib.blake2b(path.read_bytes(), digest_size=16).hexdigest()
+
+
+def _cube_times(xr, store: Path) -> frozenset:
+    """The timestamps an existing cube already holds, or nothing if it has none.
+
+    A store that cannot be opened is treated as holding nothing: the append then
+    behaves exactly as it did before this check existed, rather than failing on
+    the way to a write that would have worked.
+    """
+    if not store.exists():
+        return frozenset()
+    try:
+        with warnings.catch_warnings():
+            # foehn writes consolidated metadata, but this may be reading a store
+            # written by something that did not. Only the time coordinate is
+            # wanted, so the slower path is fine and the advice is not for us.
+            warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+            with xr.open_zarr(store) as existing:
+                if "time" not in existing.coords:
+                    return frozenset()
+                return _time_keys(existing)
+    except Exception as exc:  # any unreadable store means "unknown", not "fail"
+        logger.debug("Could not read existing times from %s (%s); appending without de-duplication", store, exc)
+        return frozenset()
+
+
+def _cube_time_index(xr, store: Path) -> dict[int, int]:
+    """Map each stored timestamp to its position on the cube's time axis."""
+    if not store.exists():
+        return {}
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+            with xr.open_zarr(store) as existing:
+                if "time" not in existing.coords:
+                    return {}
+                stamps = existing["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist()
+        return {stamp: position for position, stamp in enumerate(stamps)}
+    except Exception as exc:
+        logger.debug("Could not index the time axis of %s (%s)", store, exc)
+        return {}
+
+
+def _stored_sources(store: Path) -> dict[str, str]:
+    """Which revision of which file produced each stored timestep.
+
+    Kept in the store's own attributes so it survives the process. Without it an
+    append can only ask whether a timestamp is present, and MeteoSwiss restates
+    a timestamp's *values* under the same name — CombiPrecip reanalysis replaces
+    the original hourly file about eight days later. Presence alone would skip
+    that file forever and leave the cube on the superseded numbers.
+    """
+    try:
+        import zarr
+
+        recorded = zarr.open_group(str(store), mode="r").attrs.get("foehn_sources")
+        return {str(key): str(value) for key, value in recorded.items()} if isinstance(recorded, dict) else {}
+    except Exception as exc:
+        logger.debug("Could not read source fingerprints from %s (%s)", store, exc)
+        return {}
+
+
+def _record_sources(store: Path, recorded: dict[str, str]) -> None:
+    """Note which file revision produced the timesteps just written."""
+    try:
+        import zarr
+
+        group = zarr.open_group(str(store), mode="a")
+        existing = group.attrs.get("foehn_sources")
+        merged = {str(key): str(value) for key, value in existing.items()} if isinstance(existing, dict) else {}
+        merged.update(recorded)
+        group.attrs["foehn_sources"] = merged
+    except Exception as exc:  # pragma: no cover - never worth failing a good write over
+        logger.debug("Could not record source fingerprints in %s (%s)", store, exc)
+
+
+def _open_composite_snapshot(xr, path: Path):
+    """Decode a composite and the fingerprint of the exact bytes decoded.
+
+    Read once, then hashed and decoded from that one copy. Hashing the path on
+    both sides of the decode looked equivalent and is not: a source that goes
+    A -> B -> A while it is being read matches on both hashes, so B's values are
+    stored under A's fingerprint and every later append skips the correction for
+    good. Bytes already in hand cannot change underneath us.
+    """
+    data = path.read_bytes()
+    digest = hashlib.blake2b(data, digest_size=16).hexdigest()
+    return odim.open_composite(xr, path, data=data), digest
+
+
 def cube_radar(
     files: list[Path],
     store: Path,
@@ -549,20 +889,89 @@ def cube_radar(
     Written incrementally — one timestep appended at a time along ``time`` — so
     peak memory stays at a single file no matter how many timesteps the match
     spans, and no dask is needed.
+
+    On an extending write, a timestep already in the store is skipped when the
+    file that produced it has not changed, and rewritten in place when it has.
+    Both matter: a ``match``'s listing is cumulative, so the same files come back
+    every time, and MeteoSwiss restates a timestamp's values under its original
+    name days later.
     """
     xr = _require_xarray()
 
+    if mode not in _ZARR_MODES:
+        raise ValueError(f"mode={mode!r} is not a Zarr write mode. Use one of: {', '.join(_ZARR_MODES)}.")
+
+    # "w" and "w-" build a store from nothing; everything else extends one, and
+    # so has to reckon with what is already there. The caller's mode is passed
+    # through untouched — coercing anything that was not "a" into "w" turned
+    # "w-" (create, never clobber) and "r+" (modify, never truncate) into a
+    # silent overwrite of the store they were chosen to protect.
+    extending = mode not in {"w", "w-"}
+    stored_times = _cube_times(xr, store) if extending else frozenset()
+    stored_sources = _stored_sources(store) if extending else {}
+
+    written = 0
+    # Collected and written once at the end: xarray restates the group's
+    # attributes on every append, so recording them per file left only the last.
+    recorded: dict[str, str] = {}
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
-    for i, path in enumerate(sorted(files)):
-        ds = odim.open_composite(xr, path)
+    for path in sorted(files):
+        ds, fingerprint = _open_composite_snapshot(xr, path)
         if "time" not in ds.coords:
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
         # Narrowed per file rather than once at the end: only one timestep is ever
         # in memory. Same rule as everywhere else, hence the same call.
         ds = select_variables(ds, variables).expand_dims("time")
         ds["time"].encoding.update(_STACK_TIME_ENCODING)
-        write_mode = mode if i == 0 else "a"
-        _write_zarr(ds, store, write_mode, append_dim="time" if write_mode == "a" else None)
+
+        keys = _time_keys(ds)
+        if keys and keys <= stored_times:
+            if all(stored_sources.get(str(key)) == fingerprint for key in keys):
+                logger.debug("%s: already in %s and unchanged, not appending again", path.name, store.name)
+                continue
+            _revise_in_place(xr, ds, store, keys)
+            recorded.update({str(key): fingerprint for key in keys})
+            continue
+
+        write_mode = "a" if written else mode
+        # "a" against a path that does not exist yet creates the store, and there
+        # is no axis to extend on that first write.
+        creating = write_mode in {"w", "w-"} or not store.exists()
+        _write_zarr(ds, store, write_mode, append_dim=None if creating else "time")
+        recorded.update({str(key): fingerprint for key in keys})
+        written += 1
+
+    if recorded:
+        # Merged over what the store held when this call started: an append
+        # restates the group's attributes, so recording only this call's entries
+        # dropped every earlier one — and the next incremental write then had no
+        # history to skip against and rewrote regions that had not changed.
+        _record_sources(store, {**stored_sources, **recorded})
+
+
+def _revise_in_place(xr, ds, store: Path, keys: frozenset) -> None:
+    """Overwrite the timesteps *ds* covers, leaving the rest of the cube alone.
+
+    A region write rather than an append: the timestamps already exist, so
+    appending them would duplicate the axis instead of correcting it.
+    """
+    positions = _cube_time_index(xr, store)
+    missing = sorted(key for key in keys if key not in positions)
+    if missing:
+        raise ValueError(f"Cannot revise {store.name}: its time axis no longer holds the timestep being rewritten.")
+
+    ordered = sorted(positions[key] for key in keys)
+    if ordered != list(range(ordered[0], ordered[0] + len(ordered))):
+        raise ValueError(f"Cannot revise {store.name}: the timesteps being rewritten are not contiguous.")
+
+    region = {"time": slice(ordered[0], ordered[0] + len(ordered))}
+    # Coordinates are not part of a region write — they already exist and must
+    # not be restated.
+    payload = ds.drop_vars([name for name in ds.coords if name in ds.variables])
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+        payload.to_zarr(store, region=region)
+    logger.debug("Revised %d timestep(s) in %s in place", len(ordered), store.name)
 
 
 def cube_grib2(

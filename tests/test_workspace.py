@@ -41,6 +41,17 @@ def test_a_string_data_dir_is_accepted():
     assert Workspace.resolve("/some/where").root == Path("/some/where")
 
 
+def test_equivalent_spellings_resolve_to_the_same_root(tmp_path):
+    """Two names for one directory must produce one workspace.
+
+    Every ownership and cache lock foehn takes is filed under a path derived
+    from this root; two spellings that stayed distinct here would carry that
+    all the way down to two locks on the one real directory.
+    """
+    spelled_differently = tmp_path / "sub" / ".."
+    assert Workspace.resolve(spelled_differently).root == Workspace.resolve(tmp_path).root
+
+
 def test_layout(tmp_path):
     ws = Workspace(tmp_path)
     assert ws.bronze() == tmp_path / "bronze"
