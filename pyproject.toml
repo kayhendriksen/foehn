@@ -69,6 +69,10 @@ grids = [
     "zarr>=3.0",
     "cfgrib>=0.9.12",
     "eccodes>=1.7",
+    # The C library eccodes loads. Its wheel already requires this off Windows,
+    # but its sdist metadata does not and uv locks from that, so a locked sync
+    # silently came up without ecCodes until it was declared here.
+    "eccodeslib; platform_system != 'Windows'",
     "pyproj>=3.0",
 ]
 dev = [
@@ -78,7 +82,7 @@ dev = [
     # the upgrade arrives as its own reviewable PR rather than landing on whoever
     # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
     # which CI reads — see scripts/hook_version.sh.)
-    "ty==0.0.82",
+    "ty==0.0.84",
     "numpy>=1.24",
     "pydantic>=2.0",
     # Strict YAML parsing for the workflow-structure test: PyYAML silently
@@ -94,6 +98,7 @@ dev = [
     "zarr>=3.0",
     "cfgrib>=0.9.12",
     "eccodes>=1.7",
+    "eccodeslib; platform_system != 'Windows'",
     "h5py>=3.0",
     "pyproj>=3.0",
 ]
