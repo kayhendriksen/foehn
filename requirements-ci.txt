@@ -11,6 +11,6 @@
 # because the typecheck job installs it rather than running it through uvx.
 bandit==1.9.4
 build==1.6.1
-cyclonedx-bom==7.3.1
+cyclonedx-bom==7.4.0
 pip-audit==2.10.1
 twine==7.0.0
