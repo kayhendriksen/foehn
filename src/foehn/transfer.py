@@ -172,7 +172,7 @@ def materialization_current(asset: Asset, out_dir: Path) -> bool:
     marker = out_dir / _MATERIALIZATION_MARKER
     try:
         recorded = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
     if not isinstance(recorded, dict):
         return False

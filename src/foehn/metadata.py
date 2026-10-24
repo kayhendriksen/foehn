@@ -65,6 +65,22 @@ class MetadataTable:
         """Immutable source → published compatibility view."""
         return MappingProxyType({field.source: field.published for field in self.fields})
 
+    @property
+    def schema_overrides(self) -> dict[str, type[pl.DataType]]:
+        """Parse types for the fields whose declaration names exactly one.
+
+        The CSV used to be read with inferred types while the MCP models were
+        built from the declarations, and the two disagreed whenever inference
+        guessed differently: a points table whose first postal code is ``3011``
+        read that column as integers, which the ``Point`` model and the string
+        search both rejected. Unions (``int | float``) are left to inference.
+        """
+        return {
+            field.source: _POLARS_TYPES[field.python_type]
+            for field in self.fields
+            if field.python_type in _POLARS_TYPES
+        }
+
     def field(self, published: str) -> MetadataField:
         for field in self.fields:
             if field.published == published:
@@ -77,6 +93,9 @@ class MetadataTable:
         actual = {name: getattr(value, "annotation", None) for name, value in model_fields.items()}
         if actual != expected:
             raise TypeError(f"Metadata model does not match {self.suffix}: expected {expected}, got {actual}")
+
+
+_POLARS_TYPES: Mapping[Any, type[pl.DataType]] = MappingProxyType({str: pl.String, int: pl.Int64, float: pl.Float64})
 
 
 def _field(
@@ -199,7 +218,7 @@ def fetch_table(dataset: str, table: str, *, fetcher: Fetcher) -> pl.DataFrame:
         if spec.suffix not in asset.name:
             continue
         content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
-        df = pl.read_csv(content.encode("utf-8"), separator=";")
+        df = pl.read_csv(content.encode("utf-8"), separator=";", schema_overrides=spec.schema_overrides)
         return df.select(pl.col(field.source).alias(field.published) for field in spec.fields)
 
     available = [name for name, other in TABLES.items() if any(other.suffix in a.name for a in csv_assets)]

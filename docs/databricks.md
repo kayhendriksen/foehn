@@ -49,3 +49,10 @@ files therefore receive the same column names, timestamps, encodings, and dtype
 normalisation before Spark writes them. Overwrite passes replace the stored
 schema and chunked append passes merge compatible additions, so a normalized
 schema change can migrate an existing table.
+
+A table is only replaced once all of its input has been read and written.
+Chunked historical groups are built in a `<table>__foehn_staging` table and
+published with one overwrite at the end, so a failed chunk leaves the previous
+complete table in place. Any table that fails to read or write is reported with
+its error and makes the job exit non-zero; a dataset with no input is reported
+as skipped and does not.

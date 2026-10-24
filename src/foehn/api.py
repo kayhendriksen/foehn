@@ -83,8 +83,9 @@ def download(
         since: ISO timestamp for incremental updates — only assets updated after
             it are fetched. This function does not track state itself: pass the
             previous run's timestamp, or use the ``foehn download`` CLI, which
-            persists one in ``_last_run.json`` and only advances it when the run
-            fully succeeds.
+            keeps one per dataset and time slice in ``_last_run.json`` and only
+            advances a dataset's when that dataset fully succeeds. Must carry a
+            timezone; it is compared as an instant, not as text.
         workers: Concurrent HTTP downloads (default $default_workers).
         force: Re-download even when local files look up to date. Currently
             only affects ZIP-shipped datasets (e.g. climate_scenarios_indoor),

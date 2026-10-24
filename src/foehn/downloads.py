@@ -21,7 +21,7 @@ from foehn import coherence
 from foehn.assets import Asset, assets_of, collection_assets, latest_run_of, select
 from foehn.collections import CLIMATE_NORMALS_ZIP_URL, COLLECTIONS
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
-from foehn.state import EtagRun
+from foehn.state import EtagRun, parse_instant
 from foehn.transfer import (
     DownloadResult,
     SkipRule,
@@ -48,15 +48,34 @@ def _banner(title: str, out_dir: Path) -> None:
     logger.info("%s", "=" * 60)
 
 
+def _since_instant(since: str | None):
+    """Parse *since* up front, so a malformed one fails before any listing."""
+    if not since:
+        return None
+    cutoff = parse_instant(since)
+    if cutoff is None:
+        raise ValueError(f"since={since!r} is not an ISO 8601 timestamp with a timezone.")
+    return cutoff
+
+
 def _updated_since(items: list[dict], since: str | None) -> list[dict]:
     """Keep only the items MeteoSwiss restated after *since*.
 
     Written out verbatim in three of the four download paths, along with its two
-    log lines. What ``since`` means is one rule.
+    log lines. What ``since`` means is one rule. Compared as instants: as strings,
+    ``10:30:00Z`` sorted before ``11:00:00+01:00`` and a change half an hour
+    after the cursor was skipped. An Item whose ``updated`` cannot be read is
+    kept — a redundant fetch is cheaper than a silent skip.
     """
-    if not since:
+    cutoff = _since_instant(since)
+    if cutoff is None:
         return items
-    kept = [item for item in items if item.get("properties", {}).get("updated", "") > since]
+
+    def changed(item: dict) -> bool:
+        updated = parse_instant(item.get("properties", {}).get("updated", ""))
+        return updated is None or updated > cutoff
+
+    kept = [item for item in items if changed(item)]
     logger.info("  %d items updated since last run", len(kept))
     return kept
 
@@ -131,6 +150,7 @@ def stac_download(
         fetcher: Fetcher,
         **_: object,
     ) -> DownloadResult:
+        _since_instant(since)
         result = DownloadResult()
         if with_metadata:
             result = download_metadata(dataset, workspace, workers=workers, fetcher=fetcher)
@@ -159,19 +179,25 @@ def stac_download(
             available = len({a.forecast_run for a in every if a.forecast_run is not None})
             logger.info("  Latest forecast run: %s (of %d available)", run, available)
 
-        # The conditional-GET writer decides "unchanged" from the server's 304,
-        # so the ETag store is this kind's skip rule.
-        etag_run = EtagRun.begin(workspace) if etags else None
-        store = etag_run.values if etag_run is not None else None
-
         # The same coherence protocol the read path speaks. This writes into the
         # very directory a grid read opens from, and replacing several files one
         # at a time has a middle — so a download running beside a read used to
         # produce a mixed set with nothing on disk to say so. Grid kinds only:
         # the CSV kinds are converted before anything reads them, and there is no
         # set whose members have to agree.
+        #
+        # The ETag kinds hold the same per-Dataset lock from the ETag snapshot to
+        # its commit. Run state merges were locked but publication was not: an
+        # older response could replace a newer file and the newer run then commit
+        # its ETag, so every later refresh got a 304 and kept the stale bytes.
+        # Per Dataset, so unrelated Datasets still download side by side.
         names = [asset.name for asset in wanted]
-        with coherence.refresh_lock(out_dir) if coherent else nullcontext():
+        with coherence.refresh_lock(out_dir) if coherent or etags else nullcontext():
+            # The conditional-GET writer decides "unchanged" from the server's 304,
+            # so the ETag store is this kind's skip rule.
+            etag_run = EtagRun.begin(workspace) if etags else None
+            store = etag_run.values if etag_run is not None else None
+
             # Files a previous run left half-replaced are fetched again whatever
             # the freshness rule says. Without this a retry found both current —
             # the collection states no ``updated``, or the half-written file's
@@ -196,11 +222,11 @@ def stac_download(
             if coherent and fetched.failed == 0:
                 coherence.clear(out_dir, names)
 
-        if etag_run is not None:
-            # Only on a clean full listing: with ``since`` the item list is
-            # partial, and after failures the universe may be incomplete.
-            listed = {a.href for a in every} if since is None and fetched.failed == 0 else None
-            etag_run.commit(collection_id, listed=listed)
+            if etag_run is not None:
+                # Only on a clean full listing: with ``since`` the item list is
+                # partial, and after failures the universe may be incomplete.
+                listed = {a.href for a in every} if since is None and fetched.failed == 0 else None
+                etag_run.commit(collection_id, listed=listed)
 
         return result + fetched
 

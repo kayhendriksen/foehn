@@ -308,14 +308,12 @@ def test_convert_preamble_to_parquet_counts_bad_file(tmp_path):
     cs_dir = bronze_dir / "climate_scenarios"
     cs_dir.mkdir(parents=True)
     (cs_dir / "ogd-climate-scenarios-ch2025_abe_pr_gwl1.5.csv").write_text(CLIMATE_SCENARIOS_CSV)
-    # No 'DATE;' header — must be skipped and counted, not abort the whole run.
+    # No 'DATE;' header — counted, and nothing partial is published in its place.
     (cs_dir / "ogd-climate-scenarios-ch2025_ber_tas_gwl2.0.csv").write_text("TITLE;nope\n")
 
     parquet_dir = workspace.parquet()
     assert convert_preamble_to_parquet("climate_scenarios", workspace) == 1
-
-    df = pl.read_parquet(parquet_dir / "climate_scenarios" / "climate_scenarios.parquet")
-    assert set(df["station_abbr"].unique()) == {"abe"}
+    assert not (parquet_dir / "climate_scenarios" / "climate_scenarios.parquet").exists()
 
 
 # --- Nothing to convert ---
@@ -369,18 +367,31 @@ def test_an_archive_of_only_non_data_files_writes_nothing_and_fails_nothing(tmp_
     assert not (workspace.parquet("climate_scenarios_indoor") / "climate_scenarios_indoor.parquet").exists()
 
 
-def test_a_scenarios_file_that_will_not_parse_is_counted_and_the_rest_written(tmp_path):
-    """One unreadable file must not cost the collection — but it must reach the exit code."""
+def test_a_failed_refresh_keeps_the_last_complete_output_and_retries(tmp_path):
+    """Publishing what parsed made a partial output newer than every source.
+
+    The next run then skipped it as up to date and reported success, with the
+    unreadable station still missing for good.
+    """
+    import os
+
     workspace = Workspace(tmp_path)
     bronze = workspace.bronze("climate_scenarios")
     bronze.mkdir(parents=True)
-    (bronze / "ogd-climate-scenarios-ch2025_ABE_pr_GWL1.5.csv").write_text(CLIMATE_SCENARIOS_CSV)
-    (bronze / "ogd-climate-scenarios-ch2025_BER_pr_GWL1.5.csv").write_text("no data header here\n")
+    abe = bronze / "ogd-climate-scenarios-ch2025_ABE_pr_GWL1.5.csv"
+    ber = bronze / "ogd-climate-scenarios-ch2025_BER_pr_GWL1.5.csv"
+    abe.write_text(CLIMATE_SCENARIOS_CSV)
+    ber.write_text(CLIMATE_SCENARIOS_CSV)
+    assert convert_preamble_to_parquet("climate_scenarios", workspace) == 0
+    out = workspace.parquet("climate_scenarios") / "climate_scenarios.parquet"
+    complete = pl.read_parquet(out)
 
-    assert convert_preamble_to_parquet("climate_scenarios", workspace) == 1
+    ber.write_text("no data header here\n")
+    os.utime(out, (0, 0))  # the restated source is newer than the output
 
-    out = pl.read_parquet(workspace.parquet("climate_scenarios") / "climate_scenarios.parquet")
-    assert out["station_abbr"].unique().to_list() == ["ABE"]
+    for _attempt in range(2):
+        assert convert_preamble_to_parquet("climate_scenarios", workspace) == 1
+        assert pl.read_parquet(out).equals(complete)
 
 
 def test_a_collection_where_every_file_fails_writes_nothing(tmp_path):

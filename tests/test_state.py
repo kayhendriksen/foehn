@@ -8,7 +8,15 @@ from datetime import UTC, datetime
 
 import pytest
 
-from foehn.state import EtagRun, load_etags, load_last_run, save_etags, save_last_run
+from foehn.state import (
+    EtagRun,
+    advance_cursor,
+    load_cursor,
+    load_etags,
+    load_last_run,
+    save_etags,
+    save_last_run,
+)
 from foehn.workspace import Workspace
 
 # --- State management ---
@@ -133,3 +141,69 @@ def test_an_older_concurrent_run_cannot_move_the_cursor_backwards(tmp_path):
     save_last_run(workspace, "2026-08-31T10:00:00+00:00")
 
     assert load_last_run(workspace) == "2026-08-31T10:05:00+00:00"
+
+
+# --- Scoped cursors ---
+
+
+def _with_bronze(tmp_path, *datasets):
+    workspace = Workspace(tmp_path)
+    for dataset in datasets:
+        workspace.bronze(dataset).mkdir(parents=True, exist_ok=True)
+        (workspace.bronze(dataset) / "file.csv").write_text("x")
+    return workspace
+
+
+def test_a_cursor_belongs_to_one_dataset_and_time_slice(tmp_path):
+    """One Workspace-wide cursor let smn's run filter pollen's never-fetched Items."""
+    workspace = _with_bronze(tmp_path, "smn", "pollen")
+    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T10:00:00+00:00")
+
+    assert load_cursor(workspace, "smn", ["recent"]) == "2026-10-25T10:00:00+00:00"
+    assert load_cursor(workspace, "pollen", ["recent"]) is None
+    # A slice requested for the first time lists everything, even beside a known one.
+    assert load_cursor(workspace, "smn", ["historical", "recent"]) is None
+
+
+def test_several_slices_resume_from_the_earliest_cursor(tmp_path):
+    workspace = _with_bronze(tmp_path, "smn")
+    advance_cursor(workspace, "smn", ["historical"], "2026-10-24T00:00:00Z")
+    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T00:00:00Z")
+
+    assert load_cursor(workspace, "smn", ["historical", "recent"]) == "2026-10-24T00:00:00Z"
+
+
+def test_an_empty_bronze_directory_ignores_its_cursor(tmp_path):
+    """Files someone deleted cannot be incremental against anything."""
+    workspace = Workspace(tmp_path)
+    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T10:00:00+00:00")
+
+    assert load_cursor(workspace, "smn", ["recent"]) is None
+    workspace.bronze("smn").mkdir(parents=True)
+    assert load_cursor(workspace, "smn", ["recent"]) is None
+
+
+def test_a_cursor_only_moves_forward_and_keeps_its_neighbours(tmp_path):
+    workspace = _with_bronze(tmp_path, "smn")
+    save_last_run(workspace, "2026-01-01T00:00:00+00:00")
+    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T12:00:00+02:00")
+    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T09:30:00Z")  # earlier instant
+    advance_cursor(workspace, "pollen", ["recent"], "2026-10-26T00:00:00Z")
+
+    assert load_cursor(workspace, "smn", ["recent"]) == "2026-10-25T12:00:00+02:00"
+    assert load_last_run(workspace) == "2026-01-01T00:00:00+00:00"
+
+
+def test_an_advance_needs_a_timezone(tmp_path):
+    with pytest.raises(ValueError, match="timezone"):
+        advance_cursor(Workspace(tmp_path), "smn", ["recent"], "2026-10-25T10:00:00")
+
+
+@pytest.mark.parametrize("name", ["_etags.json", "_last_run.json"])
+def test_state_that_is_not_utf8_is_treated_as_absent(tmp_path, name):
+    workspace = _with_bronze(tmp_path, "smn")
+    (tmp_path / name).write_bytes(b"\xff\xfe not json")
+
+    assert load_etags(workspace) == {}
+    assert load_last_run(workspace) is None
+    assert load_cursor(workspace, "smn", ["recent"]) is None

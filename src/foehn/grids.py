@@ -52,6 +52,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -880,6 +881,46 @@ def _open_composite_snapshot(xr, path: Path):
     return odim.open_composite(xr, path, data=data), digest
 
 
+# Radar composites are named product, observation time, then a per-product code:
+# CPCyyjjjHHMMQ_nnnnn.XYZ.h5 for CombiPrecip, where Q is a quality code from 0 to
+# 9 (9 best), and e.g. RZCyyjjjHHMMKK.XYZ.h5 elsewhere, where KK is reserved and
+# changes with the radar sites available. When CombiPrecip's quality changes,
+# MeteoSwiss publishes a second file beside the first instead of overwriting it.
+_RADAR_NAME_RE = re.compile(
+    r"^(?P<product>[A-Za-z]+)(?P<time>\d{9})(?P<code>[0-9A-Za-z]{1,2})(?P<accumulation>_\d{5})?\."
+)
+
+
+def _one_file_per_observation(files: list[Path]) -> list[Path]:
+    """Keep one revision of each observation: the best quality, then the newest file.
+
+    Two files for one observation used to be appended as two equal timestamps,
+    and the next append then "revised" the pair with whichever came first —
+    putting the superseded values back over the correction. Names that do not
+    follow the convention are kept as they are; the unique-axis rule in
+    :func:`cube_radar` still applies to them.
+    """
+    best: dict[tuple[str, str, str], tuple[tuple[int, float, str], Path]] = {}
+    unnamed: list[Path] = []
+    for path in files:
+        found = _RADAR_NAME_RE.match(path.name)
+        if found is None:
+            unnamed.append(path)
+            continue
+        product = found["product"].lower()
+        code = found["code"]
+        quality = int(code) if product == "cpc" and code.isdigit() else -1
+        rank = (quality, path.stat().st_mtime, path.name)
+        observation = (product, found["time"], found["accumulation"] or "")
+        if observation not in best or rank > best[observation][0]:
+            if observation in best:
+                logger.debug("%s supersedes %s for the same observation", path.name, best[observation][1].name)
+            best[observation] = (rank, path)
+        else:
+            logger.debug("%s superseded by %s for the same observation", path.name, best[observation][1].name)
+    return sorted([*(path for _, path in best.values()), *unnamed])
+
+
 def cube_radar(
     files: list[Path],
     store: Path,
@@ -898,7 +939,10 @@ def cube_radar(
     file that produced it has not changed, and rewritten in place when it has.
     Both matter: a ``match``'s listing is cumulative, so the same files come back
     every time, and MeteoSwiss restates a timestamp's values under its original
-    name days later.
+    name days later — or under a second name, when CombiPrecip's quality code
+    changes, in which case only the best revision is used. The time axis stays
+    unique within a call too: a timestep this call already wrote is revised in
+    place rather than appended again.
     """
     xr = _require_xarray()
 
@@ -919,7 +963,7 @@ def cube_radar(
     # attributes on every append, so recording them per file left only the last.
     recorded: dict[str, str] = {}
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
-    for path in sorted(files):
+    for path in _one_file_per_observation(files):
         ds, fingerprint = _open_composite_snapshot(xr, path)
         if "time" not in ds.coords:
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
@@ -935,6 +979,7 @@ def cube_radar(
                 continue
             _revise_in_place(xr, ds, store, keys)
             recorded.update({str(key): fingerprint for key in keys})
+            stored_sources = {**stored_sources, **{str(key): fingerprint for key in keys}}
             continue
 
         write_mode = "a" if written else mode
@@ -944,6 +989,11 @@ def cube_radar(
         _write_zarr(ds, store, write_mode, append_dim=None if creating else "time")
         recorded.update({str(key): fingerprint for key in keys})
         written += 1
+        # What this call wrote is "stored" for the rest of it. Captured only at
+        # the start, a second file for the same instant was appended beside the
+        # first instead of revising it.
+        stored_times = stored_times | keys
+        stored_sources = {**stored_sources, **{str(key): fingerprint for key in keys}}
 
     if recorded:
         # Merged over what the store held when this call started: an append
@@ -1012,7 +1062,13 @@ def cube_grib2(
             f"The match selected files that don't differ in number/time/step for {dataset!r} — "
             "nothing to assemble into a cube (open it as a single field instead)."
         )
-    prepared = [ds.drop_vars("valid_time", errors="ignore").expand_dims(varying) for ds in datasets]
+    # Only where the axis is still a scalar: a control file carries ``number=0``,
+    # but a perturbed file holds every member and already has ``number`` as a
+    # dimension, which expanding again refused outright.
+    prepared = [
+        ds.drop_vars("valid_time", errors="ignore").expand_dims([coord for coord in varying if coord not in ds.dims])
+        for ds in datasets
+    ]
     cube = xr.combine_by_coords(prepared, combine_attrs="drop_conflicts")
     if "time" in cube.coords and "step" in cube.coords:
         cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])

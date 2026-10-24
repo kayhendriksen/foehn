@@ -15,8 +15,8 @@ from foehn.cli import main
 _PATCHES = [
     "foehn.registry.download",
     "foehn.registry.convert",
-    "foehn.cli.save_last_run",
-    "foehn.cli.load_last_run",
+    "foehn.cli.advance_cursor",
+    "foehn.cli.load_cursor",
 ]
 
 
@@ -27,9 +27,9 @@ def _start_mocks():
     started = [p.start() for p in patchers]
     for name, mock in zip(_PATCHES, started, strict=True):
         mocks[name.split(".")[-1]] = mock
-    mocks["load_last_run"].return_value = None
+    mocks["load_cursor"].return_value = None
     mocks["convert"].return_value = 0
-    # cmd_download sums result.failed from each download call to gate _last_run;
+    # cmd_download reads result.failed from each download call to gate its cursor;
     # give the download mock a clean (0-failure) DownloadResult by default.
     mocks["download"].return_value.failed = 0
     return mocks, patchers
@@ -144,14 +144,17 @@ def test_default_run_covers_every_non_grid_dataset(tmp_path):
 # --- full-refresh ---
 
 
-def test_full_refresh_ignores_last_run(tmp_path):
+def test_full_refresh_ignores_the_cursors(tmp_path):
     mocks = _run("download", ["--full-refresh"], tmp_path)
-    mocks["load_last_run"].assert_not_called()
+    mocks["load_cursor"].assert_not_called()
 
 
-def test_incremental_passes_since_to_download(tmp_path):
-    mocks = _run("download", [], tmp_path)
-    mocks["load_last_run"].assert_called_once()
+def test_incremental_reads_each_datasets_own_cursor(tmp_path):
+    mocks = _run("download", ["smn", "pollen"], tmp_path)
+    assert [call.args[1:] for call in mocks["load_cursor"].call_args_list] == [
+        ("smn", ["recent"]),
+        ("pollen", ["recent"]),
+    ]
 
 
 # --- grids ---
@@ -203,7 +206,7 @@ def test_cli_data_dir_overrides_env(tmp_path, monkeypatch):
 def test_env_full_refresh_truthy(tmp_path, monkeypatch):
     monkeypatch.setenv("FOEHN_FULL_REFRESH", "1")
     mocks = _run("download", [], tmp_path)
-    mocks["load_last_run"].assert_not_called()
+    mocks["load_cursor"].assert_not_called()
 
 
 # --- unknown key ---
@@ -241,7 +244,7 @@ def test_list_no_matches(tmp_path, capsys):
 
 def test_incremental_prints_since(tmp_path, capsys):
     mocks, patchers = _start_mocks()
-    mocks["load_last_run"].return_value = "2025-01-01T00:00:00"
+    mocks["load_cursor"].return_value = "2025-01-01T00:00:00+00:00"
 
     try:
         with patch("sys.argv", ["foehn", "download", "--data-dir", str(tmp_path)]):
@@ -252,13 +255,14 @@ def test_incremental_prints_since(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Incremental update" in out
+    assert "changes since 2025-01-01T00:00:00+00:00" in out
 
 
 # --- failure gating ---
 
 
-def test_save_last_run_skipped_on_convert_failure(tmp_path, capsys):
-    """If a conversion reports failures, _last_run.json must NOT be saved."""
+def test_cursor_held_back_on_convert_failure(tmp_path, capsys):
+    """If a conversion reports failures, that Dataset's cursor must NOT advance."""
     mocks, patchers = _start_mocks()
     mocks["convert"].return_value = 2  # 2 groups failed
     try:
@@ -269,13 +273,13 @@ def test_save_last_run_skipped_on_convert_failure(tmp_path, capsys):
             p.stop()
 
     assert exc.value.code == 1
-    mocks["save_last_run"].assert_not_called()
+    mocks["advance_cursor"].assert_not_called()
     err = capsys.readouterr().err
-    assert "not advancing _last_run.json" in err
+    assert "not advancing the _last_run.json cursor" in err
 
 
-def test_save_last_run_skipped_on_download_failure(tmp_path, capsys):
-    """If a download reports failures, _last_run.json must NOT be saved."""
+def test_cursor_held_back_on_download_failure(tmp_path, capsys):
+    """If a download reports failures, that Dataset's cursor must NOT advance."""
     mocks, patchers = _start_mocks()
     mocks["download"].return_value.failed = 1
     try:
@@ -286,15 +290,18 @@ def test_save_last_run_skipped_on_download_failure(tmp_path, capsys):
             p.stop()
 
     assert exc.value.code == 1
-    mocks["save_last_run"].assert_not_called()
+    mocks["advance_cursor"].assert_not_called()
     err = capsys.readouterr().err
-    assert "not advancing _last_run.json" in err
+    assert "not advancing the _last_run.json cursor" in err
 
 
-def test_save_last_run_called_on_clean_run(tmp_path):
-    """When all conversions return 0 failures, _last_run.json is saved as before."""
-    mocks = _run("download", [], tmp_path)
-    mocks["save_last_run"].assert_called_once()
+def test_each_clean_dataset_advances_its_own_cursor(tmp_path):
+    """When a Dataset downloads and converts cleanly, its cursor advances — and only its."""
+    mocks = _run("download", ["smn", "pollen"], tmp_path)
+    assert [call.args[1:3] for call in mocks["advance_cursor"].call_args_list] == [
+        ("smn", ["recent"]),
+        ("pollen", ["recent"]),
+    ]
 
 
 def test_to_parquet_exits_nonzero_on_failure(tmp_path):
@@ -566,3 +573,38 @@ def test_stack_still_accepts_the_v0_4_spellings(tmp_path, argv_stack, expected):
         main()
 
     assert written.call_args.kwargs["stack"] is expected
+
+
+# --- Successive commands against one Workspace (no mocks below the CLI) ---
+
+
+def test_successive_downloads_each_list_what_they_have_never_fetched(tmp_path, capsys):
+    """A run of smn advanced one shared cursor, and pollen's first run then skipped it all."""
+    from foehn.collections import COLLECTIONS
+    from foehn.workspace import Workspace
+    from tests.fakes import InMemoryFetcher, stac_item
+
+    smn_recent = f"https://data.geo.admin.ch/{COLLECTIONS['smn']}/ogd-smn_ber_d_recent.csv"
+    smn_historical = f"https://data.geo.admin.ch/{COLLECTIONS['smn']}/ogd-smn_ber_d_historical.csv"
+    pollen_recent = f"https://data.geo.admin.ch/{COLLECTIONS['pollen']}/ogd-pollen_pbe_d_recent.csv"
+    fake = InMemoryFetcher(
+        items={
+            COLLECTIONS["smn"]: [stac_item("ber", smn_recent, smn_historical, updated="2026-01-01T00:00:00Z")],
+            COLLECTIONS["pollen"]: [stac_item("pbe", pollen_recent, updated="2026-01-01T00:00:00Z")],
+        }
+    )
+    fake.any_collection = {"assets": {}}
+    fake.default_body = b"station_abbr;reference_timestamp;x\nBER;01.01.2026 00:00;1\n"
+    workspace = Workspace(tmp_path)
+
+    def download(*args):
+        argv = ["foehn", "download", "--no-parquet", "--data-dir", str(tmp_path), *args]
+        with patch("foehn.cli.default_fetcher", return_value=fake), patch("sys.argv", argv):
+            main()
+
+    download("smn")
+    download("pollen")
+    download("--historical", "smn")
+
+    assert (workspace.bronze("pollen") / "ogd-pollen_pbe_d_recent.csv").exists()
+    assert (workspace.bronze("smn") / "ogd-smn_ber_d_historical.csv").exists()

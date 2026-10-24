@@ -237,12 +237,23 @@ def convert_preamble_to_parquet(dataset: str, workspace: Workspace) -> int:
             try:
                 frames.append(scan_climate_scenarios_csv(f))
             except Exception as e:
-                # One unreadable file must not cost the rest of the collection —
-                # skip it, write what parsed, and report it so the exit code
-                # still reflects it.
+                # Every unreadable file is reported, not just the first, so one
+                # run names all of them.
                 failed += 1
                 logger.warning("  FAIL %s: %s", f.name, e)
-        if not frames:
+        if failed:
+            # All or nothing. Publishing the files that parsed replaced a
+            # complete output with a partial one that was then newer than every
+            # source, so the next run skipped it as up to date and reported
+            # success with the unreadable stations still missing. Leaving the
+            # last complete output in place keeps the sources newer than it, so
+            # the next run tries again.
+            logger.warning(
+                "  %s not written: %d of %d source(s) unreadable; the previous output is kept",
+                group.out_path.name,
+                failed,
+                len(group.sources),
+            )
             return failed
         _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path)
         logger.info("  Done: wrote %s (%d files)", group.out_path.name, len(frames))

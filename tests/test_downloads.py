@@ -229,6 +229,33 @@ def test_csv_download_since_filter(tmp_path):
     assert result.filenames == []
 
 
+@pytest.mark.parametrize(
+    ("updated", "fetched"),
+    [
+        # 10:30Z is half an hour after 11:00+01:00; as strings it sorted earlier.
+        ("2026-10-25T10:30:00Z", True),
+        ("2026-10-25T09:59:59.5Z", False),
+        ("2026-10-25T10:00:00.250+00:00", True),
+        ("", True),  # unreadable: a redundant fetch beats a silent skip
+    ],
+)
+def test_since_compares_instants_not_strings(tmp_path, updated, fetched):
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(url, updated=updated)])
+    _serve(fake)
+
+    registry.download("smn", Workspace(tmp_path), since="2026-10-25T11:00:00+01:00", fetcher=fake)
+
+    assert (url in fake.gets) is fetched
+
+
+def test_a_since_without_a_timezone_is_refused_before_listing(tmp_path):
+    fake = _fake([])
+    with pytest.raises(ValueError, match="timezone"):
+        registry.download("smn", Workspace(tmp_path), since="2026-10-25T11:00:00", fetcher=fake)
+    assert fake.listings == []
+
+
 def test_csv_download_resilient_to_single_failure(tmp_path):
     """One failing asset must not abort the batch or discard the others' ETags."""
     good = "https://data.geo.admin.ch/ogd-smn_aaa_d_recent.csv"
@@ -633,3 +660,52 @@ def test_forcing_a_refresh_works_for_a_kind_with_no_skip_rule():
 
     assert decide(None, Path("a.nc")) is False
     assert decide(None, Path("b.nc")) is False
+
+
+def test_concurrent_csv_refreshes_of_one_dataset_cannot_split_file_and_etag(tmp_path):
+    """An older response replaced a newer file, then the newer run committed its ETag.
+
+    Every later refresh then got a 304 and kept the stale bytes. Same-Dataset
+    refreshes now run one at a time from ETag snapshot to commit.
+    """
+    import threading
+
+    from foehn.state import load_etags
+
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    in_first_get, release_first, second_got = threading.Event(), threading.Event(), threading.Event()
+
+    class _Held(InMemoryFetcher):
+        def get(self, href, *, etag=None, timeout=60):
+            if href == url:
+                in_first_get.set()
+                assert release_first.wait(5)
+            return super().get(href, etag=etag, timeout=timeout)
+
+    class _Watched(InMemoryFetcher):
+        def get(self, href, *, etag=None, timeout=60):
+            if href == url:
+                second_got.set()
+            return super().get(href, etag=etag, timeout=timeout)
+
+    first, second = _Held(), _Watched()
+    for fake, body, etag in ((first, b"value\nold\n", '"old"'), (second, b"value\nnew\n", '"new"')):
+        fake.any_items = [_stac_item(url)]
+        fake.any_collection = {"assets": {}}
+        fake.add_body(url, body, etag=etag)
+    workspace = Workspace(tmp_path)
+
+    runs = [
+        threading.Thread(target=registry.download, args=("smn", workspace), kwargs={"fetcher": first}),
+        threading.Thread(target=registry.download, args=("smn", workspace), kwargs={"fetcher": second}),
+    ]
+    runs[0].start()
+    assert in_first_get.wait(5)
+    runs[1].start()
+    assert not second_got.wait(0.3)  # held back until the first run has committed
+    release_first.set()
+    for run in runs:
+        run.join(10)
+
+    body = (workspace.bronze("smn") / "ogd-smn_tst_d_recent.csv").read_bytes()
+    assert (body, load_etags(workspace)[url]) == (b"value\nnew\n", '"new"')
