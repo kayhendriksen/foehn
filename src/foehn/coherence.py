@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -38,7 +38,7 @@ LOCK = ".foehn-refresh.lock"
 
 
 @contextmanager
-def refresh_lock(out_dir: Path) -> Iterator[None]:
+def refresh_lock(out_dir: Path) -> Generator[None]:
     """Hold one grid dataset's directory for a whole refresh or snapshot.
 
     Not merely the marker's read-modify-write. Two refreshes of the same set

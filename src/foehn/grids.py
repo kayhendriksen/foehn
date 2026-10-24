@@ -626,7 +626,7 @@ def select_variables(ds, variables: str | list[str] | None):
 # --- xarray-backed opens ---------------------------------------------------
 
 
-def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict | None = None):
+def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict | None = None) -> xr.Dataset:
     """Open one or many grid files (NetCDF or GRIB2) into a single Dataset.
 
     Multiple files are opened individually and merged with ``combine_by_coords``

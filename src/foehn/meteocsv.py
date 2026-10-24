@@ -23,13 +23,15 @@ import io
 import logging
 import re
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, TypeVar
 
 import polars as pl
 
 from foehn.collections import COLLECTIONS, DERIVED_TIMESTAMP_KINDS, NO_GRANULARITY_KINDS, DatasetKind, kind
 
 logger = logging.getLogger(__name__)
+
+_Frame = TypeVar("_Frame", pl.DataFrame, pl.LazyFrame)
 
 # Polars names the offending column in its dtype errors. Both readers of a
 # MeteoSwiss CSV widen that column to Float64 and retry — the in-memory parse
@@ -222,14 +224,14 @@ def parse_csv_bytes(
         # Fallback: accumulate Float64 overrides for problematic columns.
         last_err = e
         while True:
-            col = column_from_dtype_error(str(last_err))
+            bad_col = column_from_dtype_error(str(last_err))
             # A column already forced to Float64 can't be widened further —
             # bail out instead of retrying the same parse forever.
-            if col is None or overrides.get(col) == pl.Float64:
+            if bad_col is None or overrides.get(bad_col) == pl.Float64:
                 break
-            if use_columns is not None and col not in use_columns:
+            if use_columns is not None and bad_col not in use_columns:
                 break  # not a column we're reading; widening it would be rejected
-            overrides[col] = pl.Float64
+            overrides[bad_col] = pl.Float64
             try:
                 return pl.read_csv(
                     data,
@@ -309,7 +311,7 @@ def add_forecast_local_timestamp(frame):
     )
 
 
-def derive_timestamp(frame, dataset: str):
+def derive_timestamp(frame: _Frame, dataset: str) -> _Frame:
     """Give *frame* a ``reference_timestamp`` if its kind has to derive one.
 
     A no-op for every kind whose files carry the column already, so callers make
@@ -362,6 +364,7 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     for csv_path in csv_files:
         suffix_part = csv_path.stem[len(prefix) + 1 :]  # e.g. "ber_d_recent"
         parts = suffix_part.split("_")
+        group_key: tuple[str, ...]
         if len(parts) > 2:
             group_key = (parts[1], parts[2])  # (frequency, time_slice)
         else:

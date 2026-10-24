@@ -25,7 +25,7 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 
 from foehn._locking import exclusive_directory_lock
@@ -177,7 +177,7 @@ def _published_directory_mode(path: Path) -> int:
 
 
 @contextlib.contextmanager
-def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Iterator[Path]:
+def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Generator[Path]:
     """Yield a sibling path to write to, then move it onto *path*.
 
     The move happens when the block completes; the temp file is removed when it
@@ -205,7 +205,7 @@ def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Iter
 
 
 @contextlib.contextmanager
-def _directory_lock(path: Path) -> Iterator[None]:
+def _directory_lock(path: Path) -> Generator[None]:
     """Serialize the short directory exchange with a cross-platform lock."""
     with exclusive_directory_lock(path):
         yield
@@ -219,7 +219,7 @@ def _recover_directory(path: Path, backup_path: Path) -> None:
 
 
 @contextlib.contextmanager
-def staged_directory(path: Path) -> Iterator[Path]:
+def staged_directory(path: Path) -> Generator[Path]:
     """Build a complete sibling directory, then publish it at ``path``.
 
     An existing directory remains untouched while the replacement is written.
