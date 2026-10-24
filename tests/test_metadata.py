@@ -70,7 +70,7 @@ def test_a_table_that_does_not_exist_names_the_ones_that_do():
     with pytest.raises(ValueError, match="Unknown metadata table 'stations_v2'"):
         fetch_table("smn", "stations_v2", fetcher=_fake())
 
-    with pytest.raises(ValueError, match="parameters, stations, inventory"):
+    with pytest.raises(ValueError, match="parameters, stations, points, inventory"):
         fetch_table("smn", "stations_v2", fetcher=_fake())
 
 
@@ -113,3 +113,34 @@ def test_every_table_publishes_every_column_it_declares(table):
     assert df.columns == list(spec.columns.values())
     assert df.height == 1
     assert isinstance(df, pl.DataFrame)
+
+
+def test_a_direct_zip_dataset_says_it_has_no_metadata_instead_of_a_404():
+    fake = InMemoryFetcher()
+    fake.fail("ch.meteoschweiz.klima")
+
+    with pytest.raises(ValueError, match="direct ZIP download"):
+        fetch_table("climate_normals", "stations", fetcher=fake)
+    assert fake.collection_calls == []
+
+
+def test_a_missing_table_names_the_ones_the_collection_publishes():
+    fake = _fake("https://data.geo.admin.ch/x/ogd-local-forecasting_meta_point.csv")
+
+    with pytest.raises(ValueError, match="It publishes: points"):
+        fetch_table("forecast_local", "stations", fetcher=fake)
+
+
+def test_forecast_points_publish_their_columns():
+    body = (
+        b"point_id;point_type_id;station_abbr;postal_code;point_name;point_type_de;point_type_fr;"
+        b"point_type_it;point_type_en;point_height_masl;point_coordinates_lv95_east;"
+        b"point_coordinates_lv95_north;point_coordinates_wgs84_lat;point_coordinates_wgs84_lon\n"
+        b"78;1;BER;;Bern / Zollikofen;Station;Station;Stazione;Station;553.0;2601934.0;1204410.0;46.99;7.46\n"
+    )
+    fake = _fake("https://data.geo.admin.ch/x/ogd-local-forecasting_meta_point.csv", body=body)
+
+    df = fetch_table("forecast_local", "points", fetcher=fake)
+
+    assert df.columns == list(TABLES["points"].columns.values())
+    assert df.row(0, named=True)["abbr"] == "BER"

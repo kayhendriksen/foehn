@@ -46,6 +46,7 @@ __all__ = [
     "metadata",
     "open_dataset",
     "parameters",
+    "points",
     "stations",
     "to_parquet",
     "to_zarr",
@@ -144,13 +145,14 @@ METADATA_TABLES = metadata_tables
 def metadata(dataset: str, table: str) -> pl.DataFrame:
     """Fetch one of a dataset's metadata tables from the STAC API.
 
-    The single implementation behind :func:`parameters`, :func:`stations` and
-    :func:`inventory`; take it directly when the table is chosen at runtime, as
+    The single implementation behind :func:`parameters`, :func:`stations`,
+    :func:`points` and :func:`inventory`; take it directly when the table is chosen at runtime, as
     the CLI does.
 
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
-        table: One of ``METADATA_TABLES`` — "parameters", "stations", "inventory".
+        table: One of ``METADATA_TABLES`` — "parameters", "stations", "points",
+            "inventory".
 
     Returns:
         A Polars DataFrame with foehn's published column names.
@@ -181,6 +183,22 @@ def stations(dataset: str) -> pl.DataFrame:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
     """
     return metadata(dataset, "stations")
+
+
+def points(dataset: str) -> pl.DataFrame:
+    """Fetch forecast point metadata for a dataset (``forecast_local``).
+
+    Local forecasts are published per point rather than per station: every
+    station, plus one point per postal code centre and some points of interest.
+    Returns a DataFrame with columns: point_id, point_type_id, type, abbr,
+    postal_code, name, altitude, lv95_east, lv95_north, lat, lon. ``abbr`` is
+    null unless the point is a station, ``postal_code`` unless it is a postal
+    code centre.
+
+    Args:
+        dataset: Dataset name (e.g. "forecast_local").
+    """
+    return metadata(dataset, "points")
 
 
 def inventory(dataset: str) -> pl.DataFrame:
@@ -317,11 +335,11 @@ def open_dataset(
       ensemble member × lead time × reference time), and ICON's native
       unstructured (icosahedral) grid — a 1-D ``values`` dimension with no
       dimension coordinate — can't be stacked by ``combine_by_coords``. Include
-      the reference + lead time, e.g. ``match="202605231500-0-t_2m-ctrl"``. The
+      the reference + lead time, e.g. ``match="YYYYMMDDHHMM-0-t_2m-ctrl"``. The
       one field comes back on the ``values`` grid with cell ``lat``/``lon``
       coordinates joined from the collection's horizontal-constants file.
     * Radar collections hold one Cartesian composite per timestep (every ~5 min).
-      Match a single file, e.g. ``match="cpc2613000000"``. The composite is read
+      Match a single file, e.g. ``match="cpcYYDDDHHMM"``. The composite is read
       with ODIM gain/offset scaling, ``nodata`` masked to NaN, on Swiss LV95
       ``x``/``y`` coordinates (matching the NetCDF grids).
 
@@ -366,10 +384,10 @@ def open_dataset(
         ds = foehn.open_dataset("climate_scenarios_grid", match="_pr_", variables="pr")
 
         # GRIB2: a single forecast field — variable + member + reference + lead time
-        ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+        ds = foehn.open_dataset("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")
 
         # Radar: a single CombiPrecip composite (one 5-min timestep)
-        ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
+        ds = foehn.open_dataset("radar_precip", match="cpcYYDDDHHMM")
     """
     return registry.open_grid(
         dataset,

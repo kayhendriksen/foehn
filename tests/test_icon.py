@@ -4,11 +4,14 @@ The cache is this module's own internal seam, so its tests read it directly.
 They used to read it from ``test_grids``, across a module they did not own.
 """
 
+import logging
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from foehn import icon
 from foehn.fetch import FetchError
 from foehn.icon import _COORDS_CACHE, constants_file, unstructured_lonlat
 from foehn.workspace import Workspace
@@ -168,7 +171,7 @@ def _unstructured(size=4):
 
 
 def test_lonlat_is_attached_to_an_unstructured_field(tmp_path):
-    import numpy as np
+    np = pytest.importorskip("numpy")
 
     from foehn.icon import attach_lonlat
 
@@ -198,7 +201,7 @@ def test_a_grid_that_is_not_unstructured_is_returned_untouched(tmp_path):
 
 def test_a_wrong_sized_constants_grid_is_ignored_rather_than_broadcast(tmp_path):
     """Coordinates from a different grid would silently mislabel every cell."""
-    import numpy as np
+    np = pytest.importorskip("numpy")
 
     from foehn.icon import attach_lonlat
 
@@ -292,3 +295,23 @@ def test_a_failed_constants_refresh_falls_back_to_the_complete_cache(tmp_path):
 
     assert result == path
     assert path.read_bytes() == b"old but complete"
+
+
+def test_quiet_cfgrib_drops_only_cfgrib_noise(caplog):
+    cfgrib_log = logging.getLogger("cfgrib.dataset")
+    with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.WARNING, logger="cfgrib.dataset"):
+        warnings.simplefilter("always")
+        with icon.quiet_cfgrib():
+            warnings.warn(
+                "In a future version of xarray the default value for compat will change", FutureWarning, stacklevel=1
+            )
+            warnings.warn("something the caller should see", FutureWarning, stacklevel=1)
+            cfgrib_log.warning("ecCodes provides no latitudes/longitudes for gridType='unstructured_grid'")
+            cfgrib_log.warning("a cfgrib problem worth reporting")
+        cfgrib_log.warning("ecCodes provides no latitudes/longitudes for gridType='unstructured_grid'")
+
+    assert [str(w.message) for w in caught] == ["something the caller should see"]
+    assert [r.getMessage() for r in caplog.records] == [
+        "a cfgrib problem worth reporting",
+        "ecCodes provides no latitudes/longitudes for gridType='unstructured_grid'",
+    ]

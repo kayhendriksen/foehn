@@ -293,6 +293,105 @@ def test_load_forecast_local_fetches_only_latest_run(fetcher):
     assert all("202607210600" in url for url in fetched)
 
 
+_RUN = "202607210600"
+_POINTS_HREF = "https://data.geo.admin.ch/x/ogd-local-forecasting_meta_point.csv"
+# Point 7 exists twice: as station BER and as a point of interest. The ID alone
+# is not a point.
+_POINTS_CSV = (
+    "point_id;point_type_id;station_abbr;postal_code;point_name\n"
+    "7;1;BER;;Bern / Zollikofen\n"
+    "7;3;;;Gurten\n"
+    "301100;2;;3011;Bern\n"
+)
+
+
+def _forecast_run(fetcher, params: dict[str, str]) -> None:
+    """One run whose files are *params* (name -> CSV body), plus the point table."""
+    fetcher.any_collection = {"assets": {"points": {"href": _POINTS_HREF}}}
+    fetcher.add_body(_POINTS_HREF, _POINTS_CSV)
+    fetcher.any_items = [_forecast_item("20260721-ch", {_RUN: list(params)})]
+    for param, body in params.items():
+        fetcher.add_body(f"https://data.geo.admin.ch/x/vnut12.lssw.{_RUN}.{param}.csv", body)
+
+
+def _param_csv(param: str, rows: list[tuple[int, int, int]]) -> str:
+    lines = [f"point_id;point_type_id;Date;{param}"]
+    lines += [f"{pid};{ptype};202607210700;{value}" for pid, ptype, value in rows]
+    return "\n".join(lines) + "\n"
+
+
+def test_load_forecast_local_joins_parameters_into_one_row_per_point_and_time(fetcher):
+    """Each file is one parameter; stacking them gave one non-null value per row."""
+    _forecast_run(
+        fetcher,
+        {
+            "dkl010h0": _param_csv("dkl010h0", [(7, 1, 280), (7, 3, 90)]),
+            "tre200h0": _param_csv("tre200h0", [(7, 1, 12), (7, 3, 9)]),
+        },
+    )
+
+    df = load("forecast_local", sort="asc")
+
+    assert len(df) == 2
+    assert df.select("point_type_id", "dkl010h0", "tre200h0").sort("point_type_id").rows() == [
+        (1, 280, 12),
+        (3, 90, 9),
+    ]
+
+
+def test_load_forecast_local_station_resolves_through_the_point_table(fetcher):
+    """Items are days, not stations: the filter used to compare station names to dates."""
+    _forecast_run(fetcher, {"tre200h0": _param_csv("tre200h0", [(7, 1, 12), (7, 3, 9), (301100, 2, 11)])})
+
+    by_station = load("forecast_local", station="ber")
+    by_postal_code = load("forecast_local", station="3011")
+
+    assert by_station.select("point_id", "point_type_id").rows() == [(7, 1)]
+    assert by_postal_code.select("point_id", "point_type_id").rows() == [(301100, 2)]
+
+
+def test_load_forecast_local_unknown_station_names_the_lookup(fetcher):
+    _forecast_run(fetcher, {"tre200h0": _param_csv("tre200h0", [(7, 1, 12)])})
+
+    with pytest.raises(ValueError, match=r"foehn\.points\('forecast_local'\)"):
+        load("forecast_local", station="XYZ")
+
+
+def test_load_forecast_local_station_needs_the_point_table(fetcher):
+    """A collection without its point table can name no point, so the filter says so."""
+    _forecast_run(fetcher, {"tre200h0": _param_csv("tre200h0", [(7, 1, 12)])})
+    fetcher.any_collection = {"assets": {}}
+
+    with pytest.raises(ValueError, match="No forecast points match"):
+        load("forecast_local", station="BER")
+
+
+def test_load_forecast_local_with_no_run_published_says_so(fetcher):
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [_forecast_item("20260722-ch", {})]
+
+    with pytest.raises(ValueError, match="No forecast CSV files found"):
+        load("forecast_local")
+
+
+def test_load_forecast_local_columns_fetch_only_those_parameter_files(fetcher):
+    """Every file covers every point, so columns= is the one lever on network volume."""
+    _forecast_run(
+        fetcher,
+        {
+            "dkl010h0": _param_csv("dkl010h0", [(7, 1, 280)]),
+            "tre200h0": _param_csv("tre200h0", [(7, 1, 12)]),
+        },
+    )
+
+    df = load("forecast_local", columns=["tre200h0"])
+
+    assert df.columns == ["point_id", "point_type_id", "reference_timestamp", "tre200h0"]
+    assert [url for url in fetcher.gets if "vnut12" in url] == [
+        f"https://data.geo.admin.ch/x/vnut12.lssw.{_RUN}.tre200h0.csv"
+    ]
+
+
 @patch("foehn.registry.download")
 def test_download_passes_the_requested_time_slice(mock_dl, tmp_path):
     from foehn.transfer import DownloadResult
@@ -1045,11 +1144,11 @@ def test_load_concurrent_fetch_multiple_files(fetcher):
 # --- metadata tables ---
 
 
-def test_the_three_metadata_functions_are_the_table(fetcher):
+def test_the_metadata_functions_are_the_table(fetcher):
     """Each is a name over one implementation; the table says suffix and columns."""
     from foehn.api import METADATA_TABLES
 
-    assert set(METADATA_TABLES) == {"parameters", "stations", "inventory"}
+    assert set(METADATA_TABLES) == {"parameters", "stations", "points", "inventory"}
     for name, table in METADATA_TABLES.items():
         assert table.suffix.startswith("_meta_")
         assert table.columns, f"{name} publishes no columns"

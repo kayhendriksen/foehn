@@ -112,9 +112,11 @@ The CLI mirrors the Python API with subcommands for downloading, converting, loa
 
 ```python
 ds = foehn.open_dataset("surface_derived_grid", match="rhiresd")  # NetCDF climate grid
-ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")  # one GRIB2 field
-ds = foehn.open_dataset("radar_precip", match="cpc2613000000")    # one radar composite
-foehn.to_zarr("surface_derived_grid", match="rhiresd")            # Zarr store
+ds = foehn.open_dataset("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")  # one GRIB2 field
+ds = foehn.open_dataset("radar_precip", match="cpcYYDDDHHMM")  # one radar composite
+# Forecast and radar files roll off after a day / two weeks: fill in a recent time.
+# A match that finds nothing lists the times the collection holds now.
+foehn.to_zarr("surface_derived_grid", match="rhiresd")  # Zarr store
 ```
 
 NetCDF climate grids/normals/scenarios, GRIB2 forecasts (ICON-CH1/CH2, KENDA), and HDF5/ODIM radar composites all open as xarray Datasets instead of DataFrames. One extra covers them: `pip install "foehn[grids]"`. See the [gridded data documentation](docs/grids.md).

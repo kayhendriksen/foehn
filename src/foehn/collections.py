@@ -269,7 +269,7 @@ def granularity_from_filename(filename: str) -> str | None:
 # the middle field is the model run time — i.e. when the forecast was issued. Note
 # this is NOT the "reference timestamp" of MeteoSwiss's docs, which is the ``Date``
 # column inside the file (the end of each forecast step's aggregation interval).
-_FORECAST_RUN_RE = re.compile(r"^vnut\d+\.lssw\.(\d{12})\..+\.csv$")
+_FORECAST_RUN_RE = re.compile(r"^vnut\d+\.lssw\.(\d{12})\.(.+)\.csv$")
 
 
 def forecast_run_from_filename(filename: str) -> str | None:
@@ -281,3 +281,13 @@ def forecast_run_from_filename(filename: str) -> str | None:
     """
     match = _FORECAST_RUN_RE.match(filename.rsplit("/", 1)[-1])
     return match.group(1) if match else None
+
+
+def forecast_parameter_from_filename(filename: str) -> str | None:
+    """Return the parameter a forecast CSV asset holds, or None if unrecognised.
+
+    e.g. ``vnut12.lssw.202607210600.dkl010h0.csv`` → ``"dkl010h0"``. Each file of a
+    run is that one parameter for every point, so this is also the column it adds.
+    """
+    match = _FORECAST_RUN_RE.match(filename.rsplit("/", 1)[-1])
+    return match.group(2) if match else None

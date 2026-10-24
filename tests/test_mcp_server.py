@@ -25,6 +25,7 @@ from foehn.mcp_server import (
     describe_grid,
     get_inventory,
     get_parameters,
+    get_points,
     get_stations,
     list_datasets,
     load_data,
@@ -697,6 +698,45 @@ class TestGetStations:
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
             get_stations("nonexistent")
+
+
+# ── get_points ───────────────────────────────────────────────────────────────
+
+
+class TestGetPoints:
+    @staticmethod
+    def _points():
+        return pl.DataFrame(
+            {
+                "point_id": [78, 301100, 641],
+                "point_type_id": [1, 2, 3],
+                "type": ["Station", "Postal code center", "Point of Interest"],
+                "abbr": ["BER", None, None],
+                "postal_code": [None, "3011", None],
+                "name": ["Bern / Zollikofen", "Bern", "Gurten"],
+                "altitude": [553.0, 540.0, 858.0],
+                "lv95_east": [2601934.0, 2600550.0, 2600000.0],
+                "lv95_north": [1204410.0, 1199625.0, 1197000.0],
+                "lat": [46.99, 46.95, 46.92],
+                "lon": [7.46, 7.45, 7.44],
+            }
+        )
+
+    @patch("foehn.mcp_server.foehn.points")
+    def test_returns_every_point_without_a_query(self, mock_points):
+        mock_points.return_value = self._points()
+        result = get_points("forecast_local")
+        assert [point.point_id for point in result] == [78, 301100, 641]
+        assert result[1].abbr is None
+        mock_points.assert_called_once_with("forecast_local")
+
+    @patch("foehn.mcp_server.foehn.points")
+    def test_query_matches_name_abbreviation_or_postal_code(self, mock_points):
+        mock_points.return_value = self._points()
+        assert [p.point_id for p in get_points("forecast_local", query="bern")] == [78, 301100]
+        assert [p.point_id for p in get_points("forecast_local", query="ber")] == [78, 301100]
+        assert [p.point_id for p in get_points("forecast_local", query="3011")] == [301100]
+        assert get_points("forecast_local", query="zermatt") == []
 
 
 # ── get_inventory ────────────────────────────────────────────────────────────

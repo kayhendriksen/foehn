@@ -42,8 +42,9 @@ All filters can be combined.
 df = foehn.load("smn", station="BER", frequency="d", year=2026, month=[1, 2, 3])
 
 # Date range
-df = foehn.load("smn", station="BER", frequency="d",
-                time_slice="historical", date_from="2025-06-01", date_to="2025-08-31")
+df = foehn.load(
+    "smn", station="BER", frequency="d", time_slice="historical", date_from="2025-06-01", date_to="2025-08-31"
+)
 
 # Select specific columns (station_abbr and reference_timestamp are always kept)
 df = foehn.load("smn", station="BER", frequency="d", columns=["tre200d0", "rre150d0"])
@@ -102,15 +103,34 @@ foehn.stations("smn")
 # What each station measures and since when
 foehn.inventory("smn")
 
-# The same three tables by name, for code that picks one at runtime
+# Local forecasts are per point, not per station: stations, postal code
+# centres and points of interest, with the abbreviation or postal code to load
+foehn.points("forecast_local")
+
+# The same tables by name, for code that picks one at runtime
 foehn.metadata("smn", "parameters")
 foehn.metadata("smn", "stations")
 foehn.metadata("smn", "inventory")
+foehn.metadata("forecast_local", "points")
 ```
 
-`metadata()` is the generic form of the three functions above — useful when the
+`metadata()` is the generic form of the functions above — useful when the
 table is a variable rather than a literal. It raises `ValueError` for an unknown
-table name.
+table name, and for a table the dataset does not publish it names the ones it
+does.
+
+### Local forecasts
+
+`forecast_local` returns the newest forecast run, one row per point and time,
+with every parameter as a column. `station=` takes station abbreviations or
+postal codes (see `foehn.points()`), and `columns=` decides which parameter
+files are downloaded at all — each file holds one parameter for all ~5,800
+points, so it is the setting that makes a load fast:
+
+```python
+# Hourly temperature and precipitation for Bern (postal code 3011), ~1 s
+foehn.load("forecast_local", station="3011", columns=["tre200h0", "rre150h0"])
+```
 
 ---
 
@@ -154,11 +174,11 @@ foehn.to_zarr("surface_derived_grid", match="rhiresd")
 
 # GRIB2 forecasts (ICON-CH1/CH2, KENDA). match= is required and must select a
 # single file (variable, member, reference + lead time):
-ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+ds = foehn.open_dataset("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")
 
 # HDF5/ODIM radar composites (CombiPrecip, hail). match= is required and must
 # select a single file (one ~5-min timestep):
-ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
+ds = foehn.open_dataset("radar_precip", match="cpcYYDDDHHMM")
 ```
 
 This path is *download-then-lazy*: the source file is fetched in full to the

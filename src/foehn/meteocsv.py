@@ -282,6 +282,16 @@ def read_metadata_csv(path: Path) -> pl.DataFrame:
     return pl.read_csv(path, separator=";", infer_schema_length=10_000, try_parse_dates=True)
 
 
+def parse_forecast_points(content: bytes) -> pl.DataFrame:
+    """Read forecast_local's ``_meta_point.csv`` as text, every column a string.
+
+    Strings so the lookup compares like with like: ``postal_code`` is empty for
+    every point that is not a postal code centre, which the sample window would
+    otherwise read as nulls and then integers depending on row order.
+    """
+    return pl.read_csv(decode_meteoswiss_csv(content).encode("utf-8"), separator=";", infer_schema_length=0)
+
+
 def read_normals_txt(path: Path) -> pl.DataFrame:
     """Read one Direct ZIP climate-normal table from Bronze."""
     return pl.read_csv(

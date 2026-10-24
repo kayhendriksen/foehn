@@ -46,6 +46,7 @@ Add foehn to your MCP client config:
 | `describe_grid` | Inspect a gridded dataset's dimensions and variables (NetCDF, GRIB2, radar) |
 | `get_parameters` | Look up what each column measures |
 | `get_stations` | Find station abbreviations and locations |
+| `get_points` | Find local-forecast points by name, station or postal code |
 | `get_inventory` | Check data availability per station |
 
 `describe_grid` is the gridded counterpart to `describe_data`, covering every

@@ -85,8 +85,8 @@ reduce, plot, etc. (these grids use the Swiss LV95 projection, so spatial
 coordinates are in metres, not lat/lon):
 
 ```python
-ds["TabsD"].mean(dim="time")          # time-mean field
-ds.isel(time=0)                        # first time step
+ds["TabsD"].mean(dim="time")  # time-mean field
+ds.isel(time=0)  # first time step
 ds["TabsD"].sel(x=2_600_000, y=1_200_000, method="nearest")  # nearest grid cell
 ```
 
@@ -112,8 +112,12 @@ differently from the static NetCDF grids:
   the reference time and lead time:
 
   ```python
-  ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+  ds = foehn.open_dataset("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")
   ```
+
+  Fill in a recent run: forecast files are only kept for about a day, so any
+  fixed date in an example expires. A match that finds nothing says which runs
+  the collection holds right now, with a real filename to copy.
 
   If `match` is omitted, or matches more than one file, `open_dataset()` raises a
   `ValueError` **before downloading anything** (and lists example filenames so
@@ -126,9 +130,9 @@ differently from the static NetCDF grids:
   the field is geo-referenced even though it's not a regular grid:
 
   ```python
-  ds = foehn.open_dataset("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
+  ds = foehn.open_dataset("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")
   # cfgrib names the variable from the GRIB, not the filename token — check ds.data_vars
-  ds["t2m"]           # dims (values,), with ds.lat / ds.lon (degrees) attached
+  ds["t2m"]  # dims (values,), with ds.lat / ds.lon (degrees) attached
   ```
 
   (Best-effort: if the constants file can't be reached, the field still opens,
@@ -138,8 +142,8 @@ differently from the static NetCDF grids:
   way (and inherits the single-file `match` requirement):
 
   ```python
-  foehn.to_zarr("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
-  # -> data/meteoswiss/zarr/forecast_icon_ch1__202605231500_0_t_2m_ctrl.zarr
+  foehn.to_zarr("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")
+  # -> data/meteoswiss/zarr/forecast_icon_ch1__YYYYMMDDHHMM_0_t_2m_ctrl.zarr
   ```
 
 ### Cubing forecasts (`stack=True`)
@@ -152,8 +156,8 @@ becomes a `(time, step, values)` cube (carrying the joined `lat`/`lon`):
 
 ```python
 store = foehn.to_zarr("forecast_icon_ch1", match="-t_2m-ctrl", stack=True)
-cube = xarray.open_zarr(store)        # dims e.g. (time, step, values)
-cube["t2m"].isel(time=-1)             # latest run, all lead times (var named by cfgrib)
+cube = xarray.open_zarr(store)  # dims e.g. (time, step, values)
+cube["t2m"].isel(time=-1)  # latest run, all lead times (var named by cfgrib)
 ```
 
 `stack=True` works for **any** gridded format — each dataset kind carries its own
@@ -175,14 +179,17 @@ volumes, so `xradar` doesn't apply; foehn reads them with a small h5py-based
 reader (h5py + pyproj, part of the `grids` extra).
 
 ```python
-ds = foehn.open_dataset("radar_precip", match="cpc2613000000")
+ds = foehn.open_dataset("radar_precip", match="cpcYYDDDHHMM")
 ds["acrr"]  # accumulated rainfall (mm), dims (y, x) on Swiss LV95
 ```
 
 - **`match` is required and must select a single file**, like GRIB2 — there's one
   composite per ~5-minute timestep, so a collection is thousands of files. Match
-  a filename prefix (e.g. `cpc<timestamp>` for precip, `bzc<timestamp>` for hail).
-  An over-broad or missing match raises **before downloading**.
+  a filename prefix: the product, then the two-digit year, day of year and time
+  (`cpcYYDDDHHMM` for precip, `bzcYYDDDHHMM` for hail). Files are kept for about
+  two weeks, and a match that finds nothing names the first and last file of that
+  product the collection holds. An over-broad or missing match raises **before
+  downloading**.
 - The reader applies the ODIM `gain`/`offset` scaling, maps `nodata` (outside
   radar coverage) to `NaN` and `undetect` (nothing detected) to `0`, and derives
   **Swiss LV95 `x`/`y` coordinates** (metres, EPSG:2056) from the file's
@@ -197,8 +204,8 @@ ds["acrr"]  # accumulated rainfall (mm), dims (y, x) on Swiss LV95
 selects the timesteps:
 
 ```python
-store = foehn.to_zarr("radar_precip", match="cpc26130", stack=True)
-cube = xarray.open_zarr(store)        # dims (time, y, x)
+store = foehn.to_zarr("radar_precip", match="cpcYYDDD", stack=True)
+cube = xarray.open_zarr(store)  # dims (time, y, x)
 cube["acrr"].sel(x=2_600_000, y=1_200_000, method="nearest")  # rain time-series at a point
 ```
 
