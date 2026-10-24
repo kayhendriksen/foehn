@@ -14,7 +14,7 @@ from foehn import registry
 from foehn.api import METADATA_TABLES, list_datasets, metadata
 from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS, DEFAULT_TIME_SLICE
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
-from foehn.state import load_last_run, run_watermark, save_last_run
+from foehn.state import advance_cursor, load_cursor, run_watermark
 from foehn.workspace import Workspace
 
 
@@ -93,14 +93,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     if args.all or args.historical:
         time_slices.insert(0, "historical")
 
-    since = None
-    if not full_refresh:
-        since = load_last_run(workspace)
-
-    if since:
-        print(f"Incremental update (last run: {since})", flush=True)
-    else:
-        print("Full download", flush=True)
+    print("Full download" if full_refresh else "Incremental update (per-dataset cursors)", flush=True)
     print(f"Time slices: {time_slices}", flush=True)
 
     datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
@@ -110,8 +103,14 @@ def cmd_download(args: argparse.Namespace) -> None:
     workers = args.workers
     failures = 0
     download_failures = 0
+    held_back: list[str] = []
     for ds in datasets:
-        download_failures += registry.download(
+        # Each Dataset and Time slice keeps its own cursor. One shared instant let
+        # a run of one Dataset filter the next Dataset's listing, so Items never
+        # downloaded were dropped as "unchanged" — see foehn.state.
+        since = None if full_refresh else load_cursor(workspace, ds, time_slices)
+        print(f"  {ds}: {f'changes since {since}' if since else 'full listing'}", flush=True)
+        ds_download_failures = registry.download(
             ds,
             workspace,
             time_slice=time_slices,
@@ -120,22 +119,26 @@ def cmd_download(args: argparse.Namespace) -> None:
             force=full_refresh,
             fetcher=fetcher,
         ).failed
-        if not args.no_parquet:
-            failures += registry.convert(ds, workspace)
+        ds_failures = 0 if args.no_parquet else registry.convert(ds, workspace)
+        download_failures += ds_download_failures
+        failures += ds_failures
+        if ds_download_failures == ds_failures == 0:
+            advance_cursor(workspace, ds, time_slices, watermark)
+        else:
+            # Don't advance this Dataset's cursor if anything failed — otherwise
+            # the next run filters out the still-broken items as "already seen". A
+            # failed asset within an unchanged item would never be retried.
+            held_back.append(ds)
 
-    if failures == download_failures == 0:
-        save_last_run(workspace, watermark)
-    else:
-        # Don't advance the incremental cursor if anything failed — otherwise the
-        # next run filters out the still-broken items as "already seen". A failed
-        # asset within an unchanged item would never be retried.
+    if held_back:
         reasons = []
         if download_failures:
             reasons.append(f"{download_failures} download failure(s)")
         if failures:
             reasons.append(f"{failures} conversion failure(s)")
         print(
-            f"\n{', '.join(reasons)} — not advancing _last_run.json. Re-run after fixing.",
+            f"\n{', '.join(reasons)} — not advancing the _last_run.json cursor for "
+            f"{', '.join(held_back)}. Re-run after fixing.",
             file=sys.stderr,
             flush=True,
         )

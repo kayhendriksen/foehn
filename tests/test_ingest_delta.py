@@ -1,7 +1,7 @@
 """Tests for the Polars-based Delta ingestion script."""
 
 import shutil
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -18,6 +18,7 @@ from scripts.ingest_delta import (
     _table_suffix,
     _validate_identifier,
     _write_to_delta,
+    main,
 )
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -265,7 +266,7 @@ def test_apply_column_comments_escapes_backslashes_and_quotes(tmp_path):
 
 def test_ingest_collection(smn_bronze_dir, mock_spark):
     pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
-    ok, skip = _ingest_collection(
+    ok, skip, failed = _ingest_collection(
         mock_spark,
         "smn",
         smn_bronze_dir / "smn",
@@ -275,13 +276,14 @@ def test_ingest_collection(smn_bronze_dir, mock_spark):
     # 1 data group (d_recent) + 1 meta table (parameters)
     assert ok == 2
     assert skip == 0
+    assert failed == 0
     assert mock_spark.createDataFrame.call_count == 2
 
 
 def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
-    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     """Chunked mode with chunk_size=1 should produce 2 data writes + 1 meta write."""
-    ok, skip = _ingest_collection(
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    ok, skip, failed = _ingest_collection(
         mock_spark,
         "smn",
         smn_bronze_dir / "smn",
@@ -291,18 +293,22 @@ def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
         chunk_size=1,
     )
     # 1 data group + 1 meta table
-    assert ok == 2
-    assert skip == 0
+    assert (ok, skip, failed) == (2, 0, 0)
     # 2 files × chunk_size=1 (overwrite + append) + 1 meta write = 3
     assert mock_spark.createDataFrame.call_count == 3
+    # Both chunks went to the staging table, which then replaced the table once.
+    mock_spark.table.assert_any_call("`main`.`meteoswiss`.`smn_d_recent__foehn_staging`")
+    published = mock_spark.table.return_value.write.mode.return_value.option.return_value.saveAsTable
+    published.assert_called_once_with("`main`.`meteoswiss`.`smn_d_recent`")
 
 
 def test_ingest_collection_empty(tmp_path, mock_spark):
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
-    ok, skip = _ingest_collection(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
+    ok, skip, failed = _ingest_collection(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+    assert failed == 0
 
 
 # ── _ingest_metadata ─────────────────────────────────────────────────────────
@@ -310,7 +316,7 @@ def test_ingest_collection_empty(tmp_path, mock_spark):
 
 def test_ingest_metadata(smn_bronze_dir, mock_spark):
     pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
-    ok, skip = _ingest_metadata(
+    ok, skip, failed = _ingest_metadata(
         mock_spark,
         "smn",
         smn_bronze_dir / "smn",
@@ -319,21 +325,23 @@ def test_ingest_metadata(smn_bronze_dir, mock_spark):
     )
     assert ok == 1  # ogd-smn_meta_parameters.csv
     assert skip == 0
+    assert failed == 0
     mock_spark.createDataFrame.assert_called_once()
 
 
 def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
-    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     """Stations + datainventory + parameters should each become their own table."""
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     smn_dir = smn_bronze_dir / "smn"
     (smn_dir / "ogd-smn_meta_stations.csv").write_text("station_abbr;station_name\nABO;Adelboden\nBER;Bern\n")
     (smn_dir / "ogd-smn_meta_datainventory.csv").write_text(
         "station_abbr;parameter_shortname;data_since;data_till\nABO;tre200d0;1900-01-01;2026-01-01\n"
     )
 
-    ok, skip = _ingest_metadata(mock_spark, "smn", smn_dir, "`main`", "`meteoswiss`")
+    ok, skip, failed = _ingest_metadata(mock_spark, "smn", smn_dir, "`main`", "`meteoswiss`")
     assert ok == 3
     assert skip == 0
+    assert failed == 0
 
     # Each meta file should land in its own suffixed table.
     save_as = mock_spark.createDataFrame.return_value.write.mode.return_value.option.return_value.saveAsTable
@@ -346,9 +354,10 @@ def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
 def test_ingest_metadata_no_files(tmp_path, mock_spark):
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
-    ok, skip = _ingest_metadata(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
+    ok, skip, failed = _ingest_metadata(mock_spark, "smn", empty_dir, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 0
+    assert failed == 0
     mock_spark.createDataFrame.assert_not_called()
 
 
@@ -357,23 +366,26 @@ def test_ingest_metadata_no_files(tmp_path, mock_spark):
 
 def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark):
     _require_arrow()
-    ok, skip = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
+    ok, skip, failed = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
     assert ok == 1
     assert skip == 0
+    assert failed == 0
     mock_spark.createDataFrame.assert_called_once()
 
 
 def test_ingest_climate_normals_no_dir(tmp_path, mock_spark):
-    ok, skip = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
+    ok, skip, failed = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+    assert failed == 0
 
 
 def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
     (tmp_path / "climate_normals").mkdir()
-    ok, skip = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
+    ok, skip, failed = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
     assert skip == 1
+    assert failed == 0
 
 
 # ── INGESTED_COLLECTIONS ─────────────────────────────────────────────────────
@@ -393,3 +405,65 @@ def test_ingested_collections_includes_climate_normals():
     """It used to be appended by hand; it is a row in the registry now."""
     assert "climate_normals" in INGESTED_DATASETS
     assert registry.non_grid_datasets() == INGESTED_DATASETS
+
+
+# ── Failures are not skips ──────────────────────────────────────────────────
+
+
+def test_a_failed_later_chunk_leaves_the_published_table_alone(smn_bronze_dir, mock_spark):
+    """Overwriting with chunk 1 and appending the rest left a partial table on failure."""
+    written: list[str] = []
+
+    def write(spark, frame, table, mode="overwrite"):
+        if written:
+            raise RuntimeError("disk quota exceeded")
+        written.append(table)
+
+    with patch("scripts.ingest_delta._write_to_delta", side_effect=write):
+        _, _, failed = _ingest_collection(
+            mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", chunked=True, chunk_size=1
+        )
+
+    assert failed == 1  # the data group; the meta table was written before it
+    assert written == ["`main`.`meteoswiss`.`smn_meta_parameters`"]
+    mock_spark.table.return_value.write.mode.return_value.option.return_value.saveAsTable.assert_not_called()
+    mock_spark.sql.assert_any_call("DROP TABLE IF EXISTS `main`.`meteoswiss`.`smn_d_recent__foehn_staging`")
+
+
+def test_a_write_failure_is_reported_with_its_reason(smn_bronze_dir, mock_spark, capsys):
+    with patch("scripts.ingest_delta._write_to_delta", side_effect=RuntimeError("permission denied on table")):
+        ok, skip, failed = _ingest_collection(mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`")
+
+    assert (ok, skip, failed) == (0, 0, 2)
+    assert "RuntimeError: permission denied on table" in capsys.readouterr().out
+
+
+def test_an_unreadable_normals_file_fails_the_table_instead_of_shrinking_it(climate_normals_bronze_dir, mock_spark):
+    (climate_normals_bronze_dir / "climate_normals" / "broken.txt").write_bytes(b"\x00")
+
+    with patch("scripts.ingest_delta.read_normals_txt", side_effect=[pl.DataFrame({"a": [1]}), ValueError("bad")]):
+        ok, skip, failed = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
+
+    assert (ok, skip, failed) == (0, 0, 1)
+    mock_spark.createDataFrame.assert_not_called()
+
+
+def test_main_exits_non_zero_when_a_table_fails(smn_bronze_dir, capsys):
+    """The scheduled job reported success over stale tables: failures were "skipped"."""
+    pytest.importorskip("pyspark")  # main() imports SparkSession before anything else
+    from foehn.workspace import Workspace
+
+    workspace = Workspace(smn_bronze_dir / "volume")
+    shutil.copytree(smn_bronze_dir / "smn", workspace.bronze("smn"))
+    with (
+        patch("pyspark.sql.SparkSession"),
+        patch("scripts.ingest_delta.Workspace", return_value=workspace),
+        patch("scripts.ingest_delta.INGESTED_DATASETS", ["smn"]),
+        patch("scripts.ingest_delta._write_to_delta", side_effect=RuntimeError("write failed")),
+        patch("sys.argv", ["ingest_delta.py"]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+
+    assert exited.value.code == 1
+    assert "0 tables written, 0 skipped, 2 failed" in capsys.readouterr().out

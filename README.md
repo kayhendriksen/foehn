@@ -41,7 +41,7 @@ foehn downloads every [MeteoSwiss OGD](https://github.com/MeteoSwiss/opendata) c
 - **Tabular and gridded** — CSV station data as Polars DataFrames or Parquet; NetCDF, GRIB2 and ODIM radar grids as xarray Datasets or Zarr stores
 - **MCP server for LLMs** — give your favorite LLM live access to MeteoSwiss data with the MCP server
 - **Significantly smaller on disk** — columnar Parquet with Zstandard compression vs. raw CSVs
-- **Incremental by default** — only re-downloads files that changed since your last run, tracked via `_last_run.json`
+- **Incremental by default** — only re-downloads files that changed since your last run, tracked per dataset and time slice in `_last_run.json`
 - **No Spark required locally** — download + conversion uses Polars only; Spark is optional for Delta ingestion
 - **Ships a Declarative Automation Bundle** — ready-to-deploy daily job and historical backfill, no pipeline config needed
 

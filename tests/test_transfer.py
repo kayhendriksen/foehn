@@ -321,3 +321,11 @@ def test_a_current_archive_is_not_materialized_again(tmp_path):
 
     assert result.skipped == 1
     assert result.downloaded == 0
+
+
+def test_a_marker_that_is_not_utf8_means_not_materialized(tmp_path):
+    from foehn.transfer import materialization_current
+
+    (tmp_path / ".foehn-complete.json").write_bytes(b"\xff")
+
+    assert materialization_current(asset("normals.zip"), tmp_path) is False

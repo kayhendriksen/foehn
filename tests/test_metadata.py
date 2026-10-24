@@ -105,7 +105,10 @@ def test_a_windows_1252_metadata_file_is_decoded():
 def test_every_table_publishes_every_column_it_declares(table):
     """A rename map naming a column the source does not have fails at read, not at review."""
     spec = TABLES[table]
-    source = ";".join(spec.columns) + "\n" + ";".join("x" for _ in spec.columns) + "\n"
+    # A value of each column's declared type: the declarations are the parse types.
+    sample = {str: "x", int: "1", float: "1.5"}
+    values = [sample.get(field.python_type, "1") for field in spec.fields]
+    source = ";".join(spec.columns) + "\n" + ";".join(values) + "\n"
     fake = _fake(f"https://data.geo.admin.ch/x/ogd-smn{spec.suffix}.csv", body=source)
 
     df = fetch_table("smn", table, fetcher=fake)
@@ -144,3 +147,30 @@ def test_forecast_points_publish_their_columns():
 
     assert df.columns == list(TABLES["points"].columns.values())
     assert df.row(0, named=True)["abbr"] == "BER"
+
+
+def test_points_parse_with_their_declared_types_whatever_the_rows_look_like():
+    """A first postal code of 3011 used to read the column as integers.
+
+    The MCP ``Point`` model and its string search both then rejected the table.
+    Tested across the real CSV -> table -> MCP seam rather than a typed mock.
+    """
+    from unittest.mock import patch
+
+    pytest.importorskip("mcp")
+    from foehn.mcp_server import get_points
+
+    body = (
+        b"point_id;point_type_id;station_abbr;postal_code;point_name;point_type_en;point_height_masl;"
+        b"point_coordinates_lv95_east;point_coordinates_lv95_north;point_coordinates_wgs84_lat;"
+        b"point_coordinates_wgs84_lon\n"
+        b"301100;2;;3011;Bern;Postal code center;550;2600000;1200000;46.9;7.4\n"
+        b"78;1;BER;;Bern / Zollikofen;Station;553;2601934;1204410;46.99;7.46\n"
+    )
+    fake = _fake("https://data.geo.admin.ch/x/ogd-local-forecasting_meta_point.csv", body=body)
+
+    df = fetch_table("forecast_local", "points", fetcher=fake)
+    assert df.schema["postal_code"] == pl.String
+    with patch("foehn.api.default_fetcher", return_value=fake):
+        assert [p.point_id for p in get_points("forecast_local")] == [301100, 78]
+        assert [p.point_id for p in get_points("forecast_local", query="3011")] == [301100]

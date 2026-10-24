@@ -13,6 +13,11 @@ transfer stays manageable.
 After writing each table, column comments are set from the English
 metadata descriptions in _meta_parameters.csv.
 
+A table is replaced only once all of its input has been read and written:
+chunked groups are built in a staging table first. A failed table is counted
+apart from one that simply had no input, and any failure makes the script exit
+non-zero, so a scheduled run cannot report success over stale tables.
+
 Run by the Databricks job after foehn finishes downloading.
 
 Usage (local testing with spark-submit):
@@ -25,6 +30,7 @@ import argparse
 import contextlib
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -55,6 +61,29 @@ INGESTED_DATASETS = registry.non_grid_datasets()
 LARGE_COLLECTIONS = {"smn", "smn_precip", "smn_tower"}
 
 DEFAULT_CHUNK_SIZE = 50
+
+
+@dataclass
+class Tally:
+    """What one ingestion pass did with its tables."""
+
+    written: int = 0
+    skipped: int = 0
+    """No input to ingest. Not an error."""
+    failed: int = 0
+    """Input was there and could not be read or written. Fails the run."""
+
+    def __add__(self, other: Tally) -> Tally:
+        return Tally(self.written + other.written, self.skipped + other.skipped, self.failed + other.failed)
+
+    def __iter__(self):
+        return iter((self.written, self.skipped, self.failed))
+
+
+def _report_failure(name: str, exc: Exception) -> None:
+    """Name the table and the reason: the exception type alone said nothing."""
+    print(f"  FAIL {name:25s}   {type(exc).__name__}: {exc}", flush=True)
+
 
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
@@ -102,6 +131,17 @@ def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mo
     writer.saveAsTable(table)
 
 
+def _staging_table(table: str) -> str:
+    """The sibling a chunked group is built in before it replaces *table*."""
+    return f"{table[:-1]}__foehn_staging`"
+
+
+def _publish_staged(spark: SparkSession, staging: str, table: str) -> None:
+    """Replace *table* with the finished *staging* table in one overwrite."""
+    spark.table(staging).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+    spark.sql(f"DROP TABLE IF EXISTS {staging}")
+
+
 def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> None:
     """Set Delta column comments from the English metadata descriptions.
 
@@ -144,15 +184,14 @@ def _ingest_metadata(
     csv_dir: Path,
     catalog: str,
     schema: str,
-) -> tuple[int, int]:
+) -> Tally:
     """Ingest *_meta_*.csv files (stations, parameters, datainventory, ...) into Delta.
 
     Each meta CSV becomes its own table: ``{collection}_meta_{suffix}``. Always
     overwrites — these files are small, authoritative, and refreshed each run.
     """
     meta_files = sorted(csv_dir.glob("*_meta_*.csv"))
-    succeeded = 0
-    skipped = 0
+    tally = Tally()
 
     for meta_path in meta_files:
         # "ogd-smn_meta_stations.csv" → suffix "stations"
@@ -164,12 +203,12 @@ def _ingest_metadata(
             df = read_metadata_csv(meta_path)
             _write_to_delta(spark, df, table)
             print(f"  OK  {tbl_name:25s} → {table} ({df.height} rows)", flush=True)
-            succeeded += 1
+            tally.written += 1
         except Exception as e:
-            print(f"  --  {tbl_name:25s}   skipped ({type(e).__name__})", flush=True)
-            skipped += 1
+            _report_failure(tbl_name, e)
+            tally.failed += 1
 
-    return succeeded, skipped
+    return tally
 
 
 def _ingest_collection(
@@ -181,22 +220,19 @@ def _ingest_collection(
     *,
     chunked: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
-) -> tuple[int, int]:
+) -> Tally:
     """Ingest a single collection's CSVs into Delta tables.
 
-    Returns (succeeded, skipped) counts.
+    Returns how many tables were written, skipped for lack of input, and failed.
     """
     metadata_types = load_metadata_types(csv_dir)
     groups = group_csv_files(csv_dir, key)
 
-    meta_ok, meta_skip = _ingest_metadata(spark, key, csv_dir, catalog, schema)
+    tally = _ingest_metadata(spark, key, csv_dir, catalog, schema)
 
     if not groups:
         print(f"  --  {key:25s}   skipped (no CSVs)", flush=True)
-        return meta_ok, meta_skip + 1
-
-    succeeded = meta_ok
-    skipped = meta_skip
+        return tally + Tally(skipped=1)
 
     for group_key, files in sorted(groups.items()):
         tbl_name = f"{key}{_table_suffix(group_key)}"
@@ -206,30 +242,41 @@ def _ingest_collection(
             if chunked and key in LARGE_COLLECTIONS and len(files) > chunk_size:
                 # Large historical: chunk station files to keep Arrow transfer manageable.
                 # Polars streaming handles CSV parsing; chunking bounds the Spark write.
+                # The chunks go to a staging table: overwriting the published table
+                # with the first chunk and appending the rest left only the chunks
+                # done so far behind whenever a later one failed, with the previous
+                # complete table already gone.
+                staging = _staging_table(table)
                 total_chunks = (len(files) + chunk_size - 1) // chunk_size
-                for i in range(0, len(files), chunk_size):
-                    chunk = files[i : i + chunk_size]
-                    polars_df = _scan_and_collect(key, chunk, metadata_types)
-                    mode = "overwrite" if i == 0 else "append"
-                    _write_to_delta(spark, polars_df, table, mode=mode)
-                    chunk_num = i // chunk_size + 1
-                    print(
-                        f"  ... {tbl_name:25s}   chunk {chunk_num}/{total_chunks} ({len(chunk)} files, {mode})",
-                        flush=True,
-                    )
+                try:
+                    for i in range(0, len(files), chunk_size):
+                        chunk = files[i : i + chunk_size]
+                        polars_df = _scan_and_collect(key, chunk, metadata_types)
+                        mode = "overwrite" if i == 0 else "append"
+                        _write_to_delta(spark, polars_df, staging, mode=mode)
+                        chunk_num = i // chunk_size + 1
+                        print(
+                            f"  ... {tbl_name:25s}   chunk {chunk_num}/{total_chunks} ({len(chunk)} files, staged)",
+                            flush=True,
+                        )
+                    _publish_staged(spark, staging, table)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        spark.sql(f"DROP TABLE IF EXISTS {staging}")
+                    raise
             else:
                 polars_df = _scan_and_collect(key, files, metadata_types)
                 _write_to_delta(spark, polars_df, table)
 
             print(f"  OK  {tbl_name:25s} → {table} ({len(files)} files)", flush=True)
-            succeeded += 1
+            tally.written += 1
             _apply_column_comments(spark, table, csv_dir)
 
         except Exception as e:
-            print(f"  --  {tbl_name:25s}   skipped ({type(e).__name__})", flush=True)
-            skipped += 1
+            _report_failure(tbl_name, e)
+            tally.failed += 1
 
-    return succeeded, skipped
+    return tally
 
 
 RADAR_COLLECTIONS = ("radar_precip", "radar_hail")
@@ -241,7 +288,7 @@ def _ingest_radar(
     cat: str,
     sch: str,
     keys: tuple[str, ...] = RADAR_COLLECTIONS,
-) -> tuple[int, int]:
+) -> Tally:
     """Index radar HDF5 files into per-collection Delta catalog tables.
 
     Scans each collection's landing dir via Spark's binaryFile reader and
@@ -249,14 +296,13 @@ def _ingest_radar(
     The HDF5 payload itself stays in the volume — the table just holds
     (path, modification_time, size_bytes).
     """
-    total_ok = 0
-    total_skip = 0
+    tally = Tally()
 
     for key in keys:
         h5_dir = bronze_base / key
         if not h5_dir.exists() or not any(h5_dir.glob("*.h5")):
             print(f"  --  {key:25s} skipped (no data)", flush=True)
-            total_skip += 1
+            tally.skipped += 1
             continue
 
         new_df = (
@@ -300,40 +346,37 @@ def _ingest_radar(
 
         count = new_df.count()
         print(f"  OK  {key:25s} → {table} ({count} files indexed)", flush=True)
-        total_ok += 1
+        tally.written += 1
 
-    return total_ok, total_skip
+    return tally
 
 
-def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str, schema: str) -> tuple[int, int]:
-    """Ingest climate normals TXT files into a single Delta table."""
+def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str, schema: str) -> Tally:
+    """Ingest climate normals TXT files into a single Delta table.
+
+    All or nothing, like the chunked groups: one unreadable file fails the
+    table rather than replacing it with the files that happened to parse.
+    """
     txt_dir = bronze_base / "climate_normals"
     if not txt_dir.exists():
         print("  --  climate_normals           skipped (no data)", flush=True)
-        return 0, 1
+        return Tally(skipped=1)
 
     txt_files = sorted(txt_dir.glob("*.txt"))
     if not txt_files:
         print("  --  climate_normals           skipped (no TXT files)", flush=True)
-        return 0, 1
-
-    # scan_csv doesn't support encoding="latin1", so use eager read_csv.
-    frames: list[pl.DataFrame] = []
-    for txt_path in txt_files:
-        try:
-            df = read_normals_txt(txt_path)
-            frames.append(df)
-        except Exception as e:
-            print(f"  WARN: {txt_path.name}: {e}", flush=True)
-
-    if not frames:
-        return 0, 1
+        return Tally(skipped=1)
 
     table = f"{catalog}.{schema}.`climate_normals`"
-    combined = pl.concat(frames, how="diagonal_relaxed")
-    _write_to_delta(spark, combined, table)
+    try:
+        # scan_csv doesn't support encoding="latin1", so use eager read_csv.
+        frames = [read_normals_txt(txt_path) for txt_path in txt_files]
+        _write_to_delta(spark, pl.concat(frames, how="diagonal_relaxed"), table)
+    except Exception as e:
+        _report_failure("climate_normals", e)
+        return Tally(failed=1)
     print(f"  OK  {'climate_normals':25s} → {table} ({len(txt_files)} files)", flush=True)
-    return 1, 0
+    return Tally(written=1)
 
 
 def main() -> None:
@@ -381,33 +424,28 @@ def main() -> None:
 
     workspace = Workspace(Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}"))
 
-    total_ok = 0
-    total_skip = 0
-
     if args.radar is not None:
         keys = tuple(args.radar) if args.radar else RADAR_COLLECTIONS
         invalid = [k for k in keys if k not in RADAR_COLLECTIONS]
         if invalid:
             raise SystemExit(f"Unknown radar collection(s): {invalid}. Valid: {list(RADAR_COLLECTIONS)}")
-        ok, skip = _ingest_radar(spark, workspace.bronze(), cat, sch, keys)
-        print(f"\nDone — {ok} tables written, {skip} skipped.")
+        _finish(_ingest_radar(spark, workspace.bronze(), cat, sch, keys))
         return
 
+    total = Tally()
     for key in INGESTED_DATASETS:
         # The one dataset whose bronze files are TXT rather than CSV.
         if kind(key) is DatasetKind.DIRECT_ZIP:
-            ok, skip = _ingest_climate_normals(spark, workspace.bronze(), cat, sch)
-            total_ok += ok
-            total_skip += skip
+            total += _ingest_climate_normals(spark, workspace.bronze(), cat, sch)
             continue
 
         csv_dir = workspace.bronze(key)
         if not csv_dir.exists():
             print(f"  --  {key:25s}   skipped (no data)", flush=True)
-            total_skip += 1
+            total += Tally(skipped=1)
             continue
 
-        ok, skip = _ingest_collection(
+        total += _ingest_collection(
             spark,
             key,
             csv_dir,
@@ -416,10 +454,19 @@ def main() -> None:
             chunked=args.historical,
             chunk_size=args.chunk_size,
         )
-        total_ok += ok
-        total_skip += skip
 
-    print(f"\nDone — {total_ok} tables written, {total_skip} skipped.")
+    _finish(total)
+
+
+def _finish(total: Tally) -> None:
+    """Print the summary, and exit non-zero if any table failed.
+
+    Failures used to be counted as skips and the script returned normally, so the
+    scheduled job reported success over stale or incomplete tables.
+    """
+    print(f"\nDone — {total.written} tables written, {total.skipped} skipped, {total.failed} failed.")
+    if total.failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

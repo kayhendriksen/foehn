@@ -1578,3 +1578,103 @@ def test_the_time_index_of_a_store_that_is_not_there_is_empty(tmp_path):
     from foehn.grids import _cube_time_index
 
     assert _cube_time_index(None, tmp_path / "absent.zarr") == {}
+
+
+def _radar_stack_deps():
+    xr = pytest.importorskip("xarray")
+    for module in ("h5py", "pyproj", "zarr"):
+        pytest.importorskip(module)
+    return xr
+
+
+def test_two_quality_codes_for_one_observation_keep_only_the_better(tmp_path):
+    """MeteoSwiss leaves the original beside the reanalysis when the quality code changes.
+
+    Both used to be appended as equal timestamps, and the next append then put the
+    original's value back over the correction.
+    """
+    xr = _radar_stack_deps()
+    from foehn.grids import cube_radar
+
+    original = tmp_path / "CPC2613000000_00060.001.h5"
+    corrected = tmp_path / "CPC2613000009_00060.001.h5"
+    write_odim_composite(original, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
+    write_odim_composite(corrected, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    store = tmp_path / "cube.zarr"
+
+    for mode in ("w", "a"):
+        cube_radar([original, corrected], store, mode=mode)
+        with xr.open_zarr(store) as cube:
+            assert cube.sizes["time"] == 1
+            assert cube["acrr"].values[0, 0, 1] == 42.0
+
+
+def test_a_timestep_written_twice_in_one_call_is_revised_not_duplicated(tmp_path):
+    """Names outside the convention cannot be ranked, but the axis still stays unique."""
+    xr = _radar_stack_deps()
+    from foehn.grids import cube_radar
+
+    first, second = tmp_path / "a-first.h5", tmp_path / "b-second.h5"
+    write_odim_composite(first, time="000000", values=[[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+    write_odim_composite(second, time="000000", values=[[7.0, 7.0, 7.0], [7.0, 7.0, 7.0]])
+    store = tmp_path / "cube.zarr"
+
+    cube_radar([first, second], store, mode="w")
+
+    with xr.open_zarr(store) as cube:
+        assert cube.sizes["time"] == 1
+        assert cube["acrr"].values[0, 0, 0] == 7.0
+
+
+def _write_grib2_members(path, members):
+    """A tiny regular-grid GRIB2 file holding one field per ensemble member."""
+    eccodes = pytest.importorskip("eccodes")
+    import numpy as np
+
+    with path.open("wb") as stream:
+        for number in members:
+            gid = eccodes.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+            for key, value in {
+                "Ni": 3,
+                "Nj": 2,
+                "latitudeOfFirstGridPointInDegrees": 47.0,
+                "longitudeOfFirstGridPointInDegrees": 7.0,
+                "latitudeOfLastGridPointInDegrees": 46.0,
+                "longitudeOfLastGridPointInDegrees": 9.0,
+                "iDirectionIncrementInDegrees": 1.0,
+                "jDirectionIncrementInDegrees": 1.0,
+                "shortName": "2t",
+                "productDefinitionTemplateNumber": 1,
+                "perturbationNumber": number,
+                "numberOfForecastsInEnsemble": 3,
+                "typeOfEnsembleForecast": 0 if number == 0 else 1,
+            }.items():
+                eccodes.codes_set(gid, key, value)
+            eccodes.codes_set_values(gid, np.arange(6, dtype=float) + number)
+            eccodes.codes_write(gid, stream)
+            eccodes.codes_release(gid)
+
+
+def test_a_control_and_an_ensemble_file_cube_along_number(tmp_path):
+    """The control file's ``number`` is a scalar; the ensemble file's is already a dimension."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("zarr")
+    from foehn.grids import cube_grib2
+
+    control, ensemble = tmp_path / "ctrl.grib2", tmp_path / "perturb.grib2"
+    _write_grib2_members(control, [0])
+    _write_grib2_members(ensemble, [1, 2])
+    store = tmp_path / "cube.zarr"
+
+    cube_grib2(
+        [control, ensemble],
+        store,
+        dataset="forecast_icon_ch1",
+        workspace=Workspace(tmp_path),
+        fetcher=InMemoryFetcher(),
+    )
+
+    with xr.open_zarr(store) as cube:
+        assert cube["number"].values.tolist() == [0, 1, 2]
+        assert cube["t2m"].values[:, 0, 0].tolist() == [0.0, 1.0, 2.0]
