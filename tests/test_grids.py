@@ -146,6 +146,7 @@ def test_open_dataset_reads_grib2(fetcher, tmp_path):
 
 def test_open_grib2_overbroad_match_refused_before_download(fetcher, tmp_path):
     """A GRIB2 match resolving to >1 file is refused up front, with no download."""
+    pytest.importorskip("cfgrib")  # the reader's dependency check runs before the listing
     items = [
         {"assets": {"a": {"href": "https://data.geo.admin.ch/x/icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2"}}},
         {"assets": {"b": {"href": "https://data.geo.admin.ch/x/icon-ch1-eps-202605231500-1-t_2m-ctrl.grib2"}}},
@@ -735,6 +736,7 @@ def test_radar_cube_keeps_only_the_requested_variables(fetcher, tmp_path):
 def test_netcdf_open_points_at_match_when_files_will_not_combine(fetcher, tmp_path):
     """A heterogeneous multi-file set is the common mistake; the error has to name the fix."""
     xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")  # the fixtures are written with engine="h5netcdf"
     import numpy as np
 
     fetcher.any_items = _items_for("a.nc", "b.nc")
@@ -830,6 +832,7 @@ def test_an_unreadable_netcdf_file_is_reported_as_itself(tmp_path):
     it — which is why the fixture is not simply random bytes.
     """
     xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")  # the fixtures are written with engine="h5netcdf"
     import numpy as np
 
     from foehn.grids import open_netcdf

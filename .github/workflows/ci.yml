@@ -82,14 +82,16 @@ jobs:
       # Coverage floor lives in [tool.coverage.report] fail_under in pyproject.toml.
       - run: .venv/bin/pytest --cov=foehn --cov-report=term-missing
 
-  test-prerelease:
-    # Python's 3.15 call-to-action asks maintainers to test against the preview.
-    # Non-blocking on purpose: this tracks upstream readiness, and a red preview
-    # leg must never gate a PR.
-    name: test (3.15 preview, non-blocking)
+  test-315:
+    # Python 3.15 is released (3.15.0 on 2026-10-09), so this leg blocks like the
+    # others. It cannot install [dev] yet: h5py, eccodeslib and numcodecs (zarr)
+    # ship no cp315 wheels, so the radar, GRIB2 and Zarr paths are not installable
+    # here. Everything that is installable is, and the tests that need the rest
+    # skip themselves. No coverage floor: the floor is measured with the whole
+    # grids stack present. Fold this into the matrix above once those wheels land.
+    name: test (3.15)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -98,28 +100,11 @@ jobs:
         with:
           enable-cache: true
       - run: uv venv --python 3.15
-      # Core + mcp only. The grids stack has no 3.15 wheels yet (pandas, pyproj,
-      # netCDF4, h5py, pyarrow), so installing [dev] here would fail on packaging
-      # rather than on anything foehn controls.
-      - run: uv pip install -e ".[mcp]" "pytest>=8" "ruamel.yaml>=0.18"
-      # polars ships abi3 ("py3") wheels with no cp315 build, so it installs on
-      # 3.15 but cannot construct a temporal Series — every test that builds a
-      # frame with a timestamp dies inside polars. That drowned this job in ~22
-      # failures for one upstream reason, which is how it came to be ignored.
-      # Check for it up front and say so once, rather than 22 times. The suite
-      # runs again automatically once polars supports 3.15; when that happens,
-      # delete this step.
-      - name: Check polars works on this interpreter
-        id: polars
-        run: |
-          if .venv/bin/python -c "import datetime, polars as pl; pl.DataFrame({'t': [datetime.datetime(2026, 1, 1)]})"; then
-            echo "usable=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "usable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::polars cannot build a temporal Series on this interpreter (no cp315 wheel). Skipping the suite — this job reports nothing about foehn until polars supports 3.15."
-          fi
-      - if: steps.polars.outputs.usable == 'true'
-        run: .venv/bin/pytest --ignore=tests/test_grids.py -p no:cov
+      - run: >-
+          uv pip install --only-binary numpy,pyarrow,xarray,netCDF4,pyproj
+          -e ".[mcp]" "pytest>=8" "ruamel.yaml>=0.18"
+          "numpy>=1.24" "pyarrow>=14.0" "xarray>=2024.1" "netCDF4>=1.6" "pyproj>=3.0"
+      - run: .venv/bin/pytest -p no:cov
 
   build:
     name: build (packaging smoke test)

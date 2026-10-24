@@ -119,11 +119,13 @@ def unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher)
     if cache_key in _COORDS_CACHE:
         return _COORDS_CACHE[cache_key]
 
-    import cfgrib
-
     lat = lon = None
     path = constants_file(dataset, workspace, fetcher=fetcher)
     if path is not None:
+        # Only once there is a file to read: with no constants there is nothing
+        # for cfgrib to do, and the grid is returned without coordinates.
+        import cfgrib
+
         with quiet_cfgrib():
             constants = cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
         for ds in constants:

@@ -13,7 +13,14 @@ import pytest
 
 from foehn.collections import COLLECTIONS
 from foehn.fetch import FetchError
-from foehn.gridfiles import _list_by_window, _run_datetime_filter, ensure_grid_files
+from foehn.gridfiles import (
+    _available_runs_hint,
+    _list_by_window,
+    _list_forecast,
+    _product_range_hint,
+    _run_datetime_filter,
+    ensure_grid_files,
+)
 from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
 
@@ -717,10 +724,46 @@ def test_a_forecast_listing_is_walked_in_parallel_windows_and_deduplicated():
     assert [item["id"] for item in items] == ["valid-at-00", "valid-at-01"]
 
 
-def test_a_listing_with_no_extent_is_not_windowed():
+@pytest.mark.parametrize(
+    "collection",
+    [
+        {"extent": {}},
+        {"extent": {"temporal": {"interval": [["2026-10-25T00:00:00Z", "2026-10-24T00:00:00Z"]]}}},
+        {"extent": {"temporal": {"interval": [[None, "2026-10-24T00:00:00Z"]]}}},
+        # Wider than the rolling forecast window this is for: walked the plain way.
+        {"extent": {"temporal": {"interval": [["2020-01-01T00:00:00Z", "2026-10-24T00:00:00Z"]]}}},
+    ],
+    ids=["no-extent", "reversed", "open-start", "years-wide"],
+)
+def test_a_listing_without_a_usable_extent_is_not_windowed(collection):
     fake = InMemoryFetcher()
-    fake.any_collection = {"extent": {}}
+    fake.any_collection = collection
     assert _list_by_window("ch.meteoschweiz.ogd-forecasting-icon-ch1", fake) is None
+    assert fake.listings == []
+
+
+def test_an_unreachable_collection_falls_back_to_the_plain_walk():
+    class _NoCollection(InMemoryFetcher):
+        """The listing answers; the collection document does not."""
+
+        def collection(self, collection_id, *, timeout=30):
+            raise FetchError("collection unreachable")
+
+    fake = _NoCollection()
+    fake.any_items = _items_for("icon-ch1-eps-202610241800-0-t_2m-ctrl.grib2")
+    items = _list_forecast("ch.meteoschweiz.ogd-forecasting-icon-ch1", fake)
+
+    assert len(items) == 1
+    assert [dt for _, _, dt, _ in fake.listings] == [None]
+
+
+def test_the_miss_hints_stay_quiet_when_there_is_nothing_to_name():
+    from foehn.assets import Asset
+
+    radar = Asset.from_stac("d", {"href": "https://data.geo.admin.ch/x/cpc2629722000_00060.001.h5"})
+    assert _available_runs_hint([radar]) == ""
+    assert _product_range_hint([radar], "2629722000") == ""  # no product prefix
+    assert _product_range_hint([radar], "bzc26297") == ""  # no file of that product
 
 
 def test_an_expired_forecast_match_names_the_runs_that_exist(tmp_path):
