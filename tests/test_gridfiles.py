@@ -13,7 +13,7 @@ import pytest
 
 from foehn.collections import COLLECTIONS
 from foehn.fetch import FetchError
-from foehn.gridfiles import _run_datetime_filter, ensure_grid_files
+from foehn.gridfiles import _list_by_window, _run_datetime_filter, ensure_grid_files
 from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
 
@@ -194,13 +194,20 @@ def test_grid_listing_accepts_a_cached_walk(tmp_path):
     assert [cache for _, cache, _, _ in fake.listings] == [True]
 
 
-def test_run_datetime_filter_reads_the_run_stamp():
-    """A match naming a run becomes a STAC datetime; anything else stays unfiltered."""
+def test_run_datetime_filter_reads_the_valid_time():
+    """A match naming a run and lead becomes the STAC datetime; anything else stays unfiltered.
+
+    Item ``datetime`` is the valid time, so lead 9 of the 15:00 run is valid at
+    midnight — sending the run time found the field only at lead 0.
+    """
     assert _run_datetime_filter("202605231500-0-t_2m-ctrl") == "2026-05-23T15:00:00Z"
+    assert _run_datetime_filter("202605231500-9-t_2m-ctrl") == "2026-05-24T00:00:00Z"
+    # a run with no lead time names many instants, so it is not one filter
+    assert _run_datetime_filter("202605231500") is None
     # no parseable run stamp, an impossible one, or no match at all
     assert _run_datetime_filter("t_2m-ctrl") is None
     assert _run_datetime_filter("cpc26130") is None
-    assert _run_datetime_filter("209913451500") is None
+    assert _run_datetime_filter("209913451500-0-t_2m") is None
     assert _run_datetime_filter(None) is None
 
 
@@ -680,3 +687,80 @@ def test_a_failed_refresh_with_a_file_missing_raises_the_original(tmp_path):
 
     with pytest.raises(FetchError):
         ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+
+def _windowed(extent, by_window):
+    """A fetcher whose collection spans *extent* and lists *by_window[window]* per window."""
+
+    class _Windowed(InMemoryFetcher):
+        def items(self, collection_id, *, cache=False, datetime_filter=None, max_items=None):
+            self.listings.append((collection_id, cache, datetime_filter, max_items))
+            return list(by_window.get(datetime_filter, []))
+
+    fake = _Windowed()
+    fake.any_collection = {"extent": {"temporal": {"interval": [list(extent)]}}}
+    return fake
+
+
+def test_a_forecast_listing_is_walked_in_parallel_windows_and_deduplicated():
+    """~570 pages in a row took three minutes; the extent splits them into windows."""
+    first, second = "2026-10-24T00:00:00Z/2026-10-24T01:00:00Z", "2026-10-24T01:00:00Z/2026-10-24T01:30:00Z"
+    on_boundary = {"id": "valid-at-01", "assets": {}}
+    fake = _windowed(
+        ("2026-10-24T00:00:00Z", "2026-10-24T01:30:00Z"),
+        {first: [{"id": "valid-at-00", "assets": {}}, on_boundary], second: [on_boundary]},
+    )
+
+    items = _list_by_window("ch.meteoschweiz.ogd-forecasting-icon-ch1", fake)
+
+    assert sorted(dt for _, _, dt, _ in fake.listings) == [first, second]
+    assert [item["id"] for item in items] == ["valid-at-00", "valid-at-01"]
+
+
+def test_a_listing_with_no_extent_is_not_windowed():
+    fake = InMemoryFetcher()
+    fake.any_collection = {"extent": {}}
+    assert _list_by_window("ch.meteoschweiz.ogd-forecasting-icon-ch1", fake) is None
+
+
+def test_an_expired_forecast_match_names_the_runs_that_exist(tmp_path):
+    """Runs roll off after a day, so a match copied from the docs is the usual miss."""
+    fake = _fake(
+        _items_for(
+            "icon-ch1-eps-202610240600-0-t_2m-ctrl.grib2",
+            "icon-ch1-eps-202610241800-0-t_2m-ctrl.grib2",
+            "icon-ch1-eps-202610241800-3-t_2m-ctrl.grib2",
+        )
+    )
+
+    with pytest.raises(ValueError, match=r"runs 202610240600 to 202610241800.*icon-ch1-eps-202610241800-0-t_2m-ctrl"):
+        ensure_grid_files(
+            "forecast_icon_ch1",
+            Workspace(tmp_path),
+            suffixes=(".grib2",),
+            match="202605231500-0-t_2m-ctrl",
+            max_files=1,
+            run_datetime=True,
+            fetcher=fake,
+        )
+
+
+def test_an_expired_radar_match_names_the_range_of_that_product(tmp_path):
+    fake = _fake(
+        _items_for(
+            "cpc2628300000_00060.001.h5",
+            "cpc2629722000_00060.001.h5",
+            "tzc262972200rl.801.h5",
+        )
+    )
+
+    expected = r"cpc files from cpc2628300000_00060\.001\.h5 to cpc2629722000_00060\.001\.h5"
+    with pytest.raises(ValueError, match=expected):
+        ensure_grid_files(
+            "radar_precip",
+            Workspace(tmp_path),
+            suffixes=(".h5",),
+            match="cpc2613000000",
+            max_files=1,
+            fetcher=fake,
+        )

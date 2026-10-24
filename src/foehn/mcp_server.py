@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
+import polars as pl
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
@@ -152,6 +153,20 @@ class Station(BaseModel):
     data_since: str = _metadata_field("stations", "data_since")
 
 
+class Point(BaseModel):
+    point_id: int = _metadata_field("points", "point_id")
+    point_type_id: int = _metadata_field("points", "point_type_id")
+    type: str = _metadata_field("points", "type")
+    abbr: str | None = _metadata_field("points", "abbr")
+    postal_code: str | None = _metadata_field("points", "postal_code")
+    name: str = _metadata_field("points", "name")
+    altitude: int | float = _metadata_field("points", "altitude")
+    lv95_east: float = _metadata_field("points", "lv95_east")
+    lv95_north: float = _metadata_field("points", "lv95_north")
+    lat: float = _metadata_field("points", "lat")
+    lon: float = _metadata_field("points", "lon")
+
+
 class InventoryEntry(BaseModel):
     station: str = _metadata_field("inventory", "station")
     parameter: str = _metadata_field("inventory", "parameter")
@@ -162,6 +177,7 @@ class InventoryEntry(BaseModel):
 
 TABLES["parameters"].assert_model(Parameter.model_fields)
 TABLES["stations"].assert_model(Station.model_fields)
+TABLES["points"].assert_model(Point.model_fields)
 TABLES["inventory"].assert_model(InventoryEntry.model_fields)
 
 
@@ -255,6 +271,8 @@ def load_data(
             Loadable datasets: $loadable.
         station: Station abbreviation(s) (e.g. ["BER"] for Bern, or ["BER", "ZUR"]).
             Case-insensitive. Use get_stations() to find abbreviations.
+            For "forecast_local", a station abbreviation or a postal code
+            (e.g. ["3011"]); use get_points() to find them.
             If omitted, returns all stations (may be large).
         frequency: Granularity. Options: $granularities. Not all datasets support
             all of them — check list_datasets() for the "frequencies" field.
@@ -404,8 +422,10 @@ def describe_grid(
     (CombiPrecip, hail). CSV datasets should use describe_data()/load_data().
 
     **`match` is required for GRIB2 and radar** and must select a single file —
-    those collections are thousands of files. e.g. match="202605231500-0-t_2m-ctrl"
-    (forecast) or match="cpc2613000000" (radar). NetCDF can be inspected unfiltered
+    those collections are thousands of files. e.g. match="YYYYMMDDHHMM-0-t_2m-ctrl"
+    (forecast) or match="cpcYYDDDHHMM" (radar), with the time filled in. Forecast
+    files are kept for about a day and radar for about two weeks; a match that
+    finds nothing lists what the collection holds now. NetCDF can be inspected unfiltered
     or narrowed with match.
 
     **Cost warning:** foehn is download-then-lazy — the first call downloads the
@@ -490,6 +510,32 @@ def get_stations(dataset: str) -> list[Station]:
     return [Station(**row) for row in foehn.stations(dataset).to_dicts()]
 
 
+@mcp.tool(title="Get forecast points", annotations=_READ_ONLY)
+def get_points(dataset: str, query: str | None = None) -> list[Point]:
+    """Get the forecast points of a point-forecast dataset ("forecast_local").
+
+    Local forecasts are published per point, not per station: the stations,
+    plus one point per postal code centre and some points of interest — about
+    5,800 in all. Pass ``query`` to keep only points whose name, station
+    abbreviation or postal code contains it (case-insensitive), e.g. "Bern" or
+    "3011". Then pass the abbreviation or postal code as ``station`` to
+    load_data().
+
+    Args:
+        dataset: Dataset name ("forecast_local").
+        query: Optional case-insensitive substring to narrow the points.
+    """
+    df = foehn.points(dataset)
+    if query:
+        needle = query.lower()
+        df = df.filter(
+            pl.col("name").str.to_lowercase().str.contains(needle, literal=True)
+            | pl.col("abbr").str.to_lowercase().str.contains(needle, literal=True).fill_null(False)
+            | pl.col("postal_code").str.contains(needle, literal=True).fill_null(False)
+        )
+    return [Point(**row) for row in df.to_dicts()]
+
+
 @mcp.tool(title="Get inventory", annotations=_READ_ONLY)
 def get_inventory(dataset: str) -> list[InventoryEntry]:
     """Get the data inventory for a dataset.
@@ -534,7 +580,9 @@ Data provided by MeteoSwiss Open Government Data
 ## Recommended workflow
 
 1. **list_datasets()** — browse available datasets and their metadata.
-2. **get_stations(dataset)** — find station abbreviations for a dataset.
+2. **get_stations(dataset)** — find station abbreviations for a dataset. For
+   local forecasts ("forecast_local") use **get_points("forecast_local", query)**
+   instead: it finds a place by name, station or postal code.
 3. **get_parameters(dataset)** — understand column names, units, and groups.
 4. **describe_data(dataset, ...)** — check row count and date range before loading.
 5. **load_data(dataset, station, frequency, time_slice, year, columns, limit)** — fetch data.
@@ -551,7 +599,7 @@ use MeteoSwiss shortcodes (e.g. `tre200s0` = 2m air temperature in Celsius).
 These are N-dimensional grids, not tables, so load_data() does not apply. Use
 **describe_grid(dataset)** to see their dimensions, coordinates, and variables —
 it covers NetCDF, GRIB2 forecasts, and radar. GRIB2 and radar need a single-file
-`match` (e.g. `match="202605231500-0-t_2m-ctrl"` or `match="cpc2613000000"`);
+`match` (e.g. `match="YYYYMMDDHHMM-0-t_2m-ctrl"` or `match="cpcYYDDDHHMM"`);
 NetCDF can be inspected unfiltered or narrowed with `match`. describe_grid is
 download-then-lazy (the first call pulls the matched file(s) to a local cache).
 To read or convert the data itself, use the Python API (`foehn.open_dataset` /

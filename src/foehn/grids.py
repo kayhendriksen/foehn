@@ -410,16 +410,18 @@ class GridReader:
     cube_match_example: str | None = None
     """The same seed for the cube path, where a useful match is a wider one.
 
-    A single radar file is ``cpc2613000000``; a radar cube wants the day prefix
-    ``cpc26130``. Different advice, so a different field.
+    A single radar file is ``cpcYYDDDHHMM``; a radar cube wants the day prefix
+    ``cpcYYDDD``. Different advice, so a different field. Both are patterns, not
+    real names: real ones roll off within days, and an example that has expired
+    sends the caller to a match that cannot succeed.
     """
 
     run_datetime: bool = False
-    """Whether a STAC item's ``datetime`` is the model run embedded in the filename.
+    """Whether a STAC item's ``datetime`` is the valid time its filename encodes.
 
-    True for GRIB2 only. The CSV and radar collections set ``datetime`` to a
-    catalog-refresh timestamp unrelated to the data, where filtering on a real
-    data date matches nothing.
+    True for GRIB2 only, where it is the model run plus the lead time. The CSV
+    and radar collections set ``datetime`` to a catalog-refresh timestamp
+    unrelated to the data, where filtering on a real data date matches nothing.
     """
 
     def open_dataset(
@@ -438,7 +440,8 @@ class GridReader:
             raise ValueError(
                 f"Dataset {dataset!r} is a {fmt} collection of many single-field files; opening it "
                 "unfiltered would download them all. Narrow to one file with match=, e.g. "
-                f'foehn.open_dataset({dataset!r}, match="{self.match_example}").'
+                f'foehn.open_dataset({dataset!r}, match="{self.match_example}") with the time filled in. '
+                "A match that finds nothing lists the times the collection holds now."
             )
         self.require()
         # The acquisition validates the set and then hands back paths. Letting go
@@ -734,7 +737,8 @@ def open_grib2(
     xr = _require_xarray()
     # ``is None``, not falsiness: an explicit engine="" is a caller saying
     # something, and quietly substituting cfgrib for it hides the mistake.
-    ds = _open_grid(xr, files, engine="cfgrib" if engine is None else engine, backend_kwargs={"indexpath": ""})
+    with icon.quiet_cfgrib():
+        ds = _open_grid(xr, files, engine="cfgrib" if engine is None else engine, backend_kwargs={"indexpath": ""})
     return icon.attach_lonlat(
         ds,
         dataset,
@@ -995,7 +999,8 @@ def cube_grib2(
     """
     xr = _require_xarray()
 
-    datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs={"indexpath": ""}) for f in sorted(files)]
+    with icon.quiet_cfgrib():
+        datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs={"indexpath": ""}) for f in sorted(files)]
     # Promote whichever independent axes actually differ across the matched files.
     varying = [
         coord

@@ -94,6 +94,19 @@ def test_on_error_raise_surfaces_the_first_failure(tmp_path):
         fetch_all([asset("bad.nc")], tmp_path, fetcher=fetcher, on_error="raise")
 
 
+def test_on_error_raise_cancels_transfers_that_have_not_started(tmp_path):
+    """A fatal failure must not go on to fetch the rest of a set it has already lost."""
+    fetcher = InMemoryFetcher()
+    fetcher.default_body = b"payload"
+    fetcher.fail("https://data.geo.admin.ch/x/bad.nc")
+    assets = [asset("bad.nc"), *(asset(f"later{i}.nc") for i in range(20))]
+
+    with pytest.raises(FetchError):
+        fetch_all(assets, tmp_path, fetcher=fetcher, workers=1, on_error="raise")
+
+    assert len(fetcher.streams) < len(assets)
+
+
 def test_stream_writer_stages_even_when_the_fetcher_adapter_does_not(tmp_path):
     target = tmp_path / "grid.nc"
     target.write_bytes(b"complete")

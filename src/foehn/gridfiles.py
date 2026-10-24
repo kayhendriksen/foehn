@@ -16,7 +16,8 @@ from __future__ import annotations
 import logging
 import re
 import warnings
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from foehn import coherence
@@ -39,18 +40,37 @@ logger = logging.getLogger(__name__)
 
 
 # A GRIB2 forecast filename carries its model run as a bare YYYYMMDDHHMM stamp
+# and its lead time in hours right after it
 # (icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2), which is also what a caller's
 # ``match`` must contain to select a single field.
 _RUN_STAMP_RE = re.compile(r"(?<!\d)(\d{12})(?!\d)")
+_RUN_LEAD_RE = re.compile(r"(?<!\d)(\d{12})-(\d+)-")
+
+# The forecast collections are one STAC item *per file* and the API caps a page
+# at 100 items, so forecast_icon_ch1's ~57,000 items are ~570 requests in a row
+# — about three minutes. Item ``datetime`` is the valid time, and the
+# collection's temporal extent bounds it, so a walk that cannot be narrowed to
+# one instant is split into windows of this width and fetched side by side.
+_LISTING_WINDOW = timedelta(hours=1)
+_LISTING_WORKERS = 16
+# A sanity bound on the split: an extent wider than this many windows is not
+# the rolling forecast window this is for, so it is walked the plain way.
+_MAX_LISTING_WINDOWS = 400
+
+
+def _stac_instant(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _run_datetime_filter(match: str | None) -> str | None:
-    """Map a ``match`` onto a STAC ``datetime`` query, when it names one run.
+    """Map a ``match`` onto the STAC ``datetime`` of the one field it names.
 
-    The forecast collections are one STAC item *per file* — forecast_icon_ch1 is
-    ~57,000 items over ~571 pages, about 170s to walk in full, and that walk runs
-    on every open. Their item ``datetime`` is the model run time, so a match that
-    names a run narrows the listing server-side to that run's ~200 items (~0.5s).
+    A forecast item's ``datetime`` is its *valid* time — the run plus the lead
+    time — not the run. So only a match carrying both (``<run>-<lead>-``) pins
+    one instant, narrowing forecast_icon_ch1 to the ~800 items valid then. A
+    match with the run alone used to be sent as the run time, which finds the
+    field only at lead 0 and otherwise fell back to the full walk; it now walks
+    by window instead (see :func:`_list_by_window`).
 
     Only reached for a kind whose :attr:`GridReader.run_datetime` says its
     ``datetime`` means that. The other listings are small anyway (radar_precip is
@@ -58,14 +78,105 @@ def _run_datetime_filter(match: str | None) -> str | None:
     """
     if match is None:
         return None
-    found = _RUN_STAMP_RE.search(match)
+    found = _RUN_LEAD_RE.search(match)
     if not found:
         return None
     try:
         run = datetime.strptime(found.group(1), "%Y%m%d%H%M").replace(tzinfo=UTC)
     except ValueError:
         return None
-    return run.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _stac_instant(run + timedelta(hours=int(found.group(2))))
+
+
+def _temporal_extent(collection: dict) -> tuple[datetime, datetime] | None:
+    """The collection's published ``[start, end]``, or None if it states none."""
+    try:
+        start, end = collection["extent"]["temporal"]["interval"][0]
+        bounds = (
+            datetime.fromisoformat(start.replace("Z", "+00:00")),
+            datetime.fromisoformat(end.replace("Z", "+00:00")),
+        )
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return None
+    return bounds if bounds[0] <= bounds[1] else None
+
+
+def _list_by_window(collection_id: str, fetcher: Fetcher) -> list[dict] | None:
+    """Every item of a forecast collection, listed in parallel time windows.
+
+    None when the collection's extent is unknown or implausibly wide, so the
+    caller walks it the plain way. Windows share their boundary instants (STAC
+    ranges are closed), so an item on a boundary arrives twice and is kept once.
+    """
+    try:
+        bounds = _temporal_extent(fetcher.collection(collection_id))
+    except FetchError:
+        return None
+    if bounds is None:
+        return None
+    start, end = bounds
+    windows: list[str] = []
+    while start <= end and len(windows) <= _MAX_LISTING_WINDOWS:
+        windows.append(f"{_stac_instant(start)}/{_stac_instant(min(start + _LISTING_WINDOW, end))}")
+        start += _LISTING_WINDOW
+    if len(windows) > _MAX_LISTING_WINDOWS:
+        return None
+
+    def _window(window: str) -> list[dict]:
+        return fetcher.items(collection_id, cache=True, datetime_filter=window)
+
+    with ThreadPoolExecutor(max_workers=min(_LISTING_WORKERS, len(windows))) as pool:
+        pages = list(pool.map(_window, windows))
+
+    seen: set[object] = set()
+    items: list[dict] = []
+    for page in pages:
+        for item in page:
+            key = item.get("id") or tuple(sorted(a.get("href", "") for a in item.get("assets", {}).values()))
+            if key not in seen:
+                seen.add(key)
+                items.append(item)
+    return items
+
+
+def _list_forecast(collection_id: str, fetcher: Fetcher) -> list[dict]:
+    """A forecast collection's full listing: by window when possible, else in one walk."""
+    by_window = _list_by_window(collection_id, fetcher)
+    return by_window if by_window is not None else fetcher.items(collection_id, cache=True)
+
+
+def _available_runs_hint(assets: list[Asset]) -> str:
+    """Name the runs a forecast collection holds now, for a match that found none.
+
+    The runs roll off after about a day, so a ``match`` copied from documentation
+    or an older session is the usual way to reach this — and the bare "nothing
+    matched" left the caller guessing which stamps would.
+    """
+    runs = sorted({found.group(1) for a in assets if (found := _RUN_STAMP_RE.search(a.name))})
+    if not runs:
+        return ""
+    newest = [a.name for a in assets if runs[-1] in a.name]
+    example = next((name for name in newest if "-0-t_2m-ctrl" in name), min(newest))
+    return (
+        f" Forecast runs are only kept for about a day; the collection holds runs {runs[0]} to {runs[-1]} "
+        f"now (e.g. {example})."
+    )
+
+
+def _product_range_hint(assets: list[Asset], match: str) -> str:
+    """Name the first and last file of the product a single-file ``match`` reaches for.
+
+    Radar composites are named product-first (``cpc``, ``bzc``, …) with the time
+    after it and roll off after a couple of weeks, so the range of that product
+    is what tells the caller which timestamps exist.
+    """
+    product = re.match(r"[A-Za-z]+", match)
+    if product is None:
+        return ""
+    names = sorted(a.name for a in assets if a.name.startswith(product.group(0)))
+    if not names:
+        return ""
+    return f" The collection holds {product.group(0)} files from {names[0]} to {names[-1]} now."
 
 
 # A refresh that fails part-way can leave a set where some files are the new
@@ -187,7 +298,12 @@ def _refresh(
     collection_id = COLLECTIONS[dataset]
     datetime_filter = _run_datetime_filter(match) if run_datetime else None
     try:
-        items = fetcher.items(collection_id, cache=True, datetime_filter=datetime_filter)
+        if datetime_filter is not None:
+            items = fetcher.items(collection_id, cache=True, datetime_filter=datetime_filter)
+        elif run_datetime:
+            items = _list_forecast(collection_id, fetcher)
+        else:
+            items = fetcher.items(collection_id, cache=True)
     except FetchError as exc:
         cached = [f for f in local if match is None or match in f.name]
         if cached:
@@ -213,12 +329,19 @@ def _refresh(
         # report a file as missing on the strength of an optimisation, fall back
         # to the full walk — slow, but it is exactly what happened before.
         logger.debug("No %s assets for %r under datetime=%s; retrying unfiltered", sfx, match, datetime_filter)
-        items = fetcher.items(collection_id, cache=True)
+        items = _list_forecast(collection_id, fetcher)
         matched, other_exts = _grid_assets(items, suffixes, match)
 
     if not matched:
         if match is not None:
-            raise ValueError(f"No {sfx} assets matching {match!r} found for {dataset!r}.")
+            candidates = assets_of(items, suffixes=suffixes)
+            if run_datetime:
+                hint = _available_runs_hint(candidates)
+            elif max_files == 1:
+                hint = _product_range_hint(candidates, match)
+            else:
+                hint = ""
+            raise ValueError(f"No {sfx} assets matching {match!r} found for {dataset!r}.{hint}")
         found = ", ".join(sorted(other_exts)) or "none"
         raise ValueError(f"No {sfx} assets found for {dataset!r} (available asset types: {found}).")
 

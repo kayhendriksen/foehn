@@ -56,12 +56,13 @@ foehn to-parquet smn        # single dataset
 
 ## `foehn metadata TABLE DATASET`
 
-Show dataset metadata fetched live from the API. `TABLE` is one of `parameters`, `stations`, or `inventory`.
+Show dataset metadata fetched live from the API. `TABLE` is one of `parameters`, `stations`, `points`, or `inventory`.
 
 ```bash
 foehn metadata parameters smn   # what each column name means
 foehn metadata stations smn     # station locations and info
 foehn metadata inventory smn    # which station has which parameter
+foehn metadata points forecast_local  # forecast points: stations, postal codes, ...
 ```
 
 ---
@@ -104,8 +105,8 @@ that selects a single file (those collections are thousands of files). See the
 ```bash
 foehn open surface_derived_grid --match rhiresd
 foehn open climate_scenarios_grid --match _pr_ --variables pr
-foehn open forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl   # one GRIB2 field
-foehn open radar_precip --match cpc2613000000                   # one radar composite
+foehn open forecast_icon_ch1 --match YYYYMMDDHHMM-0-t_2m-ctrl   # one GRIB2 field
+foehn open radar_precip --match cpcYYDDDHHMM                   # one radar composite
 ```
 
 | Flag | Description |
@@ -125,9 +126,9 @@ so different slices don't overwrite each other; use `--out` for an explicit path
 ```bash
 foehn to-zarr surface_derived_grid --match rhiresd
 foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
-foehn to-zarr forecast_icon_ch1 --match 202605231500-0-t_2m-ctrl
-foehn to-zarr radar_precip --match cpc2613000000              # one timestep
-foehn to-zarr radar_precip --match cpc26130 --stack           # a day -> one (time, y, x) cube
+foehn to-zarr forecast_icon_ch1 --match YYYYMMDDHHMM-0-t_2m-ctrl
+foehn to-zarr radar_precip --match cpcYYDDDHHMM              # one timestep
+foehn to-zarr radar_precip --match cpcYYDDD --stack           # a day -> one (time, y, x) cube
 foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack    # GRIB2 -> (time, step, values) cube
 ```
 

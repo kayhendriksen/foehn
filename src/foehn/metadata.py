@@ -25,7 +25,7 @@ from typing import Any
 import polars as pl
 
 from foehn.assets import collection_assets
-from foehn.collections import collection_id
+from foehn.collections import DatasetKind, collection_id, kind
 from foehn.fetch import Fetcher
 from foehn.meteocsv import decode_meteoswiss_csv
 
@@ -123,6 +123,46 @@ TABLES: Mapping[str, MetadataTable] = MappingProxyType(
                 ),
             ),
         ),
+        # forecast_local publishes forecast points rather than stations: the
+        # stations, plus one point per postal code and some points of interest.
+        "points": MetadataTable(
+            "_meta_point",
+            (
+                _field(
+                    "point_id",
+                    "point_id",
+                    int,
+                    "Forecast point ID; unique only together with point_type_id",
+                ),
+                _field("point_type_id", "point_type_id", int, "Point type ID, as in the point_type_id column"),
+                _field(
+                    "point_type_en",
+                    "type",
+                    str,
+                    "Point type: 'Station', 'Postal code center' or 'Point of Interest'",
+                ),
+                _field(
+                    "station_abbr",
+                    "abbr",
+                    str,
+                    "Station abbreviation, or null when the point is not a station",
+                    nullable=True,
+                ),
+                _field(
+                    "postal_code",
+                    "postal_code",
+                    str,
+                    "Swiss postal code (e.g. '3011'), or null when the point is not a postal code centre",
+                    nullable=True,
+                ),
+                _field("point_name", "name", str, "Point name"),
+                _field("point_height_masl", "altitude", int | float, "Altitude in metres above sea level"),
+                _field("point_coordinates_lv95_east", "lv95_east", float, "LV95 easting in metres (EPSG:2056)"),
+                _field("point_coordinates_lv95_north", "lv95_north", float, "LV95 northing in metres (EPSG:2056)"),
+                _field("point_coordinates_wgs84_lat", "lat", float, "WGS84 latitude"),
+                _field("point_coordinates_wgs84_lon", "lon", float, "WGS84 longitude"),
+            ),
+        ),
         "inventory": MetadataTable(
             "_meta_datainventory",
             (
@@ -147,13 +187,24 @@ def fetch_table(dataset: str, table: str, *, fetcher: Fetcher) -> pl.DataFrame:
         raise ValueError(f"Unknown metadata table {table!r}. Valid options: {', '.join(TABLES)}.")
 
     spec = TABLES[table]
+    if kind(dataset) is DatasetKind.DIRECT_ZIP:
+        # Not a STAC Collection at all, so asking the API for one is a bare 404.
+        raise ValueError(
+            f"Dataset {dataset!r} is a direct ZIP download rather than a STAC collection, "
+            "so it publishes no metadata tables."
+        )
     coll = fetcher.collection(collection_id(dataset))
-    for asset in collection_assets(coll, suffixes=(".csv",), contains=spec.suffix):
+    csv_assets = collection_assets(coll, suffixes=(".csv",))
+    for asset in csv_assets:
+        if spec.suffix not in asset.name:
+            continue
         content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
         df = pl.read_csv(content.encode("utf-8"), separator=";")
         return df.select(pl.col(field.source).alias(field.published) for field in spec.fields)
 
-    raise ValueError(f"No {spec.suffix} metadata found for dataset {dataset!r}.")
+    available = [name for name, other in TABLES.items() if any(other.suffix in a.name for a in csv_assets)]
+    hint = f" It publishes: {', '.join(available)}." if available else ""
+    raise ValueError(f"No {spec.suffix} metadata found for dataset {dataset!r}.{hint}")
 
 
 __all__ = ["TABLES", "MetadataField", "MetadataTable", "fetch_table"]

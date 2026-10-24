@@ -13,7 +13,10 @@ reaching into a module global to do that is not an interface.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import warnings
+from collections.abc import Generator
 from pathlib import Path
 
 from foehn.assets import collection_assets
@@ -71,6 +74,41 @@ def constants_file(dataset: str, workspace: Workspace, *, fetcher: Fetcher) -> P
     return path
 
 
+class _DropUnstructuredNotice(logging.Filter):
+    """Drop cfgrib's notice that an ICON field carries no lat/lon.
+
+    True of every ICON/KENDA field, and foehn attaches the coordinates from the
+    constants file straight after — so the warning tells the caller the one
+    thing that is not true of what they get back.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("ecCodes provides no latitudes/longitudes")
+
+
+@contextlib.contextmanager
+def quiet_cfgrib() -> Generator[None]:
+    """Silence the noise cfgrib makes reading an ICON/KENDA GRIB, and nothing else.
+
+    Two sources, both cfgrib's rather than the caller's: the lat/lon notice
+    above, and xarray's FutureWarning about ``merge``'s ``compat`` default, which
+    cfgrib's own ``open_datasets`` triggers once per variable group.
+    """
+    notice = _DropUnstructuredNotice()
+    cfgrib_log = logging.getLogger("cfgrib.dataset")
+    cfgrib_log.addFilter(notice)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="In a future version of xarray the default value for compat",
+                category=FutureWarning,
+            )
+            yield
+    finally:
+        cfgrib_log.removeFilter(notice)
+
+
 def unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher):
     """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
 
@@ -86,7 +124,9 @@ def unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher)
     lat = lon = None
     path = constants_file(dataset, workspace, fetcher=fetcher)
     if path is not None:
-        for ds in cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""}):
+        with quiet_cfgrib():
+            constants = cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
+        for ds in constants:
             if "tlat" in ds.variables:
                 lat = ds["tlat"].values
             if "tlon" in ds.variables:
@@ -129,4 +169,4 @@ def clear_cache() -> None:
     _COORDS_CACHE.clear()
 
 
-__all__ = ["attach_lonlat", "clear_cache", "constants_file", "unstructured_lonlat"]
+__all__ = ["attach_lonlat", "clear_cache", "constants_file", "quiet_cfgrib", "unstructured_lonlat"]

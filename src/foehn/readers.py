@@ -32,7 +32,7 @@ import polars as pl
 from foehn._urls import asset_filename
 from foehn.archives import check_zip_size
 from foehn.assets import assets_of, collection_assets, hrefs, select
-from foehn.collections import COLLECTIONS, DEFAULT_TIME_SLICE
+from foehn.collections import COLLECTIONS, DEFAULT_TIME_SLICE, forecast_parameter_from_filename
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
 from foehn.meteocsv import (
     decode_meteoswiss_csv,
@@ -40,6 +40,7 @@ from foehn.meteocsv import (
     indoor_station,
     parse_climate_scenarios_csv,
     parse_csv_bytes,
+    parse_forecast_points,
     parse_indoor_csv,
     parse_metadata_types,
     source_columns_for,
@@ -369,19 +370,64 @@ def read_standard(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Dat
     return _read_csv_hrefs(dataset, filters, csv_hrefs, fetcher=fetcher, metadata_types=metadata_types)
 
 
+def _forecast_points(dataset: str, stations: frozenset[str], fetcher: Fetcher) -> pl.DataFrame:
+    """The points a ``station`` filter names, by station abbreviation or postal code.
+
+    Forecast rows carry a point and nothing else that says where they are, so the
+    names a caller knows are looked up in the Collection's point table first. A
+    point is ``(point_id, point_type_id)``: the ID alone is reused across types,
+    and station 641 is not point of interest 641.
+    """
+    coll = fetcher.collection(COLLECTIONS[dataset])
+    keys = ["point_id", "point_type_id"]
+    points = pl.DataFrame(schema=dict.fromkeys(keys, pl.Int64))
+    for asset in collection_assets(coll, suffixes=(".csv",), contains="_meta_point"):
+        table = parse_forecast_points(fetcher.get(asset.href, timeout=60).body)
+        named = pl.col("station_abbr").str.to_lowercase().is_in(stations) | pl.col("postal_code").is_in(stations)
+        points = table.filter(named).select(pl.col(keys).cast(pl.Int64))
+        break
+    if points.is_empty():
+        raise ValueError(
+            f"No forecast points match station={sorted(stations)} in {dataset!r}. "
+            f"Use foehn.points({dataset!r}) to find station abbreviations and postal codes."
+        )
+    return points
+
+
 def read_forecast(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:
-    """Newest Forecast run, normalized to include its derived Reference timestamp."""
+    """Newest Forecast run: one row per point and time, every parameter a column.
+
+    Each file of a run is one parameter for every point, so the files are joined
+    on point and time rather than stacked — stacked, every row held a single
+    parameter and ~23 rows described each point-hour. Items are days, not
+    stations, so ``station`` is resolved to points through the point table, and
+    ``columns`` decides which parameter files are fetched at all.
+    """
     collection_id = COLLECTIONS[dataset]
     metadata_types = _metadata_types(dataset, fetcher)
     items = fetcher.items(collection_id)
-    if filters.stations is not None:
-        items = [item for item in items if item.get("id", "").lower() in filters.stations]
 
     # A forecast item is one day, not one Forecast run, and the newest day can be
     # empty while publication is in progress. Select the newest run by filename.
     items.sort(key=lambda item: item.get("id", ""))
-    csv_hrefs = hrefs(select(assets_of(items, suffixes=(".csv",)), latest_run=True))
-    return _read_csv_hrefs(dataset, filters, csv_hrefs, fetcher=fetcher, metadata_types=metadata_types)
+    run = select(assets_of(items, suffixes=(".csv",)), latest_run=True)
+    if not run:
+        raise ValueError(f"No forecast CSV files found for {dataset!r}.")
+    if filters.columns:
+        wanted = {*filters.columns, *([filters.drop_null] if filters.drop_null else [])}
+        # Narrow only when something is left: a column that names no parameter
+        # is reported by the column check in ``finish``, not as a missing run.
+        narrowed = [asset for asset in run if forecast_parameter_from_filename(asset.name) in wanted]
+        run = narrowed or run
+    points = _forecast_points(dataset, filters.stations, fetcher) if filters.stations is not None else None
+
+    def _fetch(href: str) -> pl.DataFrame:
+        frame = parse_csv_bytes(utf8_meteoswiss_csv(fetcher.get(href, timeout=60).body), metadata_types)
+        if points is not None:
+            frame = frame.join(points, on=list(points.columns), how="semi")
+        return apply_time_filters(derive_timestamp(frame, dataset), filters)
+
+    return pl.concat(_fetch_frames(_fetch, hrefs(run), filters.workers), how="align")
 
 
 def read_preamble(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.DataFrame:

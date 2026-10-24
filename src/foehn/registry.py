@@ -226,7 +226,7 @@ KINDS: dict[DatasetKind, KindSpec] = {
     DatasetKind.FORECAST_CSV: KindSpec(
         download=_download_forecast_csv,
         convert=convert_to_parquet,
-        load=Reader(read_forecast),
+        load=Reader(read_forecast, key_columns=("point_id", "point_type_id", "reference_timestamp")),
         grid=None,
         supports_granularity=False,
         supports_calendar_filters=True,
@@ -280,10 +280,10 @@ KINDS: dict[DatasetKind, KindSpec] = {
             # The whole set is held in memory at once (no dask), so an over-broad
             # match is capped before anything is downloaded.
             cube_max_files=1000,
-            match_example="202605231500-0-t_2m-ctrl",
+            match_example="YYYYMMDDHHMM-0-t_2m-ctrl",
             cube_match_example="-t_2m-ctrl",
-            # A forecast item's STAC ``datetime`` is its model run, so a match
-            # naming one narrows ~57,000 items to ~200 server-side.
+            # A forecast item's STAC ``datetime`` is its valid time (run + lead),
+            # so a match naming both narrows ~57,000 items to ~800 server-side.
             run_datetime=True,
         ),
         supports_granularity=False,
@@ -303,8 +303,8 @@ KINDS: dict[DatasetKind, KindSpec] = {
             # Deliberately uncapped: the cube appends one timestep at a time, so
             # it wants every file the match spans.
             cube_max_files=None,
-            match_example="cpc2613000000",
-            cube_match_example="cpc26130",
+            match_example="cpcYYDDDHHMM",
+            cube_match_example="cpcYYDDD",
         ),
         supports_granularity=False,
         supports_calendar_filters=False,

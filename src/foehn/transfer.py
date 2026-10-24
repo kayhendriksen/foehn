@@ -346,6 +346,10 @@ def fetch_all(
                     outcome = fut.result()
                 except Exception as exc:
                     if on_error == "raise":
+                        # Leaving the ``with`` waits for every queued transfer,
+                        # so a read that is already lost would still fetch the
+                        # rest of its set. Drop what has not started.
+                        pool.shutdown(cancel_futures=True)
                         raise
                     failed += 1
                     logger.warning("  [%d/%d] FAILED: %s — %s", i, total, asset.href, exc)
