@@ -11,7 +11,7 @@ import importlib
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -19,7 +19,7 @@ _reentrant = threading.local()
 
 
 @contextmanager
-def reentrant_lock(path: Path) -> Iterator[None]:
+def reentrant_lock(path: Path) -> Generator[None]:
     """:func:`exclusive_lock`, but a thread may take it again while holding it.
 
     A file lock is held by the *file descriptor*, so a thread that opens the
@@ -49,7 +49,7 @@ def reentrant_lock(path: Path) -> Iterator[None]:
 
 
 @contextmanager
-def exclusive_lock(path: Path) -> Iterator[None]:
+def exclusive_lock(path: Path) -> Generator[None]:
     """Hold an exclusive advisory lock for the duration of the context."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
@@ -126,7 +126,7 @@ def is_held(path: Path) -> bool:
 
 
 @contextmanager
-def exclusive_directory_lock(path: Path) -> Iterator[None]:
+def exclusive_directory_lock(path: Path) -> Generator[None]:
     """Lock a directory directly on POSIX and through one stable file on Windows."""
     path.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
