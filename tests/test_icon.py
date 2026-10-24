@@ -171,7 +171,7 @@ def _unstructured(size=4):
 
 
 def test_lonlat_is_attached_to_an_unstructured_field(tmp_path):
-    import numpy as np
+    np = pytest.importorskip("numpy")
 
     from foehn.icon import attach_lonlat
 
@@ -201,7 +201,7 @@ def test_a_grid_that_is_not_unstructured_is_returned_untouched(tmp_path):
 
 def test_a_wrong_sized_constants_grid_is_ignored_rather_than_broadcast(tmp_path):
     """Coordinates from a different grid would silently mislabel every cell."""
-    import numpy as np
+    np = pytest.importorskip("numpy")
 
     from foehn.icon import attach_lonlat
 

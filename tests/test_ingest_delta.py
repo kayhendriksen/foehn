@@ -264,6 +264,7 @@ def test_apply_column_comments_escapes_backslashes_and_quotes(tmp_path):
 
 
 def test_ingest_collection(smn_bronze_dir, mock_spark):
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     ok, skip = _ingest_collection(
         mock_spark,
         "smn",
@@ -278,6 +279,7 @@ def test_ingest_collection(smn_bronze_dir, mock_spark):
 
 
 def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     """Chunked mode with chunk_size=1 should produce 2 data writes + 1 meta write."""
     ok, skip = _ingest_collection(
         mock_spark,
@@ -307,6 +309,7 @@ def test_ingest_collection_empty(tmp_path, mock_spark):
 
 
 def test_ingest_metadata(smn_bronze_dir, mock_spark):
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     ok, skip = _ingest_metadata(
         mock_spark,
         "smn",
@@ -320,6 +323,7 @@ def test_ingest_metadata(smn_bronze_dir, mock_spark):
 
 
 def test_ingest_metadata_multiple_files(smn_bronze_dir, mock_spark):
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
     """Stations + datainventory + parameters should each become their own table."""
     smn_dir = smn_bronze_dir / "smn"
     (smn_dir / "ogd-smn_meta_stations.csv").write_text("station_abbr;station_name\nABO;Adelboden\nBER;Bern\n")

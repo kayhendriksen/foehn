@@ -357,6 +357,23 @@ def test_load_forecast_local_unknown_station_names_the_lookup(fetcher):
         load("forecast_local", station="XYZ")
 
 
+def test_load_forecast_local_station_needs_the_point_table(fetcher):
+    """A collection without its point table can name no point, so the filter says so."""
+    _forecast_run(fetcher, {"tre200h0": _param_csv("tre200h0", [(7, 1, 12)])})
+    fetcher.any_collection = {"assets": {}}
+
+    with pytest.raises(ValueError, match="No forecast points match"):
+        load("forecast_local", station="BER")
+
+
+def test_load_forecast_local_with_no_run_published_says_so(fetcher):
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [_forecast_item("20260722-ch", {})]
+
+    with pytest.raises(ValueError, match="No forecast CSV files found"):
+        load("forecast_local")
+
+
 def test_load_forecast_local_columns_fetch_only_those_parameter_files(fetcher):
     """Every file covers every point, so columns= is the one lever on network volume."""
     _forecast_run(

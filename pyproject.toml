@@ -32,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Topic :: Scientific/Engineering :: GIS",
     "Typing :: Typed",
@@ -78,7 +79,7 @@ dev = [
     # the upgrade arrives as its own reviewable PR rather than landing on whoever
     # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
     # which CI reads — see scripts/hook_version.sh.)
-    "ty==0.0.84",
+    "ty==0.0.86",
     "numpy>=1.24",
     "pydantic>=2.0",
     # Strict YAML parsing for the workflow-structure test: PyYAML silently
