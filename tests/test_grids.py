@@ -1,6 +1,7 @@
 """Tests for the gridded read path (foehn.open_dataset)."""
 
 import contextlib
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -1602,8 +1603,8 @@ def test_two_quality_codes_for_one_observation_keep_only_the_better(tmp_path):
     write_odim_composite(corrected, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
     store = tmp_path / "cube.zarr"
 
-    for mode in ("w", "a"):
-        cube_radar([original, corrected], store, mode=mode)
+    for mode, order in (("w", [original, corrected]), ("a", [corrected, original])):
+        cube_radar(order, store, mode=mode)
         with xr.open_zarr(store) as cube:
             assert cube.sizes["time"] == 1
             assert cube["acrr"].values[0, 0, 1] == 42.0
@@ -1678,3 +1679,47 @@ def test_a_control_and_an_ensemble_file_cube_along_number(tmp_path):
     with xr.open_zarr(store) as cube:
         assert cube["number"].values.tolist() == [0, 1, 2]
         assert cube["t2m"].values[:, 0, 0].tolist() == [0.0, 1.0, 2.0]
+
+
+def test_a_store_left_with_duplicate_timestamps_is_rebuilt_not_extended(tmp_path):
+    """Stores from before the per-observation rule can repeat an instant; appending cannot fix that."""
+    xr = _radar_stack_deps()
+    import numpy as np
+
+    from foehn.grids import cube_radar
+
+    corrected = tmp_path / "CPC2613000009_00060.001.h5"
+    write_odim_composite(corrected, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    store = tmp_path / "cube.zarr"
+    when = np.array(["2026-05-10T00:00:00", "2026-05-10T00:00:00"], dtype="datetime64[ns]")
+    stale = xr.Dataset({"acrr": (("time", "y", "x"), np.array([[[0.0, 1.5]], [[0.0, 42.0]]]))}, coords={"time": when})
+    with warnings.catch_warnings():  # zarr's consolidated-metadata notice; the fixture's, not foehn's
+        warnings.simplefilter("ignore")
+        stale.to_zarr(store, mode="w")
+
+    with pytest.raises(ValueError, match=r'repeats 1 timestamp.*mode="w"'):
+        cube_radar([corrected], store, mode="a")
+
+    cube_radar([corrected], store, mode="w")
+    with xr.open_zarr(store) as cube:
+        assert cube.sizes["time"] == 1
+        assert cube["acrr"].values[0, 0, 1] == 42.0
+
+
+def test_a_store_that_cannot_be_checked_is_left_to_the_append_path(tmp_path):
+    """An unreadable store, or one with no time axis, is not refused on suspicion."""
+    xr = _radar_stack_deps()
+    import numpy as np
+
+    from foehn.grids import _refuse_a_duplicated_axis
+
+    unreadable = tmp_path / "unreadable.zarr"
+    unreadable.mkdir()
+    (unreadable / "zarr.json").write_text("{not json")
+    timeless = tmp_path / "timeless.zarr"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        xr.Dataset({"v": ("x", np.arange(2.0))}).to_zarr(timeless, mode="w")
+
+    for store in (unreadable, timeless, tmp_path / "absent.zarr"):
+        _refuse_a_duplicated_axis(xr, store)

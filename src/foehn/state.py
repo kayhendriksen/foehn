@@ -140,16 +140,15 @@ def _cursor_key(dataset: str, time_slice: str) -> str:
 
 
 def load_cursor(workspace: Workspace, dataset: str, time_slices: list[str]) -> str | None:
-    """The instant after which *dataset*'s requested slices are known to be on disk.
+    """The instant after which nothing upstream changed for *dataset*'s requested slices.
 
     None — list everything — unless every requested slice has a cursor of its
-    own and the Dataset's Bronze directory still holds files. A slice requested
-    for the first time has nothing on disk to be incremental against, and
-    neither does a Bronze directory someone emptied. With several slices the
-    earliest cursor wins, so each of them is covered.
+    own: a slice requested for the first time has nothing to be incremental
+    against. With several slices the earliest cursor wins, so each of them is
+    covered. Files deleted from Bronze are not this function's concern: the
+    download step fetches any wanted file that is missing, whatever the cursor.
     """
-    bronze = workspace.bronze(dataset)
-    if not time_slices or not bronze.is_dir() or not any(bronze.iterdir()):
+    if not time_slices:
         return None
     stored = _read_mapping(workspace.last_run, "last-run cursor")
     cursors: list[tuple[datetime, str]] = []

@@ -817,6 +817,36 @@ def _cube_times(xr, store: Path) -> frozenset:
         return frozenset()
 
 
+def _refuse_a_duplicated_axis(xr, store: Path) -> None:
+    """Refuse to extend a cube whose time axis already repeats a timestamp.
+
+    Stores written before revisions were resolved per observation can hold the
+    same instant twice — once per CombiPrecip quality code — and extending one
+    cannot tell which copy is the correction. It is rebuilt, not guessed at.
+    """
+    if not store.exists():
+        return
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+            with xr.open_zarr(store) as existing:
+                if "time" not in existing.coords:
+                    return
+                stamps = existing["time"].values.ravel().astype("datetime64[ns]")
+    except Exception as exc:  # unreadable: the append path reports it, as before
+        logger.debug("Could not check the time axis of %s (%s)", store, exc)
+        return
+    unique = len(set(stamps.astype("int64").tolist()))
+    if unique == len(stamps):
+        return
+    raise ValueError(
+        f"{store.name} repeats {len(stamps) - unique} timestamp(s) on its time axis, left by a foehn "
+        "version that appended two revisions of one radar observation. Extending it would keep "
+        'whichever copy came first. Rebuild it with mode="w" (the default), e.g. '
+        'foehn.to_zarr(dataset, match=..., stack=True, mode="w").'
+    )
+
+
 def _cube_time_index(xr, store: Path) -> dict[int, int]:
     """Map each stored timestamp to its position on the cube's time axis."""
     if not store.exists():
@@ -955,6 +985,8 @@ def cube_radar(
     # "w-" (create, never clobber) and "r+" (modify, never truncate) into a
     # silent overwrite of the store they were chosen to protect.
     extending = mode not in {"w", "w-"}
+    if extending:
+        _refuse_a_duplicated_axis(xr, store)
     stored_times = _cube_times(xr, store) if extending else frozenset()
     stored_sources = _stored_sources(store) if extending else {}
 
