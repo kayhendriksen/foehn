@@ -230,9 +230,10 @@ class HttpFetcher:
                 return hit[2]
 
         collected: list[dict] = []
-        url: str | None = validate_stac_url(f"{STAC_API_BASE}/collections/{collection_id}/items?limit=100")
+        first_page = validate_stac_url(f"{STAC_API_BASE}/collections/{collection_id}/items?limit=100")
         if datetime_filter:
-            url += f"&datetime={quote(datetime_filter, safe='')}"
+            first_page += f"&datetime={quote(datetime_filter, safe='')}"
+        url: str | None = first_page
         session = self._session()
         started = time.monotonic()
         while url:

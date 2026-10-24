@@ -86,7 +86,7 @@ def unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher)
     lat = lon = None
     path = constants_file(dataset, workspace, fetcher=fetcher)
     if path is not None:
-        for ds in cfgrib.open_datasets(path, backend_kwargs={"indexpath": ""}):
+        for ds in cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""}):
             if "tlat" in ds.variables:
                 lat = ds["tlat"].values
             if "tlon" in ds.variables:
