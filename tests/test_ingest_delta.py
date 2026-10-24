@@ -141,6 +141,36 @@ def test_scan_and_collect_normalizes_forecast_csv(tmp_path):
     assert df["reference_timestamp"].dtype == pl.Datetime
 
 
+def _forecast_run_files(tmp_path):
+    tre = tmp_path / "vnut12.lssw.202605210000.tre200h0.csv"
+    tre.write_text("point_id;point_type_id;Date;tre200h0\n1;1;202605210000;10.5\n1;2;202605210000;3.5\n")
+    rre = tmp_path / "vnut12.lssw.202605210000.rre150h0.csv"
+    rre.write_text("point_id;point_type_id;Date;rre150h0\n1;1;202605210000;0.2\n1;2;202605210000;1.4\n")
+    return [rre, tre]
+
+
+def test_scan_and_collect_joins_forecast_files_per_point_and_time(tmp_path):
+    """One row per point and time, every parameter a column — not stacked."""
+    df = _scan_and_collect("forecast_local", _forecast_run_files(tmp_path), {})
+
+    assert df.height == 2
+    assert df.filter(pl.col("point_type_id") == 2).select("tre200h0", "rre150h0").row(0) == (3.5, 1.4)
+    assert "reference_timestamp_right" not in df.columns
+    assert df["reference_timestamp"].null_count() == 0
+
+
+def test_scan_and_collect_eager_fallback_also_joins_forecast_files(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise pl.exceptions.ComputeError("streaming collect failed")
+
+    monkeypatch.setattr(pl.LazyFrame, "collect", boom)
+
+    df = _scan_and_collect("forecast_local", _forecast_run_files(tmp_path), {})
+
+    assert df.height == 2
+    assert df.select("tre200h0", "rre150h0").null_count().row(0) == (0, 0)
+
+
 def test_scan_and_collect_normalizes_archive_csv(tmp_path):
     path = tmp_path / "ABE_2035_RCP85_DRY.csv"
     path.write_text("time.yy,time.mm,time.dd,time.hh,tre200h0\n2035,1,1,0,0.3\n")

@@ -19,6 +19,7 @@ import polars as pl
 from foehn.atomicwrite import staged
 from foehn.meteocsv import (
     column_from_dtype_error,
+    combine_frames,
     derive_timestamp,
     group_csv_files,
     indoor_station,
@@ -135,7 +136,7 @@ def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[
         while True:
             try:
                 lazy_frames = [scan_standard_csv(f, schema_overrides=overrides) for f in group.sources]
-                combined = pl.concat(lazy_frames, how="diagonal_relaxed")
+                combined = combine_frames(lazy_frames, collection_key)
                 combined = derive_timestamp(combined, collection_key)
                 _write_parquet_atomic(combined, group.out_path)
                 break
@@ -165,6 +166,8 @@ def convert_to_parquet(dataset: str, workspace: Workspace) -> int:
     Per-station CSVs are grouped by frequency and time slice, then
     concatenated into a single Parquet file per group.  For example,
     all ``ogd-smn_*_d_recent.csv`` files become ``smn_d_recent.parquet``.
+    forecast_local's per-parameter files are joined instead: its newest run
+    becomes one row per point and time, every parameter a column.
 
     Args:
         dataset: Key from COLLECTIONS (e.g. "smn").

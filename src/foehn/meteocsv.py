@@ -22,12 +22,21 @@ import codecs
 import io
 import logging
 import re
+from collections.abc import Sequence
+from functools import reduce
 from pathlib import Path
 from typing import TypedDict, TypeVar
 
 import polars as pl
 
-from foehn.collections import COLLECTIONS, DERIVED_TIMESTAMP_KINDS, NO_GRANULARITY_KINDS, DatasetKind, kind
+from foehn.collections import (
+    COLLECTIONS,
+    DERIVED_TIMESTAMP_KINDS,
+    NO_GRANULARITY_KINDS,
+    DatasetKind,
+    forecast_run_from_filename,
+    kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +342,40 @@ def derive_timestamp(frame: _Frame, dataset: str) -> _Frame:
     return add_forecast_local_timestamp(frame)
 
 
+# What one forecast_local row is about. A point is the (point_id, point_type_id)
+# pair — IDs are reused across point types — and each file of a run holds one
+# parameter for every point and time, so these are what the files join on.
+FORECAST_JOIN_KEYS = ("point_id", "point_type_id", "Date")
+
+
+def join_forecast_frames(frames: Sequence[_Frame]) -> _Frame:
+    """Join one Forecast run's per-parameter files: a row per point and time.
+
+    Stacked, every row held a single parameter and ~23 rows described each
+    point-hour. A full join keeps a point-time that one file lacks, and stays
+    lazy for LazyFrames — the explicit form of ``pl.concat(how="align")``, which
+    picks its keys from whatever columns the frames happen to share. A
+    ``reference_timestamp`` the per-file scan derived is dropped and derived
+    once on the result, so it is neither a join key nor duplicated.
+    """
+    keys = list(FORECAST_JOIN_KEYS)
+    stripped = [frame.drop("reference_timestamp", strict=False) for frame in frames]
+    joined = reduce(lambda left, right: left.join(right, on=keys, how="full", coalesce=True), stripped)
+    return add_forecast_local_timestamp(joined.sort(keys))
+
+
+def combine_frames(frames: Sequence[_Frame], dataset: str) -> _Frame:
+    """Combine one group's per-file frames into the group's table.
+
+    Shared by the Parquet converter and the Delta ingestion script, which must
+    agree on the shape: a forecast run's files are columns of one table and are
+    joined, every other kind's files are rows and are stacked.
+    """
+    if kind(dataset) is DatasetKind.FORECAST_CSV:
+        return join_forecast_frames(frames)
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
 def source_columns_for(dataset: str) -> set[str]:
     """Extra source columns :func:`derive_timestamp` needs, beyond what was asked for.
 
@@ -365,6 +408,8 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     # climate_scenarios). Returning early also avoids slicing off a prefix these
     # names do not carry, which would chop arbitrary characters off the stem.
     if kind(collection_key) in NO_GRANULARITY_KINDS:
+        if kind(collection_key) is DatasetKind.FORECAST_CSV:
+            csv_files = _newest_forecast_run(csv_files)
         if csv_files:
             groups[()] = csv_files
         return groups
@@ -382,6 +427,21 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
         groups.setdefault(group_key, []).append(csv_path)
 
     return groups
+
+
+def _newest_forecast_run(csv_files: list[Path]) -> list[Path]:
+    """Keep the newest Forecast run's files out of everything Bronze holds.
+
+    The download fetches only the newest run but never prunes the older ones, so
+    Bronze accumulates runs. Their files share points and times, and the group is
+    joined on those — two runs would collide on every parameter column. The
+    newest run is also what ``foehn.load`` returns.
+    """
+    runs = {run for path in csv_files if (run := forecast_run_from_filename(path.name)) is not None}
+    if not runs:
+        return []
+    newest = max(runs)
+    return [path for path in csv_files if forecast_run_from_filename(path.name) == newest]
 
 
 _INDOOR_TIME_COLS = ["time.yy", "time.mm", "time.dd", "time.hh"]
