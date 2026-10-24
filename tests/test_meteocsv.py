@@ -110,6 +110,22 @@ def test_group_csv_files_no_granularity_collection_is_one_group(tmp_path):
     assert len(groups[()]) == 2
 
 
+def test_group_csv_files_keeps_only_the_newest_forecast_run(tmp_path):
+    """Bronze accumulates runs; the group is joined, so only one run may be in it."""
+    d = tmp_path / "forecast_local"
+    d.mkdir()
+    names = (
+        "vnut12.lssw.202607210000.tre200h0.csv",
+        "vnut12.lssw.202607210600.dkl010h0.csv",
+        "vnut12.lssw.202607210600.tre200h0.csv",
+    )
+    for name in names:
+        (d / name).write_text("a;b\n1;2\n")
+
+    groups = group_csv_files(d, "forecast_local")
+    assert [path.name for path in groups[()]] == list(names[1:])
+
+
 # --- load_metadata_types ---
 
 

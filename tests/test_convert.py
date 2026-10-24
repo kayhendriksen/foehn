@@ -426,3 +426,104 @@ def test_a_column_that_stays_broken_after_widening_is_counted_not_retried_foreve
     monkeypatch.setattr(pl.LazyFrame, "sink_parquet", boom)
 
     assert convert_to_parquet("smn", workspace) == 1
+
+
+# --- forecast_local: one row per point and time ---
+
+# Point 1 exists as two point types (IDs are reused across them), so the join has
+# to key on the pair. Each file is one parameter of the run for every point.
+_FORECAST_TRE = (
+    "point_id;point_type_id;Date;tre200h0\n1;1;202605210000;10.5\n1;1;202605210100;11.0\n1;2;202605210000;3.5\n"
+)
+_FORECAST_RRE = (
+    "point_id;point_type_id;Date;rre150h0\n1;1;202605210000;0.0\n1;1;202605210100;0.2\n1;2;202605210000;1.4\n"
+)
+
+
+def _forecast_bronze(tmp_path, files: dict[str, str]) -> Workspace:
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("forecast_local")
+    bronze.mkdir(parents=True)
+    for name, content in files.items():
+        (bronze / name).write_text(content)
+    return workspace
+
+
+def _read_forecast_parquet(workspace: Workspace) -> pl.DataFrame:
+    return pl.read_parquet(workspace.parquet("forecast_local") / "forecast_local.parquet")
+
+
+def test_forecast_files_are_joined_into_one_row_per_point_and_time(tmp_path):
+    workspace = _forecast_bronze(
+        tmp_path,
+        {
+            "vnut12.lssw.202605210000.tre200h0.csv": _FORECAST_TRE,
+            "vnut12.lssw.202605210000.rre150h0.csv": _FORECAST_RRE,
+        },
+    )
+
+    assert convert_to_parquet("forecast_local", workspace) == 0
+
+    df = _read_forecast_parquet(workspace)
+    assert df.height == 3
+    assert {"tre200h0", "rre150h0", "reference_timestamp"} <= set(df.columns)
+    assert df.select("tre200h0", "rre150h0").null_count().row(0) == (0, 0)
+    other_type = df.filter(pl.col("point_id") == 1, pl.col("point_type_id") == 2)
+    assert other_type.select("tre200h0", "rre150h0").row(0) == (3.5, 1.4)
+    assert df["reference_timestamp"].dtype == pl.Datetime
+
+
+def test_a_point_time_missing_from_one_forecast_file_is_kept(tmp_path):
+    """A full join: a row one parameter file lacks keeps the other parameters."""
+    workspace = _forecast_bronze(
+        tmp_path,
+        {
+            "vnut12.lssw.202605210000.tre200h0.csv": _FORECAST_TRE,
+            "vnut12.lssw.202605210000.rre150h0.csv": "point_id;point_type_id;Date;rre150h0\n1;1;202605210000;0.0\n",
+        },
+    )
+
+    assert convert_to_parquet("forecast_local", workspace) == 0
+
+    df = _read_forecast_parquet(workspace)
+    assert df.height == 3
+    assert df["tre200h0"].null_count() == 0
+    assert df["rre150h0"].null_count() == 2
+
+
+def test_only_the_newest_forecast_run_in_bronze_is_converted(tmp_path):
+    """Bronze keeps older runs; their files would collide with the newest's columns."""
+    stale = _FORECAST_TRE.replace("10.5", "-99").replace("11.0", "-99").replace("3.5", "-99")
+    workspace = _forecast_bronze(
+        tmp_path,
+        {
+            "vnut12.lssw.202605200000.tre200h0.csv": stale,
+            "vnut12.lssw.202605210000.tre200h0.csv": _FORECAST_TRE,
+            "vnut12.lssw.202605210000.rre150h0.csv": _FORECAST_RRE,
+        },
+    )
+
+    assert convert_to_parquet("forecast_local", workspace) == 0
+
+    df = _read_forecast_parquet(workspace)
+    assert df.height == 3
+    assert -99 not in df["tre200h0"].to_list()
+
+
+def test_a_forecast_parameter_that_drifts_to_float_is_widened(tmp_path):
+    """The dtype-drift retry still finds the column through the join."""
+    ints = "".join(f"{i};1;202605210000;{i}\n" for i in range(1, 10_002))
+    drifted = f"point_id;point_type_id;Date;rre150h0\n{ints}10002;1;202605210000;0.5\n"
+    workspace = _forecast_bronze(
+        tmp_path,
+        {
+            "vnut12.lssw.202605210000.rre150h0.csv": drifted,
+            "vnut12.lssw.202605210000.tre200h0.csv": "point_id;point_type_id;Date;tre200h0\n1;1;202605210000;10.5\n",
+        },
+    )
+
+    assert convert_to_parquet("forecast_local", workspace) == 0
+
+    df = _read_forecast_parquet(workspace)
+    assert df["rre150h0"].dtype == pl.Float64
+    assert df.height == 10_002

@@ -33,6 +33,7 @@ import polars as pl
 from foehn import registry
 from foehn.collections import DatasetKind, kind
 from foehn.meteocsv import (
+    combine_frames,
     group_csv_files,
     load_metadata_types,
     read_dataset_csv,
@@ -73,18 +74,21 @@ def _table_suffix(group_key: tuple[str, ...]) -> str:
 def _scan_and_collect(dataset: str, files: list[Path], metadata_types: dict[str, type[pl.DataType]]) -> pl.DataFrame:
     """Normalize a Dataset's CSV files and collect with the streaming engine.
 
+    Files are combined the way the Parquet converter combines them: stacked, or
+    for forecast_local joined into one row per point and time.
+
     Falls back to eager parse_csv_bytes (with retry logic) if streaming
     collect fails — e.g. when a column has mixed types that only the
     fallback's per-column Float64 override can handle.
     """
     lazy_frames = [scan_dataset_csv(path, dataset, metadata_types=metadata_types) for path in files]
 
-    combined = pl.concat(lazy_frames, how="diagonal_relaxed")
+    combined = combine_frames(lazy_frames, dataset)
     try:
         return combined.collect(engine="streaming")
     except (pl.exceptions.ComputeError, pl.exceptions.SchemaError):
         frames = [read_dataset_csv(path, dataset, metadata_types=metadata_types) for path in files]
-        return pl.concat(frames, how="diagonal_relaxed")
+        return combine_frames(frames, dataset)
 
 
 def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mode: str = "overwrite") -> None:
