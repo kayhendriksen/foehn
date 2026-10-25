@@ -60,7 +60,7 @@ def test_download_result_is_still_importable_from_the_old_module():
 
 def test_a_relocated_download_helper_names_its_replacement():
     """An AttributeError on a module that exists is a poor signpost."""
-    import foehn.client as client
+    from foehn import client
 
     with pytest.raises(AttributeError, match=r"foehn\.download\(dataset"):
         _ = client.download_collection

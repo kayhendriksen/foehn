@@ -17,13 +17,14 @@ about datasets.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from string import Template
 from typing import TypeVar
 
 F = TypeVar("F")
 
 
-def renders(**fragments: str):
+def renders(**fragments: str) -> Callable[[F], F]:
     """Fill a docstring's ``$name`` placeholders before anything reads it.
 
     Spelled ``$name`` rather than ``{name}`` so a docstring stays free to contain

@@ -16,6 +16,7 @@ import contextlib
 import logging
 import threading
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -107,7 +108,7 @@ class Fetcher(Protocol):
 
 
 @contextlib.contextmanager
-def _as_fetch_error(url: str):
+def _as_fetch_error(url: str) -> Generator[None]:
     """Re-raise ``requests`` failures as :class:`FetchError`, keeping the cause."""
     try:
         yield
@@ -277,7 +278,7 @@ _default_lock = threading.Lock()
 
 def default_fetcher() -> Fetcher:
     """Return the process-wide fetcher, building it on first use."""
-    global _default_fetcher
+    global _default_fetcher  # noqa: PLW0603 - the process-wide singleton, built lazily under a lock
     if _default_fetcher is None:
         with _default_lock:
             if _default_fetcher is None:

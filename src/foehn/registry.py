@@ -71,9 +71,11 @@ from foehn.workspace import Workspace
 
 
 class DownloadAdapter(Protocol):
-    """Every download adapter takes the same arguments and ignores what its kind
-    does not use, so callers never have to know which ones apply. The alternative
-    — a per-kind call shape — is the ladder we are removing.
+    """The one call shape every download adapter has.
+
+    Every adapter takes the same arguments and ignores what its kind does not
+    use, so callers never have to know which ones apply. The alternative — a
+    per-kind call shape — is the ladder we are removing.
 
     Spelled as a Protocol rather than ``Callable[..., DownloadResult]``: with
     ``...`` neither the adapters nor the call site were checked at all, so the

@@ -30,6 +30,7 @@ import argparse
 import contextlib
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -76,7 +77,7 @@ class Tally:
     def __add__(self, other: Tally) -> Tally:
         return Tally(self.written + other.written, self.skipped + other.skipped, self.failed + other.failed)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[int]:
         return iter((self.written, self.skipped, self.failed))
 
 
@@ -154,7 +155,7 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
 
     try:
         meta = read_metadata_csv(meta_files[0])
-    except Exception:
+    except Exception:  # noqa: BLE001 - column comments are best effort
         return
 
     required = {"parameter_shortname", "parameter_description_en", "parameter_unit"}
@@ -163,7 +164,7 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
 
     try:
         table_cols = {f.name for f in spark.table(table).schema.fields}
-    except Exception:
+    except Exception:  # noqa: BLE001 - column comments are best effort
         return
 
     for row in meta.select("parameter_shortname", "parameter_description_en", "parameter_unit").iter_rows():
@@ -204,7 +205,7 @@ def _ingest_metadata(
             _write_to_delta(spark, df, table)
             print(f"  OK  {tbl_name:25s} → {table} ({df.height} rows)", flush=True)
             tally.written += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
             _report_failure(tbl_name, e)
             tally.failed += 1
 
@@ -272,7 +273,7 @@ def _ingest_collection(
             tally.written += 1
             _apply_column_comments(spark, table, csv_dir)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
             _report_failure(tbl_name, e)
             tally.failed += 1
 
@@ -372,7 +373,7 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
         # scan_csv doesn't support encoding="latin1", so use eager read_csv.
         frames = [read_normals_txt(txt_path) for txt_path in txt_files]
         _write_to_delta(spark, pl.concat(frames, how="diagonal_relaxed"), table)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
         _report_failure("climate_normals", e)
         return Tally(failed=1)
     print(f"  OK  {'climate_normals':25s} → {table} ({len(txt_files)} files)", flush=True)

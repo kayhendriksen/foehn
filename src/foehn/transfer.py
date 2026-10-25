@@ -129,7 +129,7 @@ def already_current(asset: Asset, filepath: Path) -> bool:
     return remote_dt <= local_dt
 
 
-def stream_to_disk(fetcher: Fetcher, asset: Asset, path: Path, etag: str | None) -> WriteResult:
+def stream_to_disk(fetcher: Fetcher, asset: Asset, path: Path, _etag: str | None) -> WriteResult:
     """Stream a binary Asset through Staging, independent of its Fetcher Adapter."""
     with atomicwrite.staged(path, suffix=".transfer") as staged:
         fetcher.stream(asset.href, staged)

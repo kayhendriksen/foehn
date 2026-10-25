@@ -10,7 +10,7 @@ GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 import polars as pl
 from mcp.server.mcpserver import MCPServer
@@ -115,7 +115,7 @@ mcp = MCPServer(
 # ── Structured output models ───────────────────────────────────────────────
 
 
-def _metadata_field(table: str, name: str):
+def _metadata_field(table: str, name: str) -> Any:  # noqa: ANN401 - pydantic's Field() is typed Any so it can default any field
     """Build one MCP field from the authoritative published metadata schema."""
     return Field(description=TABLES[table].field(name).description)
 

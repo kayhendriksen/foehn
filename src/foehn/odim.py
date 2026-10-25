@@ -15,15 +15,21 @@ from __future__ import annotations
 
 import contextlib
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import h5py
+    import xarray as xr
 
 
-def _attr(group, key, default=None):
+def _attr(group: h5py.Group | h5py.Dataset, key: str, default: object = None) -> Any:  # noqa: ANN401 - an HDF5 attribute is whatever the file stores
     """Read an HDF5 attribute, decoding bytes to str."""
     val = group.attrs.get(key, default)
     return val.decode() if isinstance(val, bytes) else val
 
 
-def open_composite(xr, path: Path, *, data: bytes | None = None):
+def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> xr.Dataset:
     """Read a MeteoSwiss ODIM-H5 Cartesian radar composite into an xarray Dataset.
 
     The OGD radar products (CombiPrecip precipitation, hail) are ODIM ``COMP``

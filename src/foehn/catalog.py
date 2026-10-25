@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from typing import NoReturn
 
 
 class DatasetKind(StrEnum):
@@ -276,7 +277,7 @@ class _ReadOnlyList(list):
 
     __slots__ = ()
 
-    def _read_only(self, *_args: object, **_kwargs: object):
+    def _read_only(self, *_args: object, **_kwargs: object) -> NoReturn:
         raise TypeError("catalog values are read-only; change catalog.DATASETS instead.")
 
     __setitem__ = _read_only
@@ -303,7 +304,7 @@ class _ReadOnlyList(list):
 
         return [_copy.deepcopy(item, memo) for item in self]
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[type[list], tuple[list]]:
         return (list, (list(self),))
 
 
@@ -322,7 +323,7 @@ class _ReadOnlyDict(dict):
 
     __slots__ = ()
 
-    def _read_only(self, *_args: object, **_kwargs: object):
+    def _read_only(self, *_args: object, **_kwargs: object) -> NoReturn:
         raise TypeError(
             f"{type(self).__name__} is a read-only view derived from catalog.DATASETS; "
             "add or change a dataset there instead."
@@ -347,7 +348,7 @@ class _ReadOnlyDict(dict):
 
         return {key: _copy.deepcopy(value, memo) for key, value in self.items()}
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[type[dict], tuple[dict]]:
         return (dict, (dict(self),))
 
 

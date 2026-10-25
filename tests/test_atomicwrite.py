@@ -91,7 +91,7 @@ def test_a_failed_write_leaves_neither_the_target_nor_the_staged_file(tmp_path):
     """The whole point: a truncated file with a fresh mtime reads as "already done"."""
     target = tmp_path / "asset.csv"
 
-    with patch.object(Path, "replace", side_effect=OSError("disk full")), pytest.raises(OSError):
+    with patch.object(Path, "replace", side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
         write_bytes(target, b"payload")
 
     assert not target.exists()
@@ -103,7 +103,7 @@ def test_a_failed_write_does_not_disturb_the_file_already_there(tmp_path):
     target = tmp_path / "asset.csv"
     target.write_bytes(b"the good copy")
 
-    with patch.object(Path, "replace", side_effect=OSError("disk full")), pytest.raises(OSError):
+    with patch.object(Path, "replace", side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
         write_bytes(target, b"the truncated one")
 
     assert target.read_bytes() == b"the good copy"
@@ -114,9 +114,13 @@ def test_an_interrupt_mid_write_is_cleaned_up_like_any_other_failure(tmp_path):
     """BaseException, not Exception — Ctrl-C leaves a partial file exactly as disk-full does."""
     target = tmp_path / "asset.csv"
 
-    with pytest.raises(KeyboardInterrupt), staged(target) as tmp:
-        tmp.write_bytes(b"half a fi")
-        raise KeyboardInterrupt
+    def interrupted() -> None:
+        with staged(target) as tmp:
+            tmp.write_bytes(b"half a fi")
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupted()
 
     assert list(tmp_path.iterdir()) == []
 
@@ -182,9 +186,13 @@ def test_staged_directory_failure_preserves_the_previous_version(tmp_path):
     target.mkdir()
     (target / "complete").write_text("old")
 
-    with pytest.raises(OSError, match="disk full"), staged_directory(target) as staged_dir:
-        (staged_dir / "partial").write_text("new")
-        raise OSError("disk full")
+    def fails_mid_write() -> None:
+        with staged_directory(target) as staged_dir:
+            (staged_dir / "partial").write_text("new")
+            raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        fails_mid_write()
 
     assert (target / "complete").read_text() == "old"
     assert not (target / "partial").exists()

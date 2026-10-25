@@ -24,7 +24,7 @@ from scripts.ingest_delta import (
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture()
+@pytest.fixture
 def smn_bronze_dir(tmp_path):
     """Bronze dir with SMN CSVs and metadata in a 'smn' sub-folder."""
     smn_dir = tmp_path / "smn"
@@ -35,7 +35,7 @@ def smn_bronze_dir(tmp_path):
     return tmp_path
 
 
-@pytest.fixture()
+@pytest.fixture
 def climate_normals_bronze_dir(tmp_path):
     """Bronze dir with climate normals TXT files."""
     cn_dir = tmp_path / "climate_normals"
@@ -44,7 +44,7 @@ def climate_normals_bronze_dir(tmp_path):
     return tmp_path
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_spark():
     """A mock SparkSession that tracks calls."""
     spark = MagicMock()
@@ -115,7 +115,7 @@ def test_scan_and_collect_single_file(smn_bronze_dir):
     from foehn.convert import load_metadata_types
 
     csv_dir = smn_bronze_dir / "smn"
-    files = [sorted(csv_dir.glob("ogd-smn_*_d_recent.csv"))[0]]
+    files = [min(csv_dir.glob("ogd-smn_*_d_recent.csv"))]
     metadata_types = load_metadata_types(csv_dir)
 
     df = _scan_and_collect("smn", files, metadata_types)

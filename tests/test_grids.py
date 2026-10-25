@@ -197,8 +197,10 @@ def test_to_zarr_grib2_hypercube(fetcher, tmp_path):
 
     store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
     cube = xr.open_zarr(store)
-    assert "time" in cube.dims and "step" in cube.dims
-    assert cube.sizes["time"] == 2 and cube.sizes["step"] == 2
+    assert "time" in cube.dims
+    assert "step" in cube.dims
+    assert cube.sizes["time"] == 2
+    assert cube.sizes["step"] == 2
     assert cube["t2m"].dims[-2:] == ("latitude", "longitude")  # spatial dims preserved
 
 
@@ -486,7 +488,8 @@ def test_to_zarr_match_yields_distinct_stores(fetcher, tmp_path):
     assert s1.name == "surface_derived_grid__rhiresd.zarr"
     assert s2.name == "surface_derived_grid__tabsd.zarr"
     assert s1 != s2
-    assert s1.exists() and s2.exists()
+    assert s1.exists()
+    assert s2.exists()
     assert "rain" in xr.open_zarr(s1).data_vars
     assert "temp" in xr.open_zarr(s2).data_vars
 
@@ -574,7 +577,8 @@ def test_a_written_store_carries_no_noncf_time_units(tmp_path):
     write_zarr(ds, store)
 
     written = xr.open_zarr(store)
-    assert "units" not in written["time"].attrs and "calendar" not in written["time"].attrs
+    assert "units" not in written["time"].attrs
+    assert "calendar" not in written["time"].attrs
     assert written["time"].attrs["units_noncf"] == "years since 1991-01-01"
     assert written["time"].attrs["calendar_noncf"] == "standard"
 
@@ -843,7 +847,7 @@ def test_an_unreadable_netcdf_file_is_reported_as_itself(tmp_path):
     xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(good, engine="h5netcdf")
     corrupt.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\x00" * 512)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(OSError, match=corrupt.name) as caught:
         open_netcdf([good, corrupt], dataset="surface_derived_grid")
 
     assert "mixes parameters" not in str(caught.value)
@@ -1149,7 +1153,7 @@ def test_revising_non_contiguous_timesteps_is_refused(tmp_path):
 
     store, _files = _radar_cube(tmp_path, times=("000000", "000500", "001000"))
     positions = _cube_time_index(xr, store)
-    first, last = sorted(positions)[0], sorted(positions)[2]
+    first, last = min(positions), sorted(positions)[2]
     ds = xr.open_zarr(store).isel(time=[0])
 
     with pytest.raises(ValueError, match="not contiguous"):

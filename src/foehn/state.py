@@ -117,8 +117,8 @@ def parse_instant(value: str) -> datetime | None:
     ``2026-10-25T11:00:00+01:00``, and a string comparison says otherwise.
     """
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
         return None
     return parsed if parsed.tzinfo is not None else None
 

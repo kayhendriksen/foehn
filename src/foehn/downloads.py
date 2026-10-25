@@ -14,7 +14,9 @@ which are :mod:`foehn.state` and :mod:`foehn.archives` now.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 
 from foehn import coherence
@@ -48,7 +50,7 @@ def _banner(title: str, out_dir: Path) -> None:
     logger.info("%s", "=" * 60)
 
 
-def _since_instant(since: str | None):
+def _since_instant(since: str | None) -> datetime | None:
     """Parse *since* up front, so a malformed one fails before any listing."""
     if not since:
         return None
@@ -104,7 +106,7 @@ def stac_download(
     latest_run: bool = False,
     with_metadata: bool = False,
     coherent: bool = False,
-):
+) -> Callable[..., DownloadResult]:
     """Build the download adapter for a kind whose assets come from a STAC listing.
 
     ``download_collection``, ``download_grib2`` and ``download_netcdf`` were the

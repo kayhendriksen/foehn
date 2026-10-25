@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
+from types import MappingProxyType, UnionType
 from typing import Any
 
 import polars as pl
@@ -41,7 +41,7 @@ class MetadataField:
     nullable: bool = False
 
     @property
-    def annotation(self) -> Any:
+    def annotation(self) -> type | UnionType:
         return self.python_type | None if self.nullable else self.python_type
 
 
@@ -101,7 +101,7 @@ _POLARS_TYPES: Mapping[Any, type[pl.DataType]] = MappingProxyType({str: pl.Strin
 def _field(
     source: str,
     published: str,
-    python_type: Any,
+    python_type: type | UnionType,
     description: str,
     *,
     nullable: bool = False,

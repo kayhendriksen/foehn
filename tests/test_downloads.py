@@ -227,7 +227,8 @@ def test_csv_download_since_filter(tmp_path):
 
     result = registry.download("smn", workspace, since="2026-01-01T00:00:00Z", fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
     assert result.downloaded == 0
     assert result.filenames == []
 
@@ -332,7 +333,8 @@ def test_download_metadata_skips_non_csv_assets(tmp_path):
 
     download_metadata("smn", Workspace(tmp_path), fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
 
 
 # --- download_climate_normals_zip ---
@@ -355,7 +357,8 @@ def test_normals_zip_skips_a_completed_materialization(tmp_path):
     second = _fake(body=make_zip({"sample.txt": b"changed"}))
     download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=second)
 
-    assert second.gets == [] and second.streams == []
+    assert second.gets == []
+    assert second.streams == []
 
 
 def test_normals_zip_redownloads_if_not_extracted(tmp_path):
@@ -465,7 +468,8 @@ def test_static_download_skips_existing_file(tmp_path):
 
     result = registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
     assert result.downloaded == 0
     assert result.skipped == 1
 
@@ -488,7 +492,8 @@ def test_static_download_since_filter(tmp_path):
 
     result = registry.download("surface_derived_grid", workspace, since="2026-01-01T00:00:00Z", fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
     assert result.downloaded == 0
     assert result.filenames == []
 
@@ -519,7 +524,8 @@ def test_indoor_zip_skips_when_the_materialization_is_current(tmp_path):
     second = _fake(items=[item])
     result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=second)
 
-    assert second.streams == [] and len(second.listings) == 1
+    assert second.streams == []
+    assert len(second.listings) == 1
     assert (result.total_assets, result.downloaded, result.skipped) == (1, 0, 1)
 
 

@@ -14,6 +14,7 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 _reentrant = threading.local()
 
@@ -80,7 +81,7 @@ def exclusive_lock(path: Path) -> Generator[None]:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def take_hold(path: Path):
+def take_hold(path: Path) -> IO[bytes]:
     """Lock *path* and keep it locked until the handle returned is closed.
 
     A lock whose lifetime is a scope cannot say "this is still in use" to a
