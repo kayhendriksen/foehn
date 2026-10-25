@@ -52,8 +52,10 @@ def test_time_slice_from_filename_returns_none_when_absent():
 
 def test_collections_keys_are_strings():
     for key, collection_id in COLLECTIONS.items():
-        assert isinstance(key, str) and key
-        assert isinstance(collection_id, str) and collection_id.startswith("ch.")
+        assert isinstance(key, str)
+        assert key
+        assert isinstance(collection_id, str)
+        assert collection_id.startswith("ch.")
 
 
 def test_every_collection_has_exactly_one_kind():
@@ -254,7 +256,7 @@ def test_compatibility_views_refuse_every_route_to_mutation():
         lambda: row["time_slices"].append("changed"),
         lambda: row["time_slices"].__setitem__(0, "changed"),
         lambda: row["time_slices"].__iadd__(["changed"]),
-        lambda: row["frequencies"].clear(),
+        row["frequencies"].clear,
     ):
         with pytest.raises(TypeError):
             mutate()

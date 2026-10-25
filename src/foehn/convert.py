@@ -103,7 +103,7 @@ def run_conversions(groups: Iterable[ConversionGroup], convert_one: ConvertOne, 
         group.out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             failed += convert_one(group)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one group's failure is counted, not allowed to stop the rest
             failed += 1
             logger.warning("  %s (%d files)... FAIL: %s", group.out_path.name, len(group.sources), e)
             continue
@@ -236,7 +236,7 @@ def convert_preamble_to_parquet(dataset: str, workspace: Workspace) -> int:
         for f in group.sources:
             try:
                 frames.append(scan_climate_scenarios_csv(f))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - every unreadable source is counted and named
                 # Every unreadable file is reported, not just the first, so one
                 # run names all of them.
                 failed += 1

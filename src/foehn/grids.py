@@ -60,7 +60,8 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Protocol
+from types import ModuleType
+from typing import IO, TYPE_CHECKING, Literal, Protocol, cast
 
 from foehn import atomicwrite, coherence, icon, odim
 from foehn._locking import is_held, take_hold
@@ -77,7 +78,7 @@ if TYPE_CHECKING:
 # --- Optional dependencies -------------------------------------------------
 
 
-def _require_xarray():
+def _require_xarray() -> ModuleType:
     """Import xarray, or raise a helpful error pointing at the optional extra."""
     try:
         import xarray as xr
@@ -553,7 +554,7 @@ _CF_TIME_UNITS = frozenset(
 )
 
 
-def _sanitize_noncf_time_units(ds):
+def _sanitize_noncf_time_units(ds: xr.Dataset) -> xr.Dataset:
     """Rename non-CF temporal unit attrs so the dataset can be re-decoded later.
 
     A store written with a ``years since ...`` units attribute throws on every
@@ -574,7 +575,12 @@ def _sanitize_noncf_time_units(ds):
 
 
 def _write_zarr(
-    ds, store: Path, mode: str = "w", *, rechunk: dict[str, int] | None = None, append_dim: str | None = None
+    ds: xr.Dataset,
+    store: Path,
+    mode: str = "w",
+    *,
+    rechunk: dict[str, int] | None = None,
+    append_dim: str | None = None,
 ) -> None:
     """Write inside a staged replacement or directly into an append target.
 
@@ -599,14 +605,21 @@ def _write_zarr(
             "ignore",
             message="Consolidated metadata is currently not part in the Zarr format 3 specification",
         )
+        # xarray validates the mode itself; the str is passed through as given.
+        zarr_mode = cast("ZarrMode", mode)
         if append_dim is not None:
-            ds.to_zarr(store, mode=mode, append_dim=append_dim)
+            ds.to_zarr(store, mode=zarr_mode, append_dim=append_dim)
         else:
-            ds.to_zarr(store, mode=mode)
+            ds.to_zarr(store, mode=zarr_mode)
 
 
 def write_zarr(
-    ds, store: Path, mode: str = "w", *, rechunk: dict[str, int] | None = None, append_dim: str | None = None
+    ds: xr.Dataset,
+    store: Path,
+    mode: str = "w",
+    *,
+    rechunk: dict[str, int] | None = None,
+    append_dim: str | None = None,
 ) -> None:
     """Stage replacement stores; append to existing stores without copying them."""
     if mode == "w":
@@ -616,7 +629,7 @@ def write_zarr(
         _write_zarr(ds, store, mode, rechunk=rechunk, append_dim=append_dim)
 
 
-def select_variables(ds, variables: str | list[str] | None):
+def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Dataset:
     """Restrict a Dataset to the requested data variable(s), or return it whole.
 
     Uniform across kinds, so the registry applies it once to whatever an open
@@ -630,7 +643,7 @@ def select_variables(ds, variables: str | list[str] | None):
 # --- xarray-backed opens ---------------------------------------------------
 
 
-def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict | None = None) -> xr.Dataset:
+def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kwargs: dict | None = None) -> xr.Dataset:
     """Open one or many grid files (NetCDF or GRIB2) into a single Dataset.
 
     Multiple files are opened individually and merged with ``combine_by_coords``
@@ -649,7 +662,7 @@ def _open_grid(xr, files: list[Path], engine: str | None, backend_kwargs: dict |
     label their time axis "years since 1991-01-01", which is not CF-compliant.
     """
 
-    def _do(decode_times: bool):
+    def _do(*, decode_times: bool) -> xr.Dataset:
         kwargs: dict = {"engine": engine, "decode_times": decode_times}
         if backend_kwargs:
             kwargs["backend_kwargs"] = backend_kwargs
@@ -764,7 +777,7 @@ def open_radar(files: list[Path], **_: object) -> xr.Dataset:
 _STACK_TIME_ENCODING = {"units": "seconds since 1970-01-01", "calendar": "proleptic_gregorian", "dtype": "int64"}
 
 
-def _time_keys(ds) -> frozenset:
+def _time_keys(ds: xr.Dataset) -> frozenset:
     """The timestamps *ds* carries, as integer nanoseconds.
 
     Normalised to one unit because the two sides of the comparison do not share
@@ -780,6 +793,7 @@ def _time_keys(ds) -> frozenset:
 # it: an unrecognised value used to fall through to the extending path, where it
 # could skip a file as already stored or take the in-place region update.
 _ZARR_MODES = ("w", "w-", "a", "a-", "r+")
+ZarrMode = Literal["w", "w-", "a", "a-", "r+"]
 
 
 def _source_fingerprint(path: Path) -> str:
@@ -793,7 +807,7 @@ def _source_fingerprint(path: Path) -> str:
     return hashlib.blake2b(path.read_bytes(), digest_size=16).hexdigest()
 
 
-def _cube_times(xr, store: Path) -> frozenset:
+def _cube_times(xr: ModuleType, store: Path) -> frozenset:
     """The timestamps an existing cube already holds, or nothing if it has none.
 
     A store that cannot be opened is treated as holding nothing: the append then
@@ -812,12 +826,42 @@ def _cube_times(xr, store: Path) -> frozenset:
                 if "time" not in existing.coords:
                     return frozenset()
                 return _time_keys(existing)
-    except Exception as exc:  # any unreadable store means "unknown", not "fail"
+    except Exception as exc:  # noqa: BLE001 - an unreadable store means "unknown", not "fail"
         logger.debug("Could not read existing times from %s (%s); appending without de-duplication", store, exc)
         return frozenset()
 
 
-def _cube_time_index(xr, store: Path) -> dict[int, int]:
+def _refuse_a_duplicated_axis(xr: ModuleType, store: Path) -> None:
+    """Refuse to extend a cube whose time axis already repeats a timestamp.
+
+    Stores written before revisions were resolved per observation can hold the
+    same instant twice — once per CombiPrecip quality code — and extending one
+    cannot tell which copy is the correction. It is rebuilt, not guessed at.
+    """
+    if not store.exists():
+        return
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*consolidated metadata.*", category=RuntimeWarning)
+            with xr.open_zarr(store) as existing:
+                if "time" not in existing.coords:
+                    return
+                stamps = existing["time"].values.ravel().astype("datetime64[ns]")
+    except Exception as exc:  # noqa: BLE001 - unreadable: the append path reports it, as before
+        logger.debug("Could not check the time axis of %s (%s)", store, exc)
+        return
+    unique = len(set(stamps.astype("int64").tolist()))
+    if unique == len(stamps):
+        return
+    raise ValueError(
+        f"{store.name} repeats {len(stamps) - unique} timestamp(s) on its time axis, left by a foehn "
+        "version that appended two revisions of one radar observation. Extending it would keep "
+        'whichever copy came first. Rebuild it with mode="w" (the default), e.g. '
+        'foehn.to_zarr(dataset, match=..., stack=True, mode="w").'
+    )
+
+
+def _cube_time_index(xr: ModuleType, store: Path) -> dict[int, int]:
     """Map each stored timestamp to its position on the cube's time axis."""
     if not store.exists():
         return {}
@@ -829,7 +873,7 @@ def _cube_time_index(xr, store: Path) -> dict[int, int]:
                     return {}
                 stamps = existing["time"].values.ravel().astype("datetime64[ns]").astype("int64").tolist()
         return {stamp: position for position, stamp in enumerate(stamps)}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an unindexable axis is reported by the write that needs it
         logger.debug("Could not index the time axis of %s (%s)", store, exc)
         return {}
 
@@ -848,7 +892,7 @@ def _stored_sources(store: Path) -> dict[str, str]:
 
         recorded = zarr.open_group(str(store), mode="r").attrs.get("foehn_sources")
         return {str(key): str(value) for key, value in recorded.items()} if isinstance(recorded, dict) else {}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fingerprints only save work; without them a timestep is rewritten
         logger.debug("Could not read source fingerprints from %s (%s)", store, exc)
         return {}
 
@@ -863,11 +907,11 @@ def _record_sources(store: Path, recorded: dict[str, str]) -> None:
         merged = {str(key): str(value) for key, value in existing.items()} if isinstance(existing, dict) else {}
         merged.update(recorded)
         group.attrs["foehn_sources"] = merged
-    except Exception as exc:  # pragma: no cover - never worth failing a good write over
+    except Exception as exc:  # noqa: BLE001 - never worth failing a good write over  # pragma: no cover
         logger.debug("Could not record source fingerprints in %s (%s)", store, exc)
 
 
-def _open_composite_snapshot(xr, path: Path):
+def _open_composite_snapshot(xr: ModuleType, path: Path) -> tuple[xr.Dataset, str]:
     """Decode a composite and the fingerprint of the exact bytes decoded.
 
     Read once, then hashed and decoded from that one copy. Hashing the path on
@@ -955,6 +999,8 @@ def cube_radar(
     # "w-" (create, never clobber) and "r+" (modify, never truncate) into a
     # silent overwrite of the store they were chosen to protect.
     extending = mode not in {"w", "w-"}
+    if extending:
+        _refuse_a_duplicated_axis(xr, store)
     stored_times = _cube_times(xr, store) if extending else frozenset()
     stored_sources = _stored_sources(store) if extending else {}
 
@@ -1003,7 +1049,7 @@ def cube_radar(
         _record_sources(store, {**stored_sources, **recorded})
 
 
-def _revise_in_place(xr, ds, store: Path, keys: frozenset) -> None:
+def _revise_in_place(xr: ModuleType, ds: xr.Dataset, store: Path, keys: frozenset) -> None:
     """Overwrite the timesteps *ds* covers, leaving the rest of the cube alone.
 
     A region write rather than an append: the timestamps already exist, so

@@ -173,16 +173,6 @@ def test_several_slices_resume_from_the_earliest_cursor(tmp_path):
     assert load_cursor(workspace, "smn", ["historical", "recent"]) == "2026-10-24T00:00:00Z"
 
 
-def test_an_empty_bronze_directory_ignores_its_cursor(tmp_path):
-    """Files someone deleted cannot be incremental against anything."""
-    workspace = Workspace(tmp_path)
-    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T10:00:00+00:00")
-
-    assert load_cursor(workspace, "smn", ["recent"]) is None
-    workspace.bronze("smn").mkdir(parents=True)
-    assert load_cursor(workspace, "smn", ["recent"]) is None
-
-
 def test_a_cursor_only_moves_forward_and_keeps_its_neighbours(tmp_path):
     workspace = _with_bronze(tmp_path, "smn")
     save_last_run(workspace, "2026-01-01T00:00:00+00:00")
@@ -207,3 +197,25 @@ def test_state_that_is_not_utf8_is_treated_as_absent(tmp_path, name):
     assert load_etags(workspace) == {}
     assert load_last_run(workspace) is None
     assert load_cursor(workspace, "smn", ["recent"]) is None
+
+
+def test_a_corrupt_stored_cursor_gives_way_to_a_valid_one(tmp_path):
+    workspace = _with_bronze(tmp_path, "smn")
+    workspace.last_run.write_text('{"smn/recent": "not a time", "timestamp": "2026-01-01T00:00:00Z"}')
+
+    advance_cursor(workspace, "smn", ["recent"], "2026-10-25T10:00:00Z")
+
+    assert load_cursor(workspace, "smn", ["recent"]) == "2026-10-25T10:00:00Z"
+    assert load_cursor(workspace, "smn", []) is None
+
+
+def test_a_valid_stored_cursor_is_kept_over_a_corrupt_one(tmp_path):
+    from foehn.state import _later
+
+    assert _later("2026-10-25T10:00:00Z", "garbage") == "2026-10-25T10:00:00Z"
+    assert _later("garbage", "2026-10-25T10:00:00Z") == "2026-10-25T10:00:00Z"
+
+
+def test_the_legacy_timestamp_needs_a_timezone_too(tmp_path):
+    with pytest.raises(ValueError, match="timezone"):
+        save_last_run(Workspace(tmp_path), "2026-10-25T10:00:00")

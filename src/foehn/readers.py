@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -153,7 +154,7 @@ def _lower_set(value: str | list[str] | None) -> frozenset[str] | None:
     return frozenset({value.lower()} if isinstance(value, str) else {v.lower() for v in value})
 
 
-def _as_tuple(value):
+def _as_tuple(value: str | int | Iterable[str] | Iterable[int] | None) -> tuple | None:
     if value is None:
         return None
     if isinstance(value, (str, int)):
@@ -166,7 +167,7 @@ def _parse_date_bound(value: str | None, label: str) -> datetime | None:
     if value is None:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         raise ValueError(f"{label} must be an ISO date or datetime, got {value!r}.") from None
     if parsed.tzinfo is not None:
@@ -290,7 +291,7 @@ def apply_time_filters(df: pl.DataFrame, filters: Filters) -> pl.DataFrame:
     return df
 
 
-def _fetch_frames(fetch_one, targets: list[str], workers: int) -> list[pl.DataFrame]:
+def _fetch_frames(fetch_one: Callable[[str], pl.DataFrame], targets: list[str], workers: int) -> list[pl.DataFrame]:
     """Parse each target concurrently.
 
     The fetcher is safe to share across the pool: it hands each worker thread its

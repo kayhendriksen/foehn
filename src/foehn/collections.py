@@ -1,5 +1,4 @@
-"""
-MeteoSwiss STAC collection IDs, routing sets, and constants.
+"""MeteoSwiss STAC collection IDs, routing sets, and constants.
 
 TIME SLICES
 -----------

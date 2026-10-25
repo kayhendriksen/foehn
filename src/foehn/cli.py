@@ -294,7 +294,7 @@ def _configure_logging() -> None:
     foehn_logger.propagate = False
 
 
-def main():
+def main() -> None:
     _configure_logging()
 
     parser = argparse.ArgumentParser(

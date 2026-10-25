@@ -562,7 +562,8 @@ def test_the_marker_is_on_disk_before_any_file_is_published(tmp_path):
     fake.stream_hook = note_marker
     ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
 
-    assert seen and all(seen), "marker must exist before the first file is published"
+    assert seen, "no file was published"
+    assert all(seen), "marker must exist before the first file is published"
     # A completed refresh takes it away again.
     assert not (out_dir / ".foehn-incoherent.json").exists()
 

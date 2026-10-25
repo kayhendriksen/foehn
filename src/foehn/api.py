@@ -17,7 +17,10 @@ from foehn.collections import (
 )
 from foehn.docstrings import renders
 from foehn.fetch import DEFAULT_WORKERS, default_fetcher
-from foehn.metadata import TABLES as metadata_tables
+
+# Re-exported: the tables and their published column names are ``foehn.metadata``'s,
+# but ``METADATA_TABLES`` is a public name and the CLI builds its ``choices`` from it.
+from foehn.metadata import TABLES as METADATA_TABLES
 from foehn.metadata import fetch_table
 from foehn.readers import Filters
 from foehn.transfer import DownloadResult
@@ -136,11 +139,6 @@ def to_parquet(
         raise RuntimeError(
             f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
         )
-
-
-# Re-exported: the tables and their published column names are ``foehn.metadata``'s,
-# but ``METADATA_TABLES`` is a public name and the CLI builds its ``choices`` from it.
-METADATA_TABLES = metadata_tables
 
 
 def metadata(dataset: str, table: str) -> pl.DataFrame:
@@ -400,7 +398,7 @@ def open_dataset(
     )
 
 
-def _stack_flag(stack: bool | str | None) -> bool:
+def _stack_flag(stack: bool | str | None) -> bool:  # noqa: FBT001 - normalises the caller's value; not a flag
     """Normalise ``stack=`` and reject a value that means nothing.
 
     v0.4.0 typed this ``str | None`` and defaulted to None, so ``stack=None``
