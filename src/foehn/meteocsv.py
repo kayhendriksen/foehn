@@ -25,7 +25,7 @@ import re
 from collections.abc import Sequence
 from functools import reduce
 from pathlib import Path
-from typing import TypedDict, TypeVar
+from typing import TypedDict, TypeVar, cast
 
 import polars as pl
 
@@ -41,6 +41,9 @@ from foehn.collections import (
 logger = logging.getLogger(__name__)
 
 _Frame = TypeVar("_Frame", pl.DataFrame, pl.LazyFrame)
+# The helpers typed with it return the kind of frame they were given. Polars'
+# methods are typed per class, and ty does not solve a constrained TypeVar
+# through them, so those returns carry a ``cast`` saying what is true.
 
 # Polars names the offending column in its dtype errors. Both readers of a
 # MeteoSwiss CSV widen that column to Float64 and retry — the in-memory parse
@@ -130,7 +133,7 @@ def parse_metadata_types(content: bytes | str) -> dict[str, type[pl.DataType]]:
         if isinstance(content, str):
             content = content.encode("utf-8")
         meta = pl.read_csv(io.BytesIO(content), separator=";", infer_schema_length=0)
-    except Exception:
+    except Exception:  # noqa: BLE001 - declared types only refine inference
         return {}
 
     if "parameter_shortname" not in meta.columns or "parameter_datatype" not in meta.columns:
@@ -164,7 +167,7 @@ def load_metadata_types(csv_dir: Path) -> dict[str, type[pl.DataType]]:
     meta_path = meta_files[0]
     try:
         return parse_metadata_types(meta_path.read_bytes())
-    except Exception:
+    except Exception:  # noqa: BLE001 - declared types only refine inference
         return {}
 
 
@@ -202,7 +205,7 @@ def parse_csv_bytes(
             header = pl.read_csv(
                 data[: end + 1] if end != -1 else data, separator=";", n_rows=0, infer_schema_length=0
             ).columns
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - the header only narrows the parse
             logger.debug("Could not read CSV header (%s) — parsing every column, inferring types", exc)
 
     # Intersect in header order. Falling back to "everything" when nothing matches
@@ -257,7 +260,7 @@ def parse_csv_bytes(
         raise last_err from None
 
 
-def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataType]] | None = None):
+def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataType]] | None = None) -> pl.LazyFrame:
     """Lazily scan one standard MeteoSwiss CSV, without reading it.
 
     The lazy half of :func:`parse_csv_bytes`, which is the eager one. The convert
@@ -275,7 +278,7 @@ def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataTyp
         try:
             header = pl.read_csv(path, separator=";", n_rows=0, infer_schema_length=0).columns
             overrides = {column: dtype for column, dtype in overrides.items() if column in header}
-        except Exception:
+        except Exception:  # noqa: BLE001 - the header only narrows the parse
             overrides = None
     return pl.scan_csv(
         path,
@@ -314,7 +317,7 @@ def read_normals_txt(path: Path) -> pl.DataFrame:
     )
 
 
-def add_forecast_local_timestamp(frame):
+def add_forecast_local_timestamp(frame: _Frame) -> _Frame:
     """Add a parsed reference_timestamp from forecast_local's compact Date column.
 
     forecast_local CSVs carry ``point_id;point_type_id;Date;<param>`` where Date
@@ -325,8 +328,11 @@ def add_forecast_local_timestamp(frame):
     cols = frame.collect_schema().names() if isinstance(frame, pl.LazyFrame) else frame.columns
     if "Date" not in cols or "reference_timestamp" in cols:
         return frame
-    return frame.with_columns(
-        pl.col("Date").cast(pl.Utf8).str.to_datetime("%Y%m%d%H%M", strict=False).alias("reference_timestamp")
+    return cast(
+        "_Frame",
+        frame.with_columns(
+            pl.col("Date").cast(pl.Utf8).str.to_datetime("%Y%m%d%H%M", strict=False).alias("reference_timestamp")
+        ),
     )
 
 
@@ -361,7 +367,7 @@ def join_forecast_frames(frames: Sequence[_Frame]) -> _Frame:
     keys = list(FORECAST_JOIN_KEYS)
     stripped = [frame.drop("reference_timestamp", strict=False) for frame in frames]
     joined = reduce(lambda left, right: left.join(right, on=keys, how="full", coalesce=True), stripped)
-    return add_forecast_local_timestamp(joined.sort(keys))
+    return add_forecast_local_timestamp(cast("_Frame", joined.sort(keys)))
 
 
 def combine_frames(frames: Sequence[_Frame], dataset: str) -> _Frame:
@@ -513,22 +519,27 @@ def _indoor_identity(filename: str) -> tuple[str, str, str, str]:
     return parsed
 
 
-def _add_indoor_columns(frame, identity: tuple[str, str, str, str]):
-    """Add reference_timestamp + filename-derived columns and drop the raw time
-    columns. Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv)."""
+def _add_indoor_columns(frame: _Frame, identity: tuple[str, str, str, str]) -> _Frame:
+    """Add reference_timestamp and the filename-derived columns, dropping the raw time columns.
+
+    Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv).
+    """
     station, period, scenario, variant = identity
-    return frame.with_columns(
-        pl.datetime(
-            pl.col("time.yy"),
-            pl.col("time.mm"),
-            pl.col("time.dd"),
-            hour=pl.col("time.hh"),
-        ).alias("reference_timestamp"),
-        pl.lit(station).alias("station_abbr"),
-        pl.lit(period).alias("period"),
-        pl.lit(scenario).alias("scenario"),
-        pl.lit(variant).alias("variant"),
-    ).drop(_INDOOR_TIME_COLS)
+    return cast(
+        "_Frame",
+        frame.with_columns(
+            pl.datetime(
+                pl.col("time.yy"),
+                pl.col("time.mm"),
+                pl.col("time.dd"),
+                hour=pl.col("time.hh"),
+            ).alias("reference_timestamp"),
+            pl.lit(station).alias("station_abbr"),
+            pl.lit(period).alias("period"),
+            pl.lit(scenario).alias("scenario"),
+            pl.lit(variant).alias("variant"),
+        ).drop(_INDOOR_TIME_COLS),
+    )
 
 
 _CS_HEADER_PREFIX = "DATE;"
@@ -550,18 +561,19 @@ def _parse_climate_scenarios_filename(filename: str) -> tuple[str, str, str]:
     return parts[-3], parts[-2], parts[-1]
 
 
-def _add_climate_scenarios_columns(frame, station: str, variable: str, gwl: str):
+def _add_climate_scenarios_columns(frame: _Frame, station: str, variable: str, gwl: str) -> _Frame:
     """Add filename-derived columns and move the key columns to the front.
 
-    Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv)."""
-    frame = frame.rename({"DATE": "date"}).with_columns(
+    Works on both a LazyFrame (scan_csv) and a DataFrame (read_csv).
+    """
+    labelled = frame.rename({"DATE": "date"}).with_columns(
         pl.lit(station).alias("station_abbr"),
         pl.lit(variable).alias("variable"),
         pl.lit(gwl).alias("gwl"),
     )
-    cols = frame.collect_schema().names() if isinstance(frame, pl.LazyFrame) else frame.columns
+    cols = labelled.collect_schema().names() if isinstance(labelled, pl.LazyFrame) else labelled.columns
     front = ["station_abbr", "variable", "gwl", "date"]
-    return frame.select(front + [c for c in cols if c not in front])
+    return cast("_Frame", labelled.select(front + [c for c in cols if c not in front]))
 
 
 def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataFrame:

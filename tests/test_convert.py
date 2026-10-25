@@ -24,7 +24,7 @@ from foehn.workspace import Workspace
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-@pytest.fixture()
+@pytest.fixture
 def smn_workspace(tmp_path):
     """A workspace whose bronze holds SMN CSVs and metadata."""
     smn_dir = Workspace(tmp_path).bronze("smn")
@@ -35,7 +35,7 @@ def smn_workspace(tmp_path):
     return Workspace(tmp_path)
 
 
-@pytest.fixture()
+@pytest.fixture
 def climate_normals_workspace(tmp_path):
     """A workspace whose bronze holds a single climate normals TXT."""
     cn_dir = Workspace(tmp_path).bronze("climate_normals")

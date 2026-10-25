@@ -14,7 +14,9 @@ which are :mod:`foehn.state` and :mod:`foehn.archives` now.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 
 from foehn import coherence
@@ -48,7 +50,7 @@ def _banner(title: str, out_dir: Path) -> None:
     logger.info("%s", "=" * 60)
 
 
-def _since_instant(since: str | None):
+def _since_instant(since: str | None) -> datetime | None:
     """Parse *since* up front, so a malformed one fails before any listing."""
     if not since:
         return None
@@ -104,7 +106,7 @@ def stac_download(
     latest_run: bool = False,
     with_metadata: bool = False,
     coherent: bool = False,
-):
+) -> Callable[..., DownloadResult]:
     """Build the download adapter for a kind whose assets come from a STAC listing.
 
     ``download_collection``, ``download_grib2`` and ``download_netcdf`` were the
@@ -162,11 +164,6 @@ def stac_download(
         items = fetcher.items(collection_id, max_items=max_items)
         logger.info("  Found %d items%s", len(items), " (latest page)" if max_items else "")
 
-        items = _updated_since(items, since)
-        if since and not items:
-            logger.info("  Nothing changed — skipping")
-            return result
-
         # ``every`` is the full pre-filter set — the prune universe below, so
         # ETags for slices outside this run's time_slice are kept.
         every = assets_of(items, suffixes=suffixes)
@@ -175,6 +172,21 @@ def stac_download(
             time_slices=time_slice if time_sliced else None,
             latest_run=latest_run,
         )
+        if since:
+            # The cursor speaks for the files it saw written, not for files that
+            # are gone. A wanted file missing from disk is fetched whatever its
+            # Item's ``updated`` says: deleting part of the cache used to leave it
+            # deleted, because nothing upstream had changed since the cursor.
+            # Selected first, narrowed second, so a missing old forecast run can
+            # never pass for the newest one.
+            changed = {item.get("id", "") for item in _updated_since(items, since)}
+            missing = [a for a in wanted if a.item_id not in changed and not (out_dir / a.name).exists()]
+            if missing:
+                logger.info("  %d unchanged file(s) missing locally — fetching them again", len(missing))
+            wanted = [a for a in wanted if a.item_id in changed or not (out_dir / a.name).exists()]
+            if not wanted:
+                logger.info("  Nothing changed — skipping")
+                return result
         if latest_run and (run := latest_run_of(every)) is not None:
             available = len({a.forecast_run for a in every if a.forecast_run is not None})
             logger.info("  Latest forecast run: %s (of %d available)", run, available)

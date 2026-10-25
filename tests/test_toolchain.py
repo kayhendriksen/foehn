@@ -66,6 +66,7 @@ def test_unknown_tool_fails_loudly():
         capture_output=True,
         text=True,
         cwd=ROOT,
+        check=False,  # the exit code is what is under test
     )
 
     assert result.returncode != 0
@@ -89,6 +90,7 @@ import foehn
         capture_output=True,
         text=True,
         cwd=ROOT,
+        check=False,  # the exit code is what is under test
     )
 
     assert result.returncode == 0, result.stderr

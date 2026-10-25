@@ -84,7 +84,7 @@ dev = [
     # the upgrade arrives as its own reviewable PR rather than landing on whoever
     # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
     # which CI reads — see scripts/hook_version.sh.)
-    "ty==0.0.86",
+    "ty==0.0.91",
     "numpy>=1.24",
     "pydantic>=2.0",
     # Strict YAML parsing for the workflow-structure test: PyYAML silently
@@ -117,13 +117,42 @@ select = [
     "S",    # flake8-bandit — inline security lint (bandit still runs in CI for the deeper pass)
     "DTZ",  # naive datetimes — a weather library should never build one by accident
     "PTH",  # pathlib over os.path
+    # foehn ships py.typed, so an unannotated function hands every caller an Unknown.
+    "ANN",
+    "BLE",  # a broad except must say why it is broad (each one carries a noqa and a reason)
+    "C90",  # cap complexity rather than count branches and statements separately
+    "D",    # docstring layout (google convention); missing docstrings are not flagged
+    "PL",   # pylint, minus the size heuristics ignored below
+    "PT",   # pytest style
+    "ARG", "FBT", "FURB", "N", "RET", "SLF",
+    # No findings today; each guards a mistake that is cheap to make and easy to miss.
+    "ASYNC", "ERA", "EXE", "FA", "FLY", "G", "ICN", "INT", "LOG", "NPY", "PGH", "PYI", "RSE", "SLOT", "TID", "YTT",
 ]
 ignore = [
-    "E731",   # lambda assignment — sometimes fine
-    "SIM108", # ternary operator — can hurt readability
-    "RUF002", # en dash in docstrings — intentional for ranges
-    "RUF003", # en dash in comments — intentional for ranges
+    "E731",    # lambda assignment — sometimes fine
+    "SIM108",  # ternary operator — can hurt readability
+    "RUF002",  # en dash in docstrings — intentional for ranges
+    "RUF003",  # en dash in comments — intentional for ranges
+    "D1",      # missing docstrings: on private helpers the comments say more than a stub would
+    "D401",    # imperative mood: many docstrings describe a value ("The instant after which...")
+    "D403",    # capitalised first word: docstrings often open with a code name (``cfgrib``)
+    "FBT003",  # boolean literals in calls: polars takes values positionally, e.g. fill_null(False)
+    "PLC0414", # ``import x as x`` is the explicit re-export spelling
+    "PLC0415", # optional dependencies (xarray, cfgrib, h5py, pyspark) are imported where used
+    "PLR0911", # return/branch/statement counts: C901 caps complexity instead
+    "PLR0912",
+    "PLR0915",
+    "PLR0913", # public functions are keyword-only and take one argument per filter by design
+    "PLR0917",
+    "PLR2004", # magic values: thresholds read better inline, next to the comment that explains them
 ]
+
+[tool.ruff.lint.mccabe]
+# The most complex function today is at 15. Raise this deliberately, not by drift.
+max-complexity = 15
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "src/foehn/cli.py" = ["T201"]
@@ -132,7 +161,9 @@ ignore = [
 "scripts/*" = ["T201", "PERF203"]
 # Tests assert freely, build naive datetimes as fixture values, and open() by
 # path is clearer than Path.open() when the path is a plain string literal.
-"tests/*" = ["S101", "DTZ001", "PTH123"]
+# They are not part of the typed surface, take fixtures they only need for their
+# side effects, and reach into private helpers on purpose.
+"tests/*" = ["S101", "DTZ001", "PTH123", "ANN", "ARG", "SLF001", "D"]
 
 [tool.coverage.run]
 source = ["foehn"]

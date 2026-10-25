@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import NoReturn
 
 from foehn import state
 from foehn.transfer import DownloadResult
@@ -64,7 +65,7 @@ def save_last_run(data_dir: Path, timestamp: str | None = None) -> None:
     state.save_last_run(Workspace.resolve(data_dir), timestamp)
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> NoReturn:
     """Name the replacement for the download helpers rather than 404 on them.
 
     These moved rather than disappeared, and an AttributeError on a module that

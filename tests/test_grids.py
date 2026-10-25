@@ -1,6 +1,7 @@
 """Tests for the gridded read path (foehn.open_dataset)."""
 
 import contextlib
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -196,8 +197,10 @@ def test_to_zarr_grib2_hypercube(fetcher, tmp_path):
 
     store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
     cube = xr.open_zarr(store)
-    assert "time" in cube.dims and "step" in cube.dims
-    assert cube.sizes["time"] == 2 and cube.sizes["step"] == 2
+    assert "time" in cube.dims
+    assert "step" in cube.dims
+    assert cube.sizes["time"] == 2
+    assert cube.sizes["step"] == 2
     assert cube["t2m"].dims[-2:] == ("latitude", "longitude")  # spatial dims preserved
 
 
@@ -485,7 +488,8 @@ def test_to_zarr_match_yields_distinct_stores(fetcher, tmp_path):
     assert s1.name == "surface_derived_grid__rhiresd.zarr"
     assert s2.name == "surface_derived_grid__tabsd.zarr"
     assert s1 != s2
-    assert s1.exists() and s2.exists()
+    assert s1.exists()
+    assert s2.exists()
     assert "rain" in xr.open_zarr(s1).data_vars
     assert "temp" in xr.open_zarr(s2).data_vars
 
@@ -573,7 +577,8 @@ def test_a_written_store_carries_no_noncf_time_units(tmp_path):
     write_zarr(ds, store)
 
     written = xr.open_zarr(store)
-    assert "units" not in written["time"].attrs and "calendar" not in written["time"].attrs
+    assert "units" not in written["time"].attrs
+    assert "calendar" not in written["time"].attrs
     assert written["time"].attrs["units_noncf"] == "years since 1991-01-01"
     assert written["time"].attrs["calendar_noncf"] == "standard"
 
@@ -842,7 +847,7 @@ def test_an_unreadable_netcdf_file_is_reported_as_itself(tmp_path):
     xr.Dataset({"v": ("x", np.arange(3.0))}, coords={"x": [0, 1, 2]}).to_netcdf(good, engine="h5netcdf")
     corrupt.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\x00" * 512)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(OSError, match=corrupt.name) as caught:
         open_netcdf([good, corrupt], dataset="surface_derived_grid")
 
     assert "mixes parameters" not in str(caught.value)
@@ -1148,7 +1153,7 @@ def test_revising_non_contiguous_timesteps_is_refused(tmp_path):
 
     store, _files = _radar_cube(tmp_path, times=("000000", "000500", "001000"))
     positions = _cube_time_index(xr, store)
-    first, last = sorted(positions)[0], sorted(positions)[2]
+    first, last = min(positions), sorted(positions)[2]
     ds = xr.open_zarr(store).isel(time=[0])
 
     with pytest.raises(ValueError, match="not contiguous"):
@@ -1602,8 +1607,8 @@ def test_two_quality_codes_for_one_observation_keep_only_the_better(tmp_path):
     write_odim_composite(corrected, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
     store = tmp_path / "cube.zarr"
 
-    for mode in ("w", "a"):
-        cube_radar([original, corrected], store, mode=mode)
+    for mode, order in (("w", [original, corrected]), ("a", [corrected, original])):
+        cube_radar(order, store, mode=mode)
         with xr.open_zarr(store) as cube:
             assert cube.sizes["time"] == 1
             assert cube["acrr"].values[0, 0, 1] == 42.0
@@ -1678,3 +1683,47 @@ def test_a_control_and_an_ensemble_file_cube_along_number(tmp_path):
     with xr.open_zarr(store) as cube:
         assert cube["number"].values.tolist() == [0, 1, 2]
         assert cube["t2m"].values[:, 0, 0].tolist() == [0.0, 1.0, 2.0]
+
+
+def test_a_store_left_with_duplicate_timestamps_is_rebuilt_not_extended(tmp_path):
+    """Stores from before the per-observation rule can repeat an instant; appending cannot fix that."""
+    xr = _radar_stack_deps()
+    import numpy as np
+
+    from foehn.grids import cube_radar
+
+    corrected = tmp_path / "CPC2613000009_00060.001.h5"
+    write_odim_composite(corrected, time="000000", values=[[0.0, 42.0, 9.0], [9.0, 2.0, 3.0]])
+    store = tmp_path / "cube.zarr"
+    when = np.array(["2026-05-10T00:00:00", "2026-05-10T00:00:00"], dtype="datetime64[ns]")
+    stale = xr.Dataset({"acrr": (("time", "y", "x"), np.array([[[0.0, 1.5]], [[0.0, 42.0]]]))}, coords={"time": when})
+    with warnings.catch_warnings():  # zarr's consolidated-metadata notice; the fixture's, not foehn's
+        warnings.simplefilter("ignore")
+        stale.to_zarr(store, mode="w")
+
+    with pytest.raises(ValueError, match=r'repeats 1 timestamp.*mode="w"'):
+        cube_radar([corrected], store, mode="a")
+
+    cube_radar([corrected], store, mode="w")
+    with xr.open_zarr(store) as cube:
+        assert cube.sizes["time"] == 1
+        assert cube["acrr"].values[0, 0, 1] == 42.0
+
+
+def test_a_store_that_cannot_be_checked_is_left_to_the_append_path(tmp_path):
+    """An unreadable store, or one with no time axis, is not refused on suspicion."""
+    xr = _radar_stack_deps()
+    import numpy as np
+
+    from foehn.grids import _refuse_a_duplicated_axis
+
+    unreadable = tmp_path / "unreadable.zarr"
+    unreadable.mkdir()
+    (unreadable / "zarr.json").write_text("{not json")
+    timeless = tmp_path / "timeless.zarr"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        xr.Dataset({"v": ("x", np.arange(2.0))}).to_zarr(timeless, mode="w")
+
+    for store in (unreadable, timeless, tmp_path / "absent.zarr"):
+        _refuse_a_duplicated_axis(xr, store)

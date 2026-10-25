@@ -215,16 +215,20 @@ def test_csv_download_incremental_run_does_not_prune(tmp_path):
 
 
 def test_csv_download_since_filter(tmp_path):
-    """Items older than `since` should be skipped without any HTTP call."""
+    """Items older than `since` whose file is on disk are skipped without any HTTP call."""
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     fake = _fake([_stac_item(url, updated="2025-06-01T00:00:00Z")])
     _serve(
         fake,
     )
+    workspace = Workspace(tmp_path)
+    workspace.bronze("smn").mkdir(parents=True)
+    (workspace.bronze("smn") / "ogd-smn_tst_d_recent.csv").write_text("a;b\n1;2\n")
 
-    result = registry.download("smn", Workspace(tmp_path), since="2026-01-01T00:00:00Z", fetcher=fake)
+    result = registry.download("smn", workspace, since="2026-01-01T00:00:00Z", fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
     assert result.downloaded == 0
     assert result.filenames == []
 
@@ -243,10 +247,37 @@ def test_since_compares_instants_not_strings(tmp_path, updated, fetched):
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
     fake = _fake([_stac_item(url, updated=updated)])
     _serve(fake)
+    workspace = Workspace(tmp_path)
+    workspace.bronze("smn").mkdir(parents=True)
+    (workspace.bronze("smn") / "ogd-smn_tst_d_recent.csv").write_text("a;b\n1;2\n")  # cached, so only `updated` decides
 
-    registry.download("smn", Workspace(tmp_path), since="2026-10-25T11:00:00+01:00", fetcher=fake)
+    registry.download("smn", workspace, since="2026-10-25T11:00:00+01:00", fetcher=fake)
 
     assert (url in fake.gets) is fetched
+
+
+def test_a_deleted_csv_is_fetched_again_despite_the_cursor(tmp_path):
+    """Lock and metadata files kept Bronze non-empty, so a deleted CSV stayed deleted."""
+    kept = "https://data.geo.admin.ch/ogd-smn_aaa_d_recent.csv"
+    deleted = "https://data.geo.admin.ch/ogd-smn_bbb_d_recent.csv"
+    older = "https://data.geo.admin.ch/ogd-smn_ccc_d_historical.csv"  # never requested
+    fake = _fake([])
+    fake.any_items = [
+        {"id": "aaa", "assets": {"d": {"href": kept}}, "properties": {"updated": "2026-01-01T00:00:00Z"}},
+        {"id": "bbb", "assets": {"d": {"href": deleted}}, "properties": {"updated": "2026-01-01T00:00:00Z"}},
+        {"id": "ccc", "assets": {"d": {"href": older}}, "properties": {"updated": "2026-01-01T00:00:00Z"}},
+    ]
+    _serve(fake)
+    workspace = Workspace(tmp_path)
+    registry.download("smn", workspace, fetcher=fake)
+    (workspace.bronze("smn") / "ogd-smn_bbb_d_recent.csv").unlink()
+    (workspace.bronze("smn") / ".foehn-refresh.lock").touch()
+    fake.gets.clear()
+
+    registry.download("smn", workspace, since="2026-06-01T00:00:00Z", fetcher=fake)
+
+    assert [url for url in fake.gets if "ogd-smn_" in url] == [deleted]
+    assert (workspace.bronze("smn") / "ogd-smn_bbb_d_recent.csv").exists()
 
 
 def test_a_since_without_a_timezone_is_refused_before_listing(tmp_path):
@@ -302,7 +333,8 @@ def test_download_metadata_skips_non_csv_assets(tmp_path):
 
     download_metadata("smn", Workspace(tmp_path), fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
 
 
 # --- download_climate_normals_zip ---
@@ -325,7 +357,8 @@ def test_normals_zip_skips_a_completed_materialization(tmp_path):
     second = _fake(body=make_zip({"sample.txt": b"changed"}))
     download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=second)
 
-    assert second.gets == [] and second.streams == []
+    assert second.gets == []
+    assert second.streams == []
 
 
 def test_normals_zip_redownloads_if_not_extracted(tmp_path):
@@ -435,13 +468,14 @@ def test_static_download_skips_existing_file(tmp_path):
 
     result = registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
 
-    assert fake.gets == [] and fake.streams == []
+    assert fake.gets == []
+    assert fake.streams == []
     assert result.downloaded == 0
     assert result.skipped == 1
 
 
 def test_static_download_since_filter(tmp_path):
-    """Items older than `since` should be skipped without any HTTP call."""
+    """Items older than `since` whose file is on disk are skipped without any HTTP call."""
     fake = _fake(
         [
             {
@@ -452,9 +486,14 @@ def test_static_download_since_filter(tmp_path):
         ]
     )
 
-    result = registry.download("surface_derived_grid", Workspace(tmp_path), since="2026-01-01T00:00:00Z", fetcher=fake)
+    workspace = Workspace(tmp_path)
+    workspace.bronze("surface_derived_grid").mkdir(parents=True)
+    (workspace.bronze("surface_derived_grid") / "grid.nc").write_bytes(b"x")
 
-    assert fake.gets == [] and fake.streams == []
+    result = registry.download("surface_derived_grid", workspace, since="2026-01-01T00:00:00Z", fetcher=fake)
+
+    assert fake.gets == []
+    assert fake.streams == []
     assert result.downloaded == 0
     assert result.filenames == []
 
@@ -485,7 +524,8 @@ def test_indoor_zip_skips_when_the_materialization_is_current(tmp_path):
     second = _fake(items=[item])
     result = download_indoor_zip("climate_scenarios_indoor", Workspace(tmp_path), fetcher=second)
 
-    assert second.streams == [] and len(second.listings) == 1
+    assert second.streams == []
+    assert len(second.listings) == 1
     assert (result.total_assets, result.downloaded, result.skipped) == (1, 0, 1)
 
 
@@ -709,3 +749,10 @@ def test_concurrent_csv_refreshes_of_one_dataset_cannot_split_file_and_etag(tmp_
 
     body = (workspace.bronze("smn") / "ogd-smn_tst_d_recent.csv").read_bytes()
     assert (body, load_etags(workspace)[url]) == (b"value\nnew\n", '"new"')
+
+
+def test_no_cursor_keeps_every_item():
+    from foehn.downloads import _updated_since
+
+    items = [{"id": "a", "properties": {"updated": "2020-01-01T00:00:00Z"}}]
+    assert _updated_since(items, None) == items

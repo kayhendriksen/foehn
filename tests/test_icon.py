@@ -94,7 +94,8 @@ def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
     _COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
     with patch("foehn.icon.constants_file", return_value=None):
         lat, lon = unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())
-    assert lat is None and lon is None
+    assert lat is None
+    assert lon is None
     _COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
 
 
@@ -155,7 +156,8 @@ def test_icon_unstructured_lonlat_does_not_cache_failure(tmp_path):
     ):
         lat, lon = unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=_fake())
 
-    assert list(lat) == [46.0] and list(lon) == [7.0]
+    assert list(lat) == [46.0]
+    assert list(lon) == [7.0]
     _COORDS_CACHE.pop(("forecast_icon_ch1", str(workspace.root)), None)
 
 

@@ -18,12 +18,17 @@ import logging
 import warnings
 from collections.abc import Generator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from foehn.assets import collection_assets
 from foehn.collections import COLLECTIONS
 from foehn.fetch import Fetcher, FetchError
 from foehn.transfer import already_current, fetch_all
 from foehn.workspace import Workspace
+
+if TYPE_CHECKING:
+    import numpy as np
+    import xarray as xr
 
 # Parsed ICON/KENDA cell lat/lon — the constants GRIB is ~11 MB and the same grid
 # for every field in a collection, so parse it once. Keyed by (dataset,
@@ -109,7 +114,9 @@ def quiet_cfgrib() -> Generator[None]:
         cfgrib_log.removeFilter(notice)
 
 
-def unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher):
+def unstructured_lonlat(
+    dataset: str, workspace: Workspace, *, fetcher: Fetcher
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
 
     Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
@@ -141,7 +148,7 @@ def unstructured_lonlat(dataset: str, workspace: Workspace, *, fetcher: Fetcher)
     return lat, lon
 
 
-def attach_lonlat(ds, dataset: str, workspace: Workspace, *, fetcher: Fetcher, what: str):
+def attach_lonlat(ds: xr.Dataset, dataset: str, workspace: Workspace, *, fetcher: Fetcher, what: str) -> xr.Dataset:
     """Attach ICON cell lat/lon to an unstructured Dataset, best-effort.
 
     ICON/KENDA are on an unstructured grid (1-D ``values``, no lat/lon in the
@@ -158,7 +165,7 @@ def attach_lonlat(ds, dataset: str, workspace: Workspace, *, fetcher: Fetcher, w
                 lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
                 lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - coordinates are best effort; the field still opens, with a warning
         warnings.warn(
             f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); {what}",
             stacklevel=2,

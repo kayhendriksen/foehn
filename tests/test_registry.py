@@ -97,7 +97,8 @@ def test_every_grid_kind_caps_an_open():
     radar = registry.KINDS[DatasetKind.RADAR_GRID].grid
     netcdf = registry.KINDS[DatasetKind.NETCDF_GRID].grid
 
-    assert grib2.max_files == 1 and radar.max_files == 1
+    assert grib2.max_files == 1
+    assert radar.max_files == 1
     assert netcdf.max_files == 1000
 
     # The cube caps are a different per-kind fact: GRIB2 holds the whole set in

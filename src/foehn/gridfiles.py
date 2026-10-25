@@ -93,8 +93,8 @@ def _temporal_extent(collection: dict) -> tuple[datetime, datetime] | None:
     try:
         start, end = collection["extent"]["temporal"]["interval"][0]
         bounds = (
-            datetime.fromisoformat(start.replace("Z", "+00:00")),
-            datetime.fromisoformat(end.replace("Z", "+00:00")),
+            datetime.fromisoformat(start),
+            datetime.fromisoformat(end),
         )
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         return None
