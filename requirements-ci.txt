@@ -9,8 +9,8 @@
 # ruff and zizmor are NOT here: they are pinned in .pre-commit-config.yaml, so
 # that local hooks and CI cannot disagree. ty is pinned in pyproject's dev extra,
 # because the typecheck job installs it rather than running it through uvx.
+# build and twine are in requirements-publish.txt, locked with hashes, because
+# they produce and check the artifact that is published.
 bandit==1.9.4
-build==1.6.1
 cyclonedx-bom==7.5.0
 pip-audit==2.10.1
-twine==7.0.0
