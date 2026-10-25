@@ -631,7 +631,7 @@ dependencies = [
 [package.optional-dependencies]
 databricks = [
     { name = "delta-spark" },
-    { name = "polars-lts-cpu" },
+    { name = "polars", extra = ["rtcompat"] },
     { name = "pyspark" },
 ]
 dev = [
@@ -691,7 +691,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'grids'", specifier = ">=1.24" },
     { name = "polars", specifier = ">=1.18" },
-    { name = "polars-lts-cpu", marker = "extra == 'databricks'", specifier = ">=1.18" },
+    { name = "polars", extras = ["rtcompat"], marker = "extra == 'databricks'", specifier = ">=1.34" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=14.0" },
     { name = "pydantic", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "pydantic", marker = "extra == 'mcp'", specifier = ">=2.0" },
@@ -1306,18 +1306,9 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/3a/f1/59154659081930fbde291ea6225607956b500a71b0ce45d88217b7d32da2/polars-1.44.1-py3-none-any.whl", hash = "sha256:1fa62fc1c88fba77a68b28291b5aabdd69e5f38b34e59721a064ae3169b59bb5", size = 865208, upload-time = "2026-08-26T07:07:44.646Z" },
 ]
 
-[[package]]
-name = "polars-lts-cpu"
-version = "1.33.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f4/93/a0c4200a5e0af2eee31ea79330cb1f5f4c58f604cb3de352f654e2010c81/polars_lts_cpu-1.33.1.tar.gz", hash = "sha256:0a5426d95ec9eec937a56d3e7cf7911a4b5486c42f4dbbcc9512aa706039322c", size = 4822741, upload-time = "2025-09-09T08:37:51.491Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/9b/75916636b33724afabe820b0993f60dc243793421d6f680d5fcb531fe170/polars_lts_cpu-1.33.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:5db75d1b424bd8aa34c9a670a901592f1931cc94d9fb32bdd428dbaad8c33761", size = 38908638, upload-time = "2025-09-09T08:37:02.258Z" },
-    { url = "https://files.pythonhosted.org/packages/81/e2/dc77b81650ba0c631c06f05d8e81faacee87730600fceca372273facf77b/polars_lts_cpu-1.33.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:37cf3a56cf447c69cfb3f9cd0e714d5b0c754705d7b497b9ab86cbf56e36b3e7", size = 35638895, upload-time = "2025-09-09T08:37:07.575Z" },
-    { url = "https://files.pythonhosted.org/packages/27/fb/4dcff801d71dfa02ec682d6b32fd0ce5339de48797f663698d5f8348ffe7/polars_lts_cpu-1.33.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:656b530a672fe8fbd4c212b2a8481099e5cef63e84970975619ea7c25faeb833", size = 39585825, upload-time = "2025-09-09T08:37:11.631Z" },
-    { url = "https://files.pythonhosted.org/packages/54/31/0474c14dce2c0507bea40069daafb848980ba7c351ad991908e51ac895fb/polars_lts_cpu-1.33.1-cp39-abi3-manylinux_2_24_aarch64.whl", hash = "sha256:64574c784380b37167b3db3a7cfdb9839cd308e89b8818859d2ffb34a9c896b2", size = 36685020, upload-time = "2025-09-09T08:37:15.597Z" },
-    { url = "https://files.pythonhosted.org/packages/d4/0a/5ebba9b145388ffbbd09fa84ac3cd7d336b922e34256b1417abf0a1c2fb9/polars_lts_cpu-1.33.1-cp39-abi3-win_amd64.whl", hash = "sha256:6b849e0e1485acb8ac39bf13356d280ea7c924c2b41cd548ea6e4d102d70be77", size = 39191650, upload-time = "2025-09-09T08:37:19.541Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/ad/bf3db68d30ac798ca31c80624709a0c03aa890e2e20e5ca987d7e55fcfc2/polars_lts_cpu-1.33.1-cp39-abi3-win_arm64.whl", hash = "sha256:c99ab56b059cee6bcabe9fb89e97f5813be1012a2251bf77f76e15c2d1cba934", size = 35445244, upload-time = "2025-09-09T08:37:22.97Z" },
+[package.optional-dependencies]
+rtcompat = [
+    { name = "polars-runtime-compat" },
 ]
 
 [[package]]
@@ -1334,6 +1325,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/98/ac/769c598dd106e2a6647798da3ed25ddeee67f2d12c04f5da316cb3da6360/polars_runtime_32-1.44.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:0956f0cae632d8fad3a04b4315bf2bb69b56d10c83c79a75c2c4c5a13b9ce5cc", size = 56447612, upload-time = "2026-08-26T07:08:12.36Z" },
     { url = "https://files.pythonhosted.org/packages/b2/ee/98408296e15388020b6183323fdbe78ccab4f72c20d8e0d7092c062d3ad2/polars_runtime_32-1.44.1-cp310-abi3-win_amd64.whl", hash = "sha256:159334184e6fbb074c9f4692221ea19970a5e2bed2a479f9d7bdb00b7f3eedb9", size = 53702970, upload-time = "2026-08-26T07:08:15.398Z" },
     { url = "https://files.pythonhosted.org/packages/e9/9d/8b17e075aac73c881a50b6c1f690d20df46db2f3bcabc99f600ecdee1290/polars_runtime_32-1.44.1-cp310-abi3-win_arm64.whl", hash = "sha256:3ba28d638d0513e0b4afbcdab5c0059a85021e5f81d62b5f793e7e23badb2cf7", size = 47281050, upload-time = "2026-08-26T07:08:18.43Z" },
+]
+
+[[package]]
+name = "polars-runtime-compat"
+version = "1.44.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/eb/014a395e15ab0e773be1dc723d42c70745fbecc3d60a583582a59d6171e1/polars_runtime_compat-1.44.1.tar.gz", hash = "sha256:e697fc01cdbe133b1cd928809258dfcdf99beb58c94f9a9b1e1c73451df307d4", size = 3171975, upload-time = "2026-08-26T07:09:17.338Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/98/3cf9abdc7690a3edcf3dd196b5bb1ca6d23ff16186d02ad509bd6879306c/polars_runtime_compat-1.44.1-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:52a5d848a7849ff2e56229143b2d947bedb222cf75b9eefc5293c8a969ffc61f", size = 54097881, upload-time = "2026-08-26T07:08:46.78Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/13/507a8e8067ed2ab72980de88c6cd92b3f27266f07930dd574a73cafb6046/polars_runtime_compat-1.44.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:72a4858931cc1aeff7d1273fb10b968568acc823163ea2a82ad4f25cd1e7d95b", size = 48468295, upload-time = "2026-08-26T07:08:49.823Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/60/2617d27fba9625443037387d40711f87f78fdba2c4ee31ac0d635bcf2f73/polars_runtime_compat-1.44.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2aa6c76bf01ca738da393bb9d42bbb1bb8de1aabfa74f158ac5dfa4ae183711c", size = 52315643, upload-time = "2026-08-26T07:08:53.487Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/6e/2a27122bb50b9eb7efab575cac8f8bf87a4e7eb71e6b71ac2f25d2e09fe4/polars_runtime_compat-1.44.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:24d08f87e450b539f866237c5817687c428ba6fb5598698c09448f30b869711c", size = 58138913, upload-time = "2026-08-26T07:08:57.036Z" },
+    { url = "https://files.pythonhosted.org/packages/85/8c/6b6e5d4fc5e05a9128a1994e278e5bf1b552fdc3e5a4758bf82f8af01289/polars_runtime_compat-1.44.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:4e6c822a180197dbaa36749c158660c7489e91e3ea77b9a53d845bb3b127449f", size = 52472804, upload-time = "2026-08-26T07:09:00.067Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/d5/8586749338b86351f519d11e6eb2e4ab9cca4c0d9ad8fc14a3ecda579c81/polars_runtime_compat-1.44.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:4dfd82eb7093beec1534eebd83e7ee5964362042c8106f488189531930874173", size = 56054368, upload-time = "2026-08-26T07:09:03.161Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/3f/4d44a299df1fc52b09686f1143359e2719ae2ccbb8b2ef8c2c262fb7ae8b/polars_runtime_compat-1.44.1-cp310-abi3-win_amd64.whl", hash = "sha256:ff0c676297151f357f999f42942ea716de96230bf4191677aadf88bb56a274fb", size = 53482786, upload-time = "2026-08-26T07:09:06.351Z" },
+    { url = "https://files.pythonhosted.org/packages/39/54/cb20b74fb0753d6429f4f01059fffc415bbadbc854ce61eb18c057bc3554/polars_runtime_compat-1.44.1-cp310-abi3-win_arm64.whl", hash = "sha256:b7ad6cbcd1738498218555ecced0b75e212d5af49e6a1fac51be58d1137999a8", size = 47152033, upload-time = "2026-08-26T07:09:09.916Z" },
 ]
 
 [[package]]

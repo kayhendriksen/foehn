@@ -45,7 +45,12 @@ Issues = "https://github.com/kayhendriksen/foehn/issues"
 
 [project.optional-dependencies]
 databricks = [
-    "polars-lts-cpu>=1.18",
+    # Polars' build for CPUs without AVX2. It used to be the separate
+    # polars-lts-cpu distribution, which ships the same ``polars`` package as the
+    # core dependency: installed together, each overwrote the other's files and
+    # could leave a polars that no longer imports. Since 1.34 it is a runtime
+    # extra of polars itself, and polars loads it in preference when present.
+    "polars[rtcompat]>=1.34",
     "pyspark>=3.5,<5.0",
     "delta-spark>=2.4,<5.0",
 ]

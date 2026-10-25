@@ -76,7 +76,7 @@ pip install -e .
 
 **With extras:**
 ```bash
-pip install "foehn[databricks]"   # PySpark + Delta
+pip install "foehn[databricks]"   # PySpark + Delta, and Polars' build for CPUs without AVX2
 pip install "foehn[mcp]"          # MCP server
 pip install "foehn[grids]"        # xarray + Zarr for all gridded data (NetCDF, GRIB2, radar)
 ```
