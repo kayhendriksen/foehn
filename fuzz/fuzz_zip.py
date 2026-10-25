@@ -24,6 +24,19 @@ with atheris.instrument_imports(include=["foehn"]) if atheris else contextlib.nu
 MAX_MEMBERS = 8
 
 
+def _exists(path: Path) -> bool:
+    """``Path.exists``, with a name the filesystem refuses counted as absent.
+
+    Python 3.11 raises OSError (ENAMETOOLONG) from ``exists()`` for a member name
+    longer than the filesystem allows, where 3.12 returns False. Such a name
+    cannot have been written, so it cannot have escaped either.
+    """
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _members(data: bytes) -> list[tuple[str, bytes]]:
     members = []
     for line in data.split(b"\n")[:MAX_MEMBERS]:
@@ -50,12 +63,12 @@ def TestOneInput(data: bytes) -> None:  # noqa: N802 - the name libFuzzer and At
         # it took — a scan of the temporary directory alone cannot see past it.
         targets = {(out / name).resolve() for name in names}
         outside = {target for target in targets if not target.is_relative_to(inside)}
-        present_before = {target for target in outside if target.exists()}
+        present_before = {target for target in outside if _exists(target)}
 
         with contextlib.suppress(ValueError, OSError):
             archives.safe_extract(source, out)
 
-        escaped = sorted(str(t) for t in outside - present_before if t.exists())
+        escaped = sorted(str(t) for t in outside - present_before if _exists(t))
         escaped += [
             str(p)
             for p in root.rglob("*")
