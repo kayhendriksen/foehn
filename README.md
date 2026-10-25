@@ -81,7 +81,9 @@ pip install "foehn[mcp]"          # MCP server
 pip install "foehn[grids]"        # xarray + Zarr for all gridded data (NetCDF, GRIB2, radar)
 ```
 
-Requires Python 3.11 or later.
+Requires Python 3.11 or later; tested on 3.11, 3.12, 3.13, 3.14 and 3.15. On 3.15 the core package and
+the `mcp` extra install as usual, but the `grids` extra does not yet: h5py, eccodes and numcodecs
+(needed for radar, GRIB2 and Zarr) have no Python 3.15 wheels so far.
 
 ---
 
