@@ -63,16 +63,18 @@ def refuse_compressed(head: bytes, source: str) -> None:
         raise ValueError(f"{source}: compressed data where a plain CSV was expected — refusing to decompress it.")
 
 
-def _head(source: bytes | io.BytesIO | Path | str) -> bytes:
-    if isinstance(source, bytes):
-        return source[:4]
+def _head(source: bytes | bytearray | memoryview | io.BytesIO | Path | str) -> bytes:
+    # Any bytes-like value, not only bytes: utf8_meteoswiss_csv hands back a
+    # zero-copy memoryview for input that starts with a BOM.
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        return bytes(memoryview(source)[:4])
     if isinstance(source, io.BytesIO):
         return source.getbuffer()[:4].tobytes()
     with Path(source).open("rb") as handle:
         return handle.read(4)
 
 
-def _read_csv(source: bytes | io.BytesIO | Path | str, **options: object) -> pl.DataFrame:
+def _read_csv(source: bytes | bytearray | memoryview | io.BytesIO | Path | str, **options: object) -> pl.DataFrame:
     """``pl.read_csv``, refusing compressed input first. Every eager CSV read in foehn goes through here.
 
     Some malformed input makes Polars panic rather than raise (``slice index
@@ -83,6 +85,8 @@ def _read_csv(source: bytes | io.BytesIO | Path | str, **options: object) -> pl.
     """
     label = str(source) if isinstance(source, (str, Path)) else "CSV"
     refuse_compressed(_head(source), label)
+    if isinstance(source, (bytearray, memoryview)):
+        source = bytes(source)  # Polars reads bytes, a file or a path, not a buffer view
     try:
         # Pass-through options: Polars types each keyword, and object cannot satisfy them.
         return pl.read_csv(source, **options)  # ty: ignore[invalid-argument-type]

@@ -449,3 +449,14 @@ def test_input_that_makes_polars_panic_raises_a_parse_error():
     for body in (data, utf8_meteoswiss_csv(data)):
         with pytest.raises(pl.exceptions.ComputeError):
             parse_csv_bytes(body, {})
+
+
+def test_the_compression_guard_reads_any_bytes_like_input():
+    """utf8_meteoswiss_csv returns a memoryview for BOM input; the guard must take it too."""
+    from foehn.meteocsv import _read_csv, utf8_meteoswiss_csv
+
+    view = utf8_meteoswiss_csv(b"\xef\xbb\xbfstation_abbr;tre200d0\nBER;1.5\n")
+    assert isinstance(view, memoryview)
+
+    assert _read_csv(view, separator=";").shape == (1, 2)
+    assert _read_csv(bytearray(b"a;b\n1;2\n"), separator=";").shape == (1, 2)
