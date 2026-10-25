@@ -11,6 +11,18 @@ pip install "foehn[databricks]"
 pip install databricks-cli
 ```
 
+The `databricks` extra adds PySpark, Delta, and Polars' compatibility runtime
+(`polars[rtcompat]`) for CPUs without AVX2; Polars uses it automatically when it
+is installed. Earlier versions installed `polars-lts-cpu` instead, which ships
+the same `polars` package as the regular build, so the two overwrite each
+other's files (typically `ImportError: cannot import name ... from 'polars...'`).
+In an environment that has both, remove the old one and repair Polars:
+
+```bash
+pip uninstall polars-lts-cpu
+pip install --force-reinstall --no-deps polars
+```
+
 ---
 
 ## Setup

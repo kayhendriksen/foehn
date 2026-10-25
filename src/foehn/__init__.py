@@ -10,7 +10,7 @@ except Exception as exc:
     raise ImportError(
         "Polars failed to load. On systems without AVX2 support (e.g. Databricks), "
         "install the compatible build:\n\n"
-        '  pip install "foehn[databricks]"   # or: pip install polars-lts-cpu\n'
+        '  pip install "foehn[databricks]"   # or: pip install "polars[rtcompat]"\n'
     ) from exc
 
 # Imported for its side effect: binding ``foehn.client`` on the package, so the

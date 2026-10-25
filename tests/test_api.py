@@ -1230,7 +1230,7 @@ def test_a_polars_that_cannot_run_here_names_the_databricks_build():
 
     with (
         patch("polars.DataFrame", side_effect=RuntimeError("Illegal instruction")),
-        pytest.raises(ImportError, match=r"foehn\[databricks\]"),
+        pytest.raises(ImportError, match=r"foehn\[databricks\].*polars\[rtcompat\]"),
     ):
         # S102: deliberate — this executes foehn's own guard source in an isolated
         # namespace, which is the only way to reach an import-time branch.
