@@ -538,3 +538,25 @@ def test_a_forecast_parameter_that_drifts_to_float_is_widened(tmp_path):
     df = _read_forecast_parquet(workspace)
     assert df["rre150h0"].dtype == pl.Float64
     assert df.height == 10_002
+
+
+def test_a_polars_panic_fails_one_group_not_the_whole_run(tmp_path):
+    """A panic is a BaseException; the per-group isolation has to catch it explicitly."""
+    from foehn.convert import ConversionGroup, run_conversions
+
+    sources = []
+    for name in ("a.csv", "b.csv"):
+        path = tmp_path / name
+        path.write_text("x\n1\n")
+        sources.append(path)
+    groups = [ConversionGroup(tmp_path / "out" / f"{p.stem}.parquet", [p]) for p in sources]
+    written = []
+
+    def convert_one(group):
+        if group.out_path.stem == "a":
+            raise pl.exceptions.PanicException("slice index starts at 1 but ends at 0")
+        written.append(group.out_path.stem)
+        return 0
+
+    assert run_conversions(groups, convert_one, label="test") == 1
+    assert written == ["b"]

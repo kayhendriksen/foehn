@@ -10,6 +10,7 @@ the filesystem may refuse a name with OSError, but nothing may escape.
 import contextlib
 import sys
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -22,6 +23,9 @@ with atheris.instrument_imports(include=["foehn"]) if atheris else contextlib.nu
     from foehn import archives
 
 MAX_MEMBERS = 8
+
+# Repeated member names are fair input for a ZIP guard; zipfile warns about each.
+warnings.filterwarnings("ignore", message="Duplicate name", category=UserWarning)
 
 
 def _exists(path: Path) -> bool:
@@ -40,8 +44,12 @@ def _exists(path: Path) -> bool:
 def _members(data: bytes) -> list[tuple[str, bytes]]:
     members = []
     for line in data.split(b"\n")[:MAX_MEMBERS]:
-        name, _, content = line.partition(b"|")
-        members.append((name.decode("utf-8", errors="replace"), content))
+        raw, _, content = line.partition(b"|")
+        # zipfile cuts a name at its first NUL, and a name left empty makes
+        # writestr raise IndexError while building the archive. Cut it here
+        # instead, so what is tested is the name that ends up in the archive.
+        name = raw.decode("utf-8", errors="replace").split("\x00", 1)[0] or "_"
+        members.append((name, content))
     return members
 
 
@@ -55,7 +63,7 @@ def TestOneInput(data: bytes) -> None:  # noqa: N802 - the name libFuzzer and At
         with zipfile.ZipFile(source, "w") as zf:
             for name, content in _members(data):
                 with contextlib.suppress(ValueError):  # zipfile refuses some names outright
-                    zf.writestr(name or "_", content)
+                    zf.writestr(name, content)
             names = zf.namelist()
 
         # Where each member would land if written as named. One that resolves

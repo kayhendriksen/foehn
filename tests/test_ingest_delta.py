@@ -467,3 +467,10 @@ def test_main_exits_non_zero_when_a_table_fails(smn_bronze_dir, capsys):
 
     assert exited.value.code == 1
     assert "0 tables written, 0 skipped, 2 failed" in capsys.readouterr().out
+
+
+def test_a_polars_panic_fails_the_table_not_the_job(smn_bronze_dir, mock_spark):
+    with patch("scripts.ingest_delta._scan_and_collect", side_effect=pl.exceptions.PanicException("boom")):
+        _, _, failed = _ingest_collection(mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`")
+
+    assert failed == 1
