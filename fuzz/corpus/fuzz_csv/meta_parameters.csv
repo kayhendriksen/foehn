@@ -1,0 +1,7 @@
+parameter_shortname;parameter_description_de;parameter_description_fr;parameter_description_it;parameter_description_en;parameter_group_de;parameter_group_fr;parameter_group_it;parameter_group_en;parameter_granularity;parameter_decimals;parameter_datatype;parameter_unit
+tre200d0;Param A de;Param A fr;Param A it;Param A en;Gruppe A;Groupe A;Gruppo A;Group A;D;1;Float;°C
+tre200dx;Param B de;Param B fr;Param B it;Param B en;Gruppe A;Groupe A;Gruppo A;Group A;D;1;Float;°C
+tre200dn;Param C de;Param C fr;Param C it;Param C en;Gruppe A;Groupe A;Gruppo A;Group A;D;1;Float;°C
+ure200d0;Param D de;Param D fr;Param D it;Param D en;Gruppe B;Groupe B;Gruppo B;Group B;D;0;Integer;%
+rre150d0;Param E de;Param E fr;Param E it;Param E en;Gruppe C;Groupe C;Gruppo C;Group C;D;1;Float;mm
+sre000d0;Param F de;Param F fr;Param F it;Param F en;Gruppe D;Groupe D;Gruppo D;Group D;D;0;Integer;W/m²
