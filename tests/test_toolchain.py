@@ -1,8 +1,9 @@
 """Every pinned tool is declared once, and the workflows resolve it from there.
 
 The versions live in .pre-commit-config.yaml (tools that also run as local
-hooks), requirements-ci.txt (tools only CI runs) and the pyproject dev extra
-(ty) — three files Dependabot bumps. The workflows read them back with
+hooks), requirements-ci.txt (tools only CI runs), requirements-publish.txt (the
+hash-locked packaging toolchain) and the pyproject dev extra (ty) — four files
+Dependabot bumps. The workflows read them back with
 scripts/tool_version.sh instead of repeating them. These tests guard that
 contract from the repo side, where a break shows up before it reaches CI.
 """
@@ -18,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 PRE_COMMIT = ROOT / ".pre-commit-config.yaml"
 REQUIREMENTS = ROOT / "requirements-ci.txt"
+PUBLISH = ROOT / "requirements-publish.txt"
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 
 HOOK_TOOLS = ["ruff-pre-commit", "zizmor-pre-commit"]
@@ -54,9 +56,37 @@ def test_hook_version_matches_the_pre_commit_config(name):
 
 @pytest.mark.parametrize("name", CI_TOOLS)
 def test_ci_tool_version_matches_requirements(name):
-    expected = re.search(rf"^{re.escape(name)}==(\S+)$", REQUIREMENTS.read_text(), re.MULTILINE).group(1)
+    pins = REQUIREMENTS.read_text() + PUBLISH.read_text()
+    expected = re.search(rf"^{re.escape(name)}==([^\s\\]+)", pins, re.MULTILINE).group(1)
 
     assert _tool_version(name) == expected
+
+
+def test_the_publish_toolchain_is_locked_by_hash():
+    """The release build installs it with --require-hashes, so every pin needs a hash.
+
+    One unhashed line — a dependency added by hand, say — would fail the
+    release at install time rather than here.
+    """
+    pins: list[str] = []
+    for line in PUBLISH.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        if line[0].isspace():  # a `--hash=` continuation of the pin above
+            pins[-1] += line
+        else:
+            pins.append(line)
+
+    assert {"build", "twine"} <= {pin.split("==", 1)[0] for pin in pins}
+    unhashed = [pin.split()[0] for pin in pins if "--hash=sha256:" not in pin]
+    assert not unhashed, f"requirements-publish.txt pins {unhashed} without a hash"
+
+
+def test_each_packaging_tool_is_pinned_in_one_requirements_file():
+    """build and twine moved to the hash-locked file; a copy left behind would drift."""
+    for name in ("build", "twine"):
+        assert not re.search(rf"^{name}==", REQUIREMENTS.read_text(), re.MULTILINE)
+        assert re.search(rf"^{name}==", PUBLISH.read_text(), re.MULTILINE)
 
 
 def test_unknown_tool_fails_loudly():
