@@ -21,9 +21,11 @@ one or more datasets to download only those; a named grid dataset works without
 `--grids`.
 
 A GRIB2 forecast (`forecast_icon_ch1`, `forecast_icon_ch2`, `analysis_kenda_ch1`)
-downloads the control member of its newest run: about 3,500 files and 8 GB for
-ICON-CH1, 7 GB for ICON-CH2, and under 100 MB for KENDA. The ensemble members
-are left out (a whole ICON run is 85–145 GB); fetch one with `foehn open --match`.
+downloads the control member of its newest complete run: about 3,500 files and
+8 GB for ICON-CH1, 7 GB for ICON-CH2, and under 100 MB for KENDA. A run is
+published lead by lead over more than an hour, so one still arriving is passed
+over for the run before it. The ensemble members are left out (a whole ICON run
+is 85–145 GB); fetch one with `foehn open --match`.
 
 ```bash
 foehn download              # all non-grid datasets

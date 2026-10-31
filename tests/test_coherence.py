@@ -39,17 +39,22 @@ def test_a_marker_that_is_not_utf8_blocks(tmp_path):
     assert coherence.blocked(out_dir, ["a_rhiresd.nc"]) == {"a_rhiresd.nc"}
 
 
-def test_clearing_leaves_an_unreadable_marker_alone(tmp_path):
-    """Replacing it with a guess would release whatever it was protecting."""
+def test_clearing_an_unreadable_marker_keeps_every_other_file_pending(tmp_path):
+    """Left alone, it blocked every set for good and every refresh fetched its whole set again.
 
+    Releasing everything would be a guess; releasing only what this refresh
+    made whole, and spelling out the rest, still fails closed and lets each
+    other set be released by its own next refresh.
+    """
     out_dir = tmp_path / "bronze" / "surface_derived_grid"
     out_dir.mkdir(parents=True)
-    marker = out_dir / coherence.MARKER
-    marker.write_text("{ truncated")
+    for name in ("a_rhiresd.nc", "b_tabsd.nc"):
+        (out_dir / name).write_bytes(b"x")
+    (out_dir / coherence.MARKER).write_text("{ truncated")
 
     coherence.clear(out_dir, ["a_rhiresd.nc"])
 
-    assert marker.read_text() == "{ truncated"
+    assert coherence.read_pending(out_dir) == {"b_tabsd.nc"}
 
 
 def test_an_unreadable_marker_file_blocks_like_a_corrupt_one(tmp_path):
@@ -63,22 +68,31 @@ def test_an_unreadable_marker_file_blocks_like_a_corrupt_one(tmp_path):
         assert coherence.read_pending(out_dir) is None
 
 
-def test_marking_does_not_overwrite_a_marker_it_cannot_read(tmp_path):
-    """Merging into an unreadable marker turns "unknown" into a tidy empty set.
+def test_marking_an_unreadable_marker_spells_out_every_file(tmp_path):
+    """Merging into an unreadable marker turned "unknown" into a tidy empty set.
 
-    An unrelated successful refresh then deletes that set, releasing the files
-    the unreadable marker was protecting.
+    An unrelated successful refresh then deleted that set, releasing the files
+    the unreadable marker was protecting. Every file here stays pending instead.
     """
 
     out_dir = tmp_path / "bronze" / "surface_derived_grid"
     out_dir.mkdir(parents=True)
-    marker = out_dir / coherence.MARKER
-    marker.write_text("{ truncated")
+    (out_dir / "b_tabsd.nc").write_bytes(b"x")
+    (out_dir / coherence.MARKER).write_text("{ truncated")
 
     with coherence.refresh_lock(out_dir):
         coherence.mark(out_dir, ["a_rhiresd.nc"])
 
-    assert marker.read_text() == "{ truncated"
+    assert coherence.read_pending(out_dir) == {"a_rhiresd.nc", "b_tabsd.nc"}
+
+
+def test_the_lock_lives_beside_the_directory_it_guards(tmp_path):
+    """The ZIP kinds publish by replacing the directory; Windows will not rename one with a file open in it."""
+    out_dir = tmp_path / "bronze" / "climate_normals"
+
+    with coherence.refresh_lock(out_dir):
+        assert not (out_dir / coherence.LOCK).exists()
+        assert (out_dir.parent / f".climate_normals{coherence.LOCK}").exists()
 
 
 def test_concurrent_marker_updates_do_not_lose_entries(tmp_path):

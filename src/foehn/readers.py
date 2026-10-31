@@ -25,7 +25,7 @@ import zipfile
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import polars as pl
@@ -139,8 +139,17 @@ class Filters:
             raise ValueError("workers must be greater than zero.")
         start = _parse_date_bound(self.date_from, "date_from")
         end = _parse_date_bound(self.date_to, "date_to")
-        if start is not None and end is not None and start > end:
-            raise ValueError("date_from must be before or equal to date_to.")
+        if start is not None and end is not None and self.date_to is not None:
+            # A bare date_to is the whole of that day — apply_time_filters bounds
+            # it at the next midnight — so a date_from later that day is inside
+            # it. Compared against midnight, the valid query was refused.
+            if _BARE_DATE_RE.match(self.date_to):
+                end += timedelta(days=1)
+                out_of_order = start >= end
+            else:
+                out_of_order = start > end
+            if out_of_order:
+                raise ValueError("date_from must be before or equal to date_to.")
 
     @property
     def has_calendar_filter(self) -> bool:

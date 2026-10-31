@@ -8,6 +8,8 @@ bookkeeping, and destination collisions.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from foehn.assets import Asset
@@ -224,6 +226,39 @@ def test_an_updated_stamp_without_an_offset_is_read_as_utc(tmp_path, updated, cu
     path = tmp_path / "f.h5"
     path.write_bytes(b"x")
     assert already_current(Asset.from_stac("d", {"href": "https://x/f.h5", "updated": updated}), path) is current
+
+
+def test_a_download_is_dated_by_the_revision_it_holds(tmp_path):
+    """Dated by when it finished, the file says nothing about which revision it is."""
+    fetcher = InMemoryFetcher()
+    fetcher.default_body = b"x"
+    revision = asset("f.h5", updated="2026-10-31T16:19:36Z")
+
+    stream_to_disk(fetcher, revision, tmp_path / "f.h5", None)
+
+    assert (tmp_path / "f.h5").stat().st_mtime == 1793463576
+    assert already_current(revision, tmp_path / "f.h5") is True
+
+
+def test_a_correction_published_mid_download_is_fetched_next_time(tmp_path):
+    """The old bytes finished after the correction was published, and read as the correction for good."""
+    fetcher = InMemoryFetcher()
+    fetcher.default_body = b"old"
+    listed = asset("f.h5", updated="2026-10-31T00:00:00Z")
+    stream_to_disk(fetcher, listed, tmp_path / "f.h5", None)  # completes now, long after the correction below
+
+    correction = asset("f.h5", updated="2026-10-31T00:05:00Z")
+
+    assert already_current(correction, tmp_path / "f.h5") is False
+
+
+def test_a_filesystem_that_keeps_whole_seconds_does_not_refetch_forever(tmp_path):
+    """The date is rounded down there, and without slack the file read as stale on every run."""
+    path = tmp_path / "f.h5"
+    path.write_bytes(b"x")
+    os.utime(path, (1793463576, 1793463576))  # 16:19:36 kept, the .595489 dropped
+
+    assert already_current(asset("f.h5", updated="2026-10-31T16:19:36.595489Z"), path) is True
 
 
 def test_a_legacy_marker_is_rewritten_before_it_is_trusted(tmp_path):

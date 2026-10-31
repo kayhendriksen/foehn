@@ -690,7 +690,7 @@ requires-dist = [
     { name = "netcdf4", marker = "extra == 'grids'", specifier = ">=1.6" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'grids'", specifier = ">=1.24" },
-    { name = "polars", specifier = ">=1.18" },
+    { name = "polars", specifier = ">=1.34" },
     { name = "polars", extras = ["rtcompat"], marker = "extra == 'databricks'", specifier = ">=1.34" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=14.0" },
     { name = "pydantic", marker = "extra == 'dev'", specifier = ">=2.0" },

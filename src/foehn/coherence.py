@@ -37,23 +37,33 @@ MARKER = ".foehn-incoherent.json"
 LOCK = ".foehn-refresh.lock"
 
 
+def _lock_path(out_dir: Path) -> Path:
+    return out_dir.parent / f".{out_dir.name}{LOCK}"
+
+
 @contextmanager
 def refresh_lock(out_dir: Path) -> Generator[None]:
-    """Hold one grid dataset's directory for a whole refresh or snapshot.
+    """Hold one dataset's Bronze directory for a whole refresh, snapshot or conversion.
 
     Not merely the marker's read-modify-write. Two refreshes of the same set
     each checked coherence, each downloaded, and each published into the same
     directory, interleaving into a set neither produced. A reader could likewise
     pass the coherence check and then take its files after a refresh had started
-    replacing them.
+    replacing them. A conversion holds it too: it judges its output current by
+    mtime, so a source replaced while it was still being read left stale
+    Parquet newer than the new source, and every later run skipped it.
 
     Reentrant: a reader holds this across acquiring files and snapshotting them,
     and the acquisition takes it again inside that scope. A file lock belongs to
     the descriptor, so nesting it any other way deadlocks a thread against
     itself.
+
+    The lock file sits beside the directory rather than in it. The ZIP-shipped
+    kinds publish by replacing the whole directory, and Windows will not rename
+    a directory with a file open inside it.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    with reentrant_lock(out_dir / LOCK):
+    with reentrant_lock(_lock_path(out_dir)):
         yield
 
 
@@ -92,6 +102,11 @@ def _write(out_dir: Path, names: set[str]) -> None:
     write_text(marker, json.dumps({"pending": sorted(names)}, indent=2))
 
 
+def _every_file(out_dir: Path) -> set[str]:
+    """What an unreadable marker could have been protecting: every file here."""
+    return {path.name for path in out_dir.iterdir() if path.is_file() and not path.name.startswith(".")}
+
+
 def mark(out_dir: Path, names: list[str]) -> None:
     """Record that these files may be at different generations from each other.
 
@@ -103,10 +118,11 @@ def mark(out_dir: Path, names: list[str]) -> None:
     """
     known = read_pending(out_dir)
     if known is None:
-        # Unreadable, and an unreadable marker already blocks everything it
-        # could name. Merging into it would turn "state unknown" into a tidy
-        # empty set that the next successful refresh of any set then deletes.
-        return
+        # Unreadable, so every file here is at an unknown generation. Merging
+        # into nothing would turn "state unknown" into a tidy empty set that the
+        # next successful refresh of any set then deletes. Spelled out instead,
+        # it still blocks every file, and is readable again.
+        known = _every_file(out_dir)
     _write(out_dir, known | set(names))
 
 
@@ -119,9 +135,14 @@ def clear(out_dir: Path, names: list[str]) -> None:
     """
     pending = read_pending(out_dir)
     if pending is None:
-        return  # unreadable: leave it rather than replace it with a guess
-    if pending & set(names):
-        _write(out_dir, pending - set(names))
+        # Unreadable: every file here is still in question except the ones this
+        # refresh has just brought to one generation. Left alone, the marker
+        # blocked every set for good, and every refresh downloaded its whole set
+        # again. Spelled out, each other set is released by its own next refresh.
+        pending = _every_file(out_dir)
+    elif not pending & set(names):
+        return
+    _write(out_dir, pending - set(names))
 
 
 def blocked(out_dir: Path, names: list[str]) -> set[str]:

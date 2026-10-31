@@ -599,6 +599,58 @@ def test_a_corrupt_marker_blocks_rather_than_fails_open(tmp_path):
         ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=offline)
 
 
+def test_an_unreadable_marker_is_repaired_by_the_refresh_it_forces(tmp_path):
+    """Left unreadable for good, it made every open fetch its whole set again."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    names = ["a_rhiresd.nc", "b_rhiresd.nc"]
+    for name in names:
+        (out_dir / name).write_bytes(b"current")
+    (out_dir / ".foehn-incoherent.json").write_bytes(b"\xff\xfe not json")
+    items = [
+        {
+            "assets": {"d": {"href": f"https://data.geo.admin.ch/x/{name}"}},
+            "properties": {"updated": "2000-01-01T00:00:00Z"},
+        }
+        for name in names
+    ]
+    fake = _fake(items, body=b"current")
+
+    ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+    fake.streams.clear()
+    ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+    assert fake.streams == []
+    assert not (out_dir / ".foehn-incoherent.json").exists()
+
+
+def test_one_failed_file_is_all_the_next_open_fetches_again(tmp_path):
+    """Marking the whole set made one failed file cost every file of it on the next open."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    names = ["a_rhiresd.nc", "b_rhiresd.nc", "c_rhiresd.nc"]
+    for name in names:
+        (out_dir / name).write_bytes(b"current")
+    hrefs = [f"https://data.geo.admin.ch/x/{name}" for name in names]
+    items = [
+        # Only the first file is restated upstream.
+        {
+            "assets": {"d": {"href": href}},
+            "properties": {"updated": "2100-01-01T00:00:00Z" if i == 0 else "2000-01-01T00:00:00Z"},
+        }
+        for i, href in enumerate(hrefs)
+    ]
+    fake = _fake(items, body=b"restated")
+    fake.fail(hrefs[0])
+    with pytest.raises(FetchError, match="may now mix file generations"):
+        ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+    fake.errors.clear()
+    ensure_grid_files("surface_derived_grid", Workspace(tmp_path), match="rhiresd", fetcher=fake)
+
+    assert fake.streams == [hrefs[0], hrefs[0]]
+
+
 def test_a_failed_refresh_keeps_its_mark_rather_than_guessing(tmp_path):
     """A refresh that did not finish cannot say whether it left the set mixed.
 

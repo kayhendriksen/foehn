@@ -350,6 +350,27 @@ def test_normals_zip_extracts_files(tmp_path):
     assert (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
 
 
+def test_a_zip_download_holds_the_dataset_lock_while_it_publishes(tmp_path):
+    """A conversion holds that lock while it reads, and publication replaces the directory it reads."""
+    from foehn import coherence
+    from foehn._locking import is_held
+
+    out_dir = tmp_path / "bronze" / "climate_normals"
+    held = []
+    fake = _fake()
+
+    def stream(url, path):
+        held.append(is_held(coherence._lock_path(out_dir)))
+        path.write_bytes(make_zip({"sample.txt": b"data"}))
+
+    fake.stream_hook = stream
+
+    download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=fake)
+
+    assert held == [True]
+    assert (out_dir / "sample.txt").exists()
+
+
 def test_normals_zip_skips_a_completed_materialization(tmp_path):
     first = _fake(body=make_zip({"sample.txt": b"data"}))
     download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=first)
@@ -467,6 +488,25 @@ def test_grib2_download_fetches_the_control_member_of_the_newest_run(tmp_path):
         "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2",
         "icon-ch1-eps-202610290900-1-t_2m-ctrl.grib2",
     ]
+
+
+def test_grib2_download_passes_over_a_run_that_is_still_publishing(tmp_path):
+    """A run is published lead by lead over more than an hour, and max() took the stub."""
+    fake = _fake(
+        _one_item_per_file(
+            *(
+                f"icon-ch1-eps-{run}-{lead}-t_2m-ctrl.grib2"
+                for run in ("202610310900", "202610311200")
+                for lead in (0, 1, 2)
+            ),
+            "icon-ch1-eps-202610311500-0-t_2m-ctrl.grib2",  # the newest run, one lead in
+        ),
+        body=b"GRIBdata",
+    )
+
+    result = registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
+
+    assert sorted(result.filenames) == [f"icon-ch1-eps-202610311200-{lead}-t_2m-ctrl.grib2" for lead in (0, 1, 2)]
 
 
 @pytest.mark.parametrize(
@@ -679,6 +719,52 @@ def test_a_complete_grid_download_leaves_nothing_marked(tmp_path):
 
     assert not coherence.blocked(out_dir, names)
     assert not (out_dir / coherence.MARKER).exists()
+
+
+def test_one_failed_file_costs_only_itself_on_the_next_run(tmp_path):
+    """Marking the whole set made one 404 cost every file of it on the next run.
+
+    For the 5-minute radar job that was a whole day of composites.
+    """
+    collection = "ch.meteoschweiz.ogd-radar-hail"
+    hrefs = [f"https://data.geo.admin.ch/{collection}/x/bzc26304{hour:02d}00vl.801.h5" for hour in range(5)]
+
+    def listing(restated=None):
+        assets = {f"a{i}": {"href": href} for i, href in enumerate(hrefs)}
+        if restated:
+            assets["a0"]["updated"] = restated
+        return [{"id": "2026-10-31", "assets": assets, "properties": {"updated": "2026-01-01T00:00:00Z"}}]
+
+    fake = _fake(listing(), body=b"h5")
+    workspace = Workspace(tmp_path)
+    registry.download("radar_hail", workspace, fetcher=fake)
+
+    fake.any_items = listing(restated="2100-01-01T00:00:00Z")  # upstream restates one file...
+    fake.fail(hrefs[0])  # ...and fetching it fails once
+    assert registry.download("radar_hail", workspace, fetcher=fake).failed == 1
+
+    fake.errors.clear()
+    fake.streams.clear()
+    registry.download("radar_hail", workspace, fetcher=fake)
+
+    assert fake.streams == [hrefs[0]]
+
+
+def test_download_takes_a_single_time_slice_as_load_does(tmp_path):
+    """A bare string was iterated character by character, so "historical" matched no slice at all."""
+    base = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/ber/"
+    names = ["ogd-smn_ber_d_historical.csv", "ogd-smn_ber_d_recent.csv", "ogd-smn_ber_m.csv"]
+    fake = _fake([stac_item("ber", *(base + name for name in names))])
+
+    result = registry.download("smn", Workspace(tmp_path), time_slice="historical", fetcher=fake)
+
+    assert sorted(result.filenames) == ["ogd-smn_ber_d_historical.csv", "ogd-smn_ber_m.csv"]
+
+
+def test_download_refuses_an_unknown_time_slice(tmp_path):
+    """A typo selected no slice, and the unsliced files alone came back as the answer."""
+    with pytest.raises(ValueError, match="Invalid time_slice"):
+        registry.download("smn", Workspace(tmp_path), time_slice=["histroical"], fetcher=_fake([]))
 
 
 def test_a_retry_does_not_clear_a_cache_it_never_repaired(tmp_path):

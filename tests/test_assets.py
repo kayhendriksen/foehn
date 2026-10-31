@@ -16,6 +16,7 @@ from foehn.assets import (
     other_extensions,
     select,
 )
+from foehn.collections import newest_complete_run
 
 BASE = "https://data.geo.admin.ch/x"
 
@@ -177,6 +178,44 @@ def test_latest_run_of_reports_the_run():
 
     assert latest_run_of(assets_of(items)) == "202607210600"
     assert latest_run_of(assets_of([_item("ber", "ogd-smn_ber_d_recent.csv")])) is None
+
+
+def _runs(**sizes):
+    """One run stamp per file: ``_runs(r1200=3400)`` is a run of 3,400 files."""
+    return [run.removeprefix("r") for run, size in sizes.items() for _ in range(size)]
+
+
+def test_a_run_still_publishing_is_passed_over():
+    """Live, an hour in: the 15 UTC ICON-CH1 run held 1,800 of 3,400 control files, and max() took it."""
+    assert newest_complete_run(_runs(r0900=3400, r1200=3400, r1500=1800)) == "1200"
+
+
+def test_a_longer_run_does_not_make_the_regular_ones_incomplete():
+    """The 03 UTC ICON-CH1 run reaches 45 h, the rest 33 h: "complete" is not "largest"."""
+    assert newest_complete_run(_runs(r0000=3400, r0300=4600, r0600=3400, r0900=1800)) == "0600"
+
+
+def test_a_tie_between_run_sizes_goes_to_the_larger():
+    """One full run beside one partial newer run keeps the full one, as does an expiring oldest."""
+    assert newest_complete_run(_runs(r1200=3400, r1500=1800)) == "1200"
+    assert newest_complete_run(_runs(r0900=400, r1200=3400, r1500=1800)) == "1200"
+
+
+def test_no_runs_means_no_newest_complete_run():
+    assert newest_complete_run([None, None]) is None
+
+
+def test_latest_run_keeps_the_newest_complete_run():
+    items = [
+        _item("20260721-ch", *(f"vnut12.lssw.202607210500.{p}.csv" for p in ("dkl010h0", "fu3010h0"))),
+        _item("20260721-ch", *(f"vnut12.lssw.202607210600.{p}.csv" for p in ("dkl010h0", "fu3010h0"))),
+        _item("20260721-ch", "vnut12.lssw.202607210700.dkl010h0.csv"),  # still publishing
+    ]
+
+    kept = select(assets_of(items, suffixes=(".csv",)), latest_run=True)
+
+    assert {a.forecast_run for a in kept} == {"202607210600"}
+    assert len(kept) == 2
 
 
 def test_selection_composes():

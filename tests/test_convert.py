@@ -134,6 +134,32 @@ def test_convert_to_parquet_no_csv_is_noop(tmp_path):
     assert not (parquet_dir / "smn").exists() or not list((parquet_dir / "smn").iterdir())
 
 
+def test_conversion_holds_the_lock_downloads_publish_under(smn_workspace, monkeypatch):
+    """A CSV replaced while its old bytes were being read left Parquet newer than it, skipped for good."""
+    from foehn import coherence, convert, registry
+    from foehn._locking import is_held
+
+    held = []
+    write = convert._write_parquet_atomic
+
+    def recording(frame, path, compression="zstd"):
+        held.append(is_held(coherence._lock_path(smn_workspace.bronze("smn"))))
+        write(frame, path, compression)
+
+    monkeypatch.setattr(convert, "_write_parquet_atomic", recording)
+
+    assert registry.convert("smn", smn_workspace) == 0
+    assert held
+    assert all(held)  # every attempt, including the retry after a column is widened
+
+
+def test_converting_a_dataset_never_downloaded_creates_nothing(tmp_path):
+    from foehn import registry
+
+    assert registry.convert("smn", Workspace(tmp_path)) == 0
+    assert not (tmp_path / "bronze").exists()
+
+
 def test_convert_applies_metadata_types(smn_workspace, tmp_path):
     """Columns listed as Float in metadata should be Float64 in the Parquet output."""
     parquet_dir = smn_workspace.parquet()

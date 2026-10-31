@@ -302,6 +302,53 @@ def test_a_failed_constants_refresh_falls_back_to_the_complete_cache(tmp_path):
     assert path.read_bytes() == b"old but complete"
 
 
+def test_coordinates_follow_a_restated_constants_file(tmp_path):
+    """Answered from memory before the file was checked, a long-running process kept the first parse for good."""
+    xr = pytest.importorskip("xarray")
+    cfgrib = pytest.importorskip("cfgrib")
+
+    def parse(path, **_):  # the constants "file" holds one latitude, as text
+        value = float(Path(path).read_bytes())
+        return [xr.Dataset({"tlat": ("values", [value]), "tlon": ("values", [value])})]
+
+    href = "https://data.geo.admin.ch/x/horizontal_constants_icon-ch1-eps.grib2"
+    fake = _fake()
+
+    def publish(updated, body):
+        fake.any_collection = {
+            "assets": {"horizontal_constants_icon-ch1-eps.grib2": {"href": href, "updated": updated}}
+        }
+        fake.add_body(href, body)
+
+    workspace = Workspace(tmp_path)
+    with patch.object(cfgrib, "open_datasets", side_effect=parse):
+        publish("2020-01-01T00:00:00Z", b"46.1")
+        first, _ = unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=fake)
+        publish("2100-01-01T00:00:00Z", b"47.9")
+        second, _ = unstructured_lonlat("forecast_icon_ch1", workspace, fetcher=fake)
+
+    assert list(first) == [46.1]
+    assert list(second) == [47.9]
+
+
+def test_attaching_coordinates_keeps_the_closer(tmp_path):
+    """assign_coords returns a new Dataset, which xarray does not hand the source's closer."""
+    np = pytest.importorskip("numpy")
+
+    from foehn.icon import attach_lonlat
+
+    closed = []
+    field = _unstructured()
+    field.set_close(lambda: closed.append(True))
+    with patch("foehn.icon.unstructured_lonlat", return_value=(np.arange(4.0), np.arange(4.0))):
+        attached = attach_lonlat(field, "forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake(), what="x")
+
+    attached.close()
+
+    assert "lat" in attached.coords
+    assert closed == [True]
+
+
 def test_quiet_cfgrib_drops_only_cfgrib_noise(caplog):
     cfgrib_log = logging.getLogger("cfgrib.dataset")
     with warnings.catch_warnings(record=True) as caught, caplog.at_level(logging.WARNING, logger="cfgrib.dataset"):

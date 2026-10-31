@@ -100,6 +100,8 @@ format — this is what each foehn reader relies on:
 """
 
 import re
+from collections import Counter
+from collections.abc import Iterable
 
 from foehn.catalog import COLLECTION_META as COLLECTION_META
 from foehn.catalog import COLLECTIONS as COLLECTIONS
@@ -287,6 +289,27 @@ def forecast_run_from_filename(filename: str) -> str | None:
     name = filename.rsplit("/", 1)[-1]
     match = _FORECAST_RUN_RE.match(name) or _GRIB2_RUN_RE.match(name)
     return match.group(1) if match else None
+
+
+def newest_complete_run(runs: Iterable[str | None]) -> str | None:
+    """The newest **Forecast run** that is fully published, from one run per file.
+
+    A run is published file by file, so the newest one is often a stub: an hour
+    into publication, ICON-CH1's newest run held 1,800 of its 3,400 control
+    files, and ``max()`` handed that over as the forecast. Runs differ in size on
+    purpose as well — the 03 UTC ICON-CH1 run reaches 45 h where the others stop
+    at 33 h — so complete cannot mean "as large as the largest". It means at
+    least the size most listed runs share, with a tie going to the larger size:
+    one full run beside a partial newer one keeps the full one. If upstream drops
+    a file from every run for good, the smaller runs become typical once they
+    outnumber the older ones in the listing.
+    """
+    sizes = Counter(run for run in runs if run is not None)
+    if not sizes:
+        return None
+    frequency = Counter(sizes.values())
+    typical = max(frequency, key=lambda size: (frequency[size], size))
+    return max(run for run, size in sizes.items() if size >= typical)
 
 
 def forecast_parameter_from_filename(filename: str) -> str | None:

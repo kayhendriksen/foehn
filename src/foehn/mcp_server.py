@@ -434,8 +434,9 @@ def describe_grid(
     is ~30 GB over 3,698 files, satellite_derived_grid ~9 GB. Pass `match` unless
     you mean it. climate_scenarios_grid is ~900 MB unfiltered, and a single
     GRIB2/radar file is only a few MB. Above 1,000 files the call is refused
-    rather than started. Requires the optional 'grids' dependencies
-    (pip install foehn[grids]).
+    rather than started. Several NetCDF files are combined in memory unless the
+    server has dask installed, so a wide match costs RAM as well as disk.
+    Requires the optional 'grids' dependencies (pip install foehn[grids]).
 
     Args:
         dataset: Grid dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",

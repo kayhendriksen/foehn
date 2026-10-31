@@ -59,6 +59,7 @@ import uuid
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import IO, TYPE_CHECKING, Literal, Protocol, cast
@@ -117,13 +118,17 @@ def _require_dask() -> None:
     it — rechunking is a caller's request, not a property of a kind — so it is
     checked inside :func:`write_zarr`, where the rechunk happens.
     """
-    import importlib.util
-
-    if importlib.util.find_spec("dask") is None:
+    if not _dask_available():
         raise ImportError(
             "to_zarr(rechunk=...) requires dask, which is not part of the "
             "'grids' extra. Install it with:\n\n  pip install dask\n"
         )
+
+
+def _dask_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("dask") is not None
 
 
 def require_radar() -> None:
@@ -637,19 +642,36 @@ def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Da
     """
     if variables is None:
         return ds
-    return ds[[variables] if isinstance(variables, str) else list(variables)]
+    selected = ds[[variables] if isinstance(variables, str) else list(variables)]
+    # A selection is a new Dataset, and xarray does not hand it the source's
+    # closer: closing it, or leaving a ``with`` block, kept the file open.
+    selected.set_close(ds.close)
+    return selected
 
 
 # --- xarray-backed opens ---------------------------------------------------
+
+
+# Above this, combining files without dask is worth a warning: every value is
+# read into memory as the Dataset is built, before the caller touches any.
+_IN_MEMORY_COMBINE_WARN_BYTES = 1 << 30
+
+
+def _close_each(datasets: list) -> None:
+    for opened in datasets:
+        with contextlib.suppress(Exception):
+            opened.close()
 
 
 def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kwargs: dict | None = None) -> xr.Dataset:
     """Open one or many grid files (NetCDF or GRIB2) into a single Dataset.
 
     Multiple files are opened individually and merged with ``combine_by_coords``
-    rather than ``open_mfdataset``: the latter needs a dask chunk manager, which
-    is not in the 'grids' extra. Per-file opens keep the backend's own
-    lazy reads, so combining stays dask-free.
+    rather than ``open_mfdataset``, which needs dask. Combining is only lazy
+    with dask, though: without it, concatenation reads every value of every
+    file into memory before anything is returned — four 67 MB files cost
+    382 MB on open. With dask installed each file is opened as dask arrays and
+    the combined Dataset stays lazy; without it, a combine over 1 GiB warns.
 
     ``combine_attrs="drop_conflicts"`` keeps global attributes shared by every
     file (title, institution, …) but drops those that legitimately differ
@@ -668,23 +690,40 @@ def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kw
             kwargs["backend_kwargs"] = backend_kwargs
         if len(files) == 1:
             return xr.open_dataset(files[0], **kwargs)
+        lazy = _dask_available()
+        if lazy:
+            kwargs["chunks"] = {}
         # Opened one at a time so a failure can close what is already open. The
         # comprehension this replaces leaked a handle per file whenever the
         # combine raised, which on a large set exhausts the descriptor limit and
-        # reports the exhaustion instead of the original fault. On success the
-        # handles stay open: the combined Dataset reads from them lazily.
+        # reports the exhaustion instead of the original fault.
         datasets: list = []
         try:
             for source in files:
                 # Not a comprehension: the except below has to close whatever
                 # was opened before the failure, which needs the partial list.
                 datasets.append(xr.open_dataset(source, **kwargs))  # noqa: PERF401
-            return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+            if not lazy and (size := sum(ds.nbytes for ds in datasets)) > _IN_MEMORY_COMBINE_WARN_BYTES:
+                warnings.warn(
+                    f"Combining these {len(datasets)} files reads about {size / 1e9:.1f} GB into memory: "
+                    "xarray combines files lazily only with dask, which the 'grids' extra does not "
+                    "install. Install dask (pip install dask) or narrow match=.",
+                    stacklevel=2,
+                )
+            combined = xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
         except BaseException:
-            for opened in datasets:
-                with contextlib.suppress(Exception):
-                    opened.close()
+            _close_each(datasets)
             raise
+        if lazy:
+            # Read from the per-file opens as it is used. The combined Dataset
+            # is new and carries no closer of its own, so closing it released
+            # nothing they held.
+            combined.set_close(partial(_close_each, datasets))
+        else:
+            # The combine has read every value already. Kept open until the
+            # caller closed the result, the files only held their locks.
+            _close_each(datasets)
+        return combined
 
     try:
         return _do(decode_times=True)

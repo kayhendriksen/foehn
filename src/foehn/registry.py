@@ -20,6 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from foehn import coherence
 from foehn.collections import (
     COLLECTION_META,
     COLLECTIONS,
@@ -135,11 +136,12 @@ _download_netcdf = stac_download(
 # reanalysis reuses a filename ~8 days later), so their skip rule compares
 # timestamps rather than existence.
 #
-# A forecast download is the control member of the newest run. The listing is
-# oldest first, so the first page this used to stop at was the oldest run at
-# lead 0 — files about to expire. The whole run is ~85 GB for ICON-CH1 and
-# ~145 GB for ICON-CH2, almost all of it ensemble members; the control member is
-# a tenth to a twentieth of that, and KENDA ships nothing else.
+# A forecast download is the control member of the newest complete run: the
+# newest run outright is published lead by lead over more than an hour. The
+# listing is oldest first, so the first page this used to stop at was the
+# oldest run at lead 0 — files about to expire. The whole run is ~85 GB for
+# ICON-CH1 and ~145 GB for ICON-CH2, almost all of it ensemble members; the
+# control member is a tenth to a twentieth of that, and KENDA ships nothing else.
 _download_grib2 = stac_download(
     suffixes=(".grib2", ".grib"),
     title="GRIB2 collection",
@@ -328,21 +330,40 @@ def spec(dataset: str) -> KindSpec:
     return KINDS[kind(dataset)]
 
 
+def _check_time_slices(time_slices: list[str] | tuple[str, ...]) -> None:
+    """Refuse a time-slice token outside the vocabulary, as load() and download() both must.
+
+    Unchecked, a mistyped slice selected nothing and the unsliced files alone
+    came back as if that had been the answer.
+    """
+    if unknown := sorted(set(time_slices) - TIME_SLICES):
+        raise ValueError(f"Invalid time_slice {unknown}. Valid options: {', '.join(sorted(TIME_SLICES))}.")
+
+
 def download(
     dataset: str,
     workspace: Workspace,
     *,
-    time_slice: list[str] | None = None,
+    time_slice: str | list[str] | None = None,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
     force: bool = False,
     fetcher: Fetcher,
 ) -> DownloadResult:
-    """Download *dataset* by whichever path its kind uses."""
-    return spec(dataset).download(
+    """Download *dataset* by whichever path its kind uses.
+
+    ``time_slice`` takes one token or a list, as ``load()`` does. A bare string
+    used to be iterated character by character, so ``"historical"`` matched no
+    slice at all and only the unsliced files were fetched.
+    """
+    kind_spec = spec(dataset)
+    time_slices = [time_slice] if isinstance(time_slice, str) else list(time_slice or [])
+    time_slices = time_slices or [DEFAULT_TIME_SLICE]
+    _check_time_slices(time_slices)
+    return kind_spec.download(
         dataset,
         workspace,
-        time_slice=time_slice or [DEFAULT_TIME_SLICE],
+        time_slice=time_slices,
         since=since,
         workers=workers,
         force=force,
@@ -389,8 +410,7 @@ def validate_load(dataset: str, filters: Filters) -> Reader:
     # these two sets.
     if filters.granularities and (unknown := sorted(filters.granularities - GRANULARITIES)):
         raise ValueError(f"Invalid frequency {unknown}. Valid options: {', '.join(sorted(GRANULARITIES))}.")
-    if unknown_slices := sorted(set(filters.time_slices) - TIME_SLICES):
-        raise ValueError(f"Invalid time_slice {unknown_slices}. Valid options: {', '.join(sorted(TIME_SLICES))}.")
+    _check_time_slices(filters.time_slices)
     if not kind_spec.supports_calendar_filters and filters.has_calendar_filter:
         raise ValueError(
             f"Dataset {dataset!r} uses nominal 30-year dates (0001..0030); "
@@ -484,9 +504,21 @@ def write_zarr(
 
 
 def convert(dataset: str, workspace: Workspace) -> int:
-    """Convert *dataset* to Parquet, or return 0 for a kind that has no Parquet path."""
+    """Convert *dataset* to Parquet, or return 0 for a kind that has no Parquet path.
+
+    Holds the Dataset's Bronze lock, which the download paths hold while they
+    publish its data files. The converters judge an output current by mtime, so
+    a source replaced while its old bytes were still being read left Parquet
+    newer than the new source, and every later run skipped it as up to date.
+    """
     converter = spec(dataset).convert
-    return 0 if converter is None else converter(dataset, workspace)
+    bronze = workspace.bronze(dataset)
+    # Nothing downloaded means nothing to convert, and the lock would create
+    # the directory it guards.
+    if converter is None or not bronze.is_dir():
+        return 0
+    with coherence.refresh_lock(bronze):
+        return converter(dataset, workspace)
 
 
 def tabular_datasets() -> list[str]:

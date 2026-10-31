@@ -371,11 +371,13 @@ def _refresh(
 
     # Marked before a byte moves. A process killed outright between publishing
     # one file and the next never reaches an exception handler, so a marker
-    # written only on failure was never there when it mattered most.
+    # written only on failure was never there when it mattered most. Only the
+    # files being replaced are marked: the rest keep their generation, and
+    # marking them made one failed file cost the whole set on the next open.
     refreshing = [asset.name for asset in matched if not skip(asset, out_dir / asset.name)]
     marked = len(matched) > 1 and bool(refreshing)
     if marked:
-        coherence.mark(out_dir, names)
+        coherence.mark(out_dir, refreshing)
 
     # ``on_error="raise"`` rather than the download paths' count-and-continue: a
     # grid read cannot proceed on a partial set, so the first failure is fatal.

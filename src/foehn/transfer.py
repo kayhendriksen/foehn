@@ -21,13 +21,15 @@ one meaning, and ``downloaded + skipped + failed == total_assets`` holds.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -108,6 +110,25 @@ def exists(_asset: Asset, filepath: Path) -> bool:
     return filepath.exists()
 
 
+# How far a file's mtime may sit below the ``updated`` it was dated with and
+# still count as that revision. A filesystem that keeps whole (or even) seconds
+# rounds the date down, and without slack it would read as stale on every run.
+_MTIME_SLACK = timedelta(seconds=2)
+
+
+def _upstream_revision(asset: Asset) -> datetime | None:
+    """When MeteoSwiss last restated *asset*, or None if the listing does not say."""
+    if not asset.updated:
+        return None
+    try:
+        moment = datetime.fromisoformat(asset.updated)
+    except ValueError:
+        return None
+    # STAC timestamps are UTC. One written without its offset raised a
+    # TypeError comparing naive with aware, which ended the whole download.
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
 def already_current(asset: Asset, filepath: Path) -> bool:
     """A :data:`SkipRule`: is the local copy of *asset* up to date?
 
@@ -115,28 +136,46 @@ def already_current(asset: Asset, filepath: Path) -> bool:
     (CPCH) replaces the original CPC hourly file with the same filename
     ~8 days later. A plain :func:`exists` check would leave the stale version
     on disk; comparing the STAC "updated" timestamp against local mtime
-    picks up those server-side updates.
+    picks up those server-side updates. :func:`stream_to_disk` dates each file
+    by the revision it holds, so the mtime answers "which revision", not "when
+    did the transfer end".
     """
     if not filepath.exists():
         return False
-    if not asset.updated:
+    remote_dt = _upstream_revision(asset)
+    if remote_dt is None:
         return True
     try:
-        remote_dt = datetime.fromisoformat(asset.updated)
         local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
-    except (ValueError, OSError):
+    except OSError:
         return True
-    if remote_dt.tzinfo is None:
-        # STAC timestamps are UTC. One written without its offset raised a
-        # TypeError comparing naive with aware, which ended the whole download.
-        remote_dt = remote_dt.replace(tzinfo=UTC)
-    return remote_dt <= local_dt
+    return remote_dt <= local_dt + _MTIME_SLACK
+
+
+def _date_by_revision(path: Path, asset: Asset) -> None:
+    """Set *path*'s mtime to the ``updated`` of the revision it was fetched as.
+
+    Dated by when the transfer ended, a file whose correction was published
+    while the old bytes were still streaming finished *after* that correction,
+    and :func:`already_current` took it for the correction from then on. Dated
+    by the ``updated`` that chose it, the correction is newer and gets fetched.
+    Best effort: where the filesystem refuses, the file keeps its completion
+    time, which is what every file had before.
+    """
+    revision = _upstream_revision(asset)
+    if revision is None:
+        return
+    with contextlib.suppress(OSError):
+        os.utime(path, (path.stat().st_atime, revision.timestamp()))
 
 
 def stream_to_disk(fetcher: Fetcher, asset: Asset, path: Path, _etag: str | None) -> WriteResult:
     """Stream a binary Asset through Staging, independent of its Fetcher Adapter."""
     with atomicwrite.staged(path, suffix=".transfer") as staged:
         fetcher.stream(asset.href, staged)
+    # Dated once published, not while staged: a stage carrying an old revision's
+    # date looks abandoned to a process reaping stale stages.
+    _date_by_revision(path, asset)
     return WriteResult(downloaded=True)
 
 
