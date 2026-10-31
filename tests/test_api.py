@@ -949,6 +949,29 @@ def test_date_to_with_explicit_time_stays_an_exact_bound():
     assert len(out) == 2
 
 
+def test_a_bare_date_to_accepts_a_date_from_later_that_same_day():
+    """Validated against midnight while the filter takes the whole day, the valid query was refused."""
+    from foehn.readers import Filters, apply_time_filters
+
+    df = pl.DataFrame({"station_abbr": ["BER"] * 2, "reference_timestamp": ["2025-08-31 11:00", "2025-08-31 13:00"]})
+    df = df.with_columns(pl.col("reference_timestamp").str.to_datetime())
+
+    out = apply_time_filters(df, Filters.build(date_from="2025-08-31T12:00:00", date_to="2025-08-31"))
+
+    assert out["reference_timestamp"].dt.hour().to_list() == [13]
+
+
+@pytest.mark.parametrize(
+    ("date_from", "date_to"),
+    [("2025-09-01", "2025-08-31"), ("2025-09-01T00:00:00", "2025-08-31"), ("2025-08-31T12:00:01", "2025-08-31T12:00")],
+)
+def test_a_date_from_after_date_to_is_still_refused(date_from, date_to):
+    from foehn.readers import Filters
+
+    with pytest.raises(ValueError, match="date_from must be before or equal to date_to"):
+        Filters.build(date_from=date_from, date_to=date_to)
+
+
 def test_date_filter_on_date_typed_column_does_not_raise():
     """date_from/date_to must work when reference_timestamp parsed as Date, not Datetime."""
     from datetime import date

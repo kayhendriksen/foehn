@@ -196,7 +196,7 @@ def stac_download(
                 return result
         if latest_run and (run := latest_run_of(every)) is not None:
             available = len({a.forecast_run for a in every if a.forecast_run is not None})
-            logger.info("  Latest forecast run: %s (of %d available)", run, available)
+            logger.info("  Newest complete forecast run: %s (of %d listed)", run, available)
 
         # The same coherence protocol the read path speaks. This writes into the
         # very directory a grid read opens from, and replacing several files one
@@ -225,8 +225,17 @@ def stac_download(
             forced = coherence.blocked(out_dir, names) if coherent else set()
             run_skip = _skip_except(skip, forced) if forced else skip
 
-            if coherent and len(names) > 1:
-                coherence.mark(out_dir, names)
+            # Only the files this run replaces can leave the set mixed; the rest
+            # are not touched and keep the generation they had. Marking the whole
+            # set made one failed file cost a re-download of every other one on
+            # the next run — for radar, a whole day of composites over one 404.
+            refreshing = [
+                asset.name
+                for asset in (wanted if coherent else [])
+                if run_skip is None or not run_skip(asset, out_dir / asset.name)
+            ]
+            if len(names) > 1 and refreshing:
+                coherence.mark(out_dir, refreshing)
             fetched = fetch_all(
                 wanted,
                 out_dir,
@@ -285,12 +294,15 @@ def download_normals_zip(
     """
     out_dir = workspace.bronze(dataset)
     asset = Asset.from_stac("normals", {"href": CLIMATE_NORMALS_ZIP_URL})
-    if not force and materialization_current(asset, out_dir):
-        logger.info("  %s already downloaded and extracted — skipping", dataset)
-        return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
+    # The Dataset's lock, which a conversion holds while it reads: publication
+    # replaces the whole directory it would be reading from.
+    with coherence.refresh_lock(out_dir):
+        if not force and materialization_current(asset, out_dir):
+            logger.info("  %s already downloaded and extracted — skipping", dataset)
+            return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
-    _banner("Climate normals (C6): fixed-URL ZIP", out_dir)
-    return materialize_archive(asset, out_dir, fetcher=fetcher, force=force, timeout=120)
+        _banner("Climate normals (C6): fixed-URL ZIP", out_dir)
+        return materialize_archive(asset, out_dir, fetcher=fetcher, force=force, timeout=120)
 
 
 # --- Indoor climate scenarios ZIP (single .csv.zip of per-station CSVs) ---
@@ -316,9 +328,11 @@ def download_indoor_zip(
         logger.warning("  No .zip asset found for %s", dataset)
         return DownloadResult()
 
-    if not force and materialization_current(archive, out_dir):
-        logger.info("  %s already extracted and current — skipping", dataset)
-        return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
+    # Held for the same reason as download_normals_zip's.
+    with coherence.refresh_lock(out_dir):
+        if not force and materialization_current(archive, out_dir):
+            logger.info("  %s already extracted and current — skipping", dataset)
+            return DownloadResult(total_assets=1, downloaded=0, skipped=1, filenames=[])
 
-    _banner(f"Indoor scenarios: {collection_id}", out_dir)
-    return materialize_archive(archive, out_dir, fetcher=fetcher, force=force, timeout=300)
+        _banner(f"Indoor scenarios: {collection_id}", out_dir)
+        return materialize_archive(archive, out_dir, fetcher=fetcher, force=force, timeout=300)

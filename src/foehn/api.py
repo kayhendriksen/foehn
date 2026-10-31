@@ -70,7 +70,7 @@ def download(
     dataset: str,
     *,
     data_dir: Path | str | None = None,
-    time_slice: list[str] | None = None,
+    time_slice: str | list[str] | None = None,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
     force: bool = False,
@@ -80,10 +80,11 @@ def download(
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
-        time_slice: Time slices to download. Options: $time_slices.
-            Defaults to ["$default_time_slice"]. Ignored for binary/grid datasets:
-            NetCDF and radar fetch what the collection holds, and GRIB2 forecasts
-            fetch the control member of the newest run (~8 GB for ICON-CH1).
+        time_slice: Time slice(s) to download. Options: $time_slices.
+            Defaults to ["$default_time_slice"]. Can be a single string or list.
+            Ignored for binary/grid datasets: NetCDF and radar fetch what the
+            collection holds, and GRIB2 forecasts fetch the control member of the
+            newest complete run (~8 GB for ICON-CH1).
         since: ISO timestamp for incremental updates — only assets updated after
             it are fetched. This function does not track state itself: pass the
             previous run's timestamp, or use the ``foehn download`` CLI, which
@@ -326,7 +327,10 @@ def open_dataset(
     file(s) are fetched in full to ``data_dir/bronze/<dataset>/`` on first use,
     then opened and read from that local copy. It is not cloud-lazy — there is no
     byte-range/partial read of the remote file, so the first call pays the full
-    file size up front. Subsequent calls reuse the cache.
+    file size up front. Subsequent calls reuse the cache. A ``match`` spanning
+    several NetCDF files stays lazy only with dask installed (it is not part of
+    the 'grids' extra): without it, combining the files reads their values into
+    memory on open, and foehn warns when that is over 1 GB.
 
     GRIB2 and radar (HDF5) collections **require** ``match``, and it must resolve
     to a *single* file:

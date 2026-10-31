@@ -164,8 +164,14 @@ def test_scan_and_collect_joins_forecast_files_per_point_and_time(tmp_path):
 
 
 def test_scan_and_collect_eager_fallback_also_joins_forecast_files(tmp_path, monkeypatch):
-    def boom(*args, **kwargs):
-        raise pl.exceptions.ComputeError("streaming collect failed")
+    collect = pl.LazyFrame.collect
+
+    # Only the streaming collect fails: eager DataFrame methods run through
+    # LazyFrame.collect on newer Polars, so failing every call broke the fallback too.
+    def boom(self, *args, **kwargs):
+        if kwargs.get("engine") == "streaming":
+            raise pl.exceptions.ComputeError("streaming collect failed")
+        return collect(self, *args, **kwargs)
 
     monkeypatch.setattr(pl.LazyFrame, "collect", boom)
 
@@ -299,10 +305,84 @@ def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
     assert (ok, skip, failed) == (2, 0, 0)
     # 2 files × chunk_size=1 (overwrite + append) + 1 meta write = 3
     assert mock_spark.createDataFrame.call_count == 3
-    # Both chunks went to the staging table, which then replaced the table once.
-    mock_spark.table.assert_any_call("`main`.`meteoswiss`.`smn_d_recent__foehn_staging`")
+    # Both chunks went to this run's staging table, which then replaced the table once.
+    read_back = [call.args[0] for call in mock_spark.table.call_args_list]
+    assert any(_STAGING_RE.fullmatch(name) for name in read_back)
     published = mock_spark.table.return_value.write.mode.return_value.option.return_value.saveAsTable
     published.assert_called_once_with("`main`.`meteoswiss`.`smn_d_recent`")
+
+
+_STAGING_RE = re.compile(r"`main`\.`meteoswiss`\.`smn_d_recent__foehn_staging_[0-9a-f]{12}`")
+
+
+class _TableStore:
+    """Just enough of a SparkSession to keep tables, so overlapping runs can be observed."""
+
+    def __init__(self):
+        self.tables: dict[str, pl.DataFrame] = {}
+
+    def createDataFrame(self, arrow):  # noqa: N802 - Spark's name
+        return _Frame(self, pl.from_arrow(arrow))
+
+    def table(self, name):
+        return _Frame(self, self.tables[name])
+
+    def sql(self, statement):
+        if statement.startswith("DROP TABLE IF EXISTS "):
+            self.tables.pop(statement.removeprefix("DROP TABLE IF EXISTS "), None)
+
+
+class _Frame:
+    def __init__(self, store, frame):
+        self.store, self.frame, self._mode = store, frame, "error"
+
+    @property
+    def write(self):
+        return self
+
+    def mode(self, mode):
+        self._mode = mode
+        return self
+
+    def option(self, *_):
+        return self
+
+    def saveAsTable(self, name):  # noqa: N802 - Spark's name
+        existing = self.store.tables.get(name)
+        appending = self._mode == "append" and existing is not None
+        self.store.tables[name] = pl.concat([existing, self.frame]) if appending else self.frame
+
+
+def test_overlapping_chunked_ingests_each_publish_a_complete_table(smn_bronze_dir):
+    """Two runs shared one staging table, and each overwrote, appended to and dropped the other's chunks.
+
+    The second run happens entirely between the first run's two chunks here, which
+    is the interleaving that published a table made of one chunk.
+    """
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    store = _TableStore()
+    state = {"scans": 0, "inner": False}
+
+    def scan(key, files, metadata_types):
+        state["scans"] += 1
+        if state["scans"] == 2:  # the outer run's second chunk: run a whole other ingest first
+            state["inner"] = True
+            inner = _ingest_collection(
+                store, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", chunked=True, chunk_size=1
+            )
+            state["inner"] = False
+            assert tuple(inner)[2] == 0
+        return pl.DataFrame({"run": ["inner" if state["inner"] else "outer"], "chunk": [state["scans"]]})
+
+    with patch("scripts.ingest_delta._scan_and_collect", side_effect=scan):
+        outer = _ingest_collection(
+            store, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", chunked=True, chunk_size=1
+        )
+
+    assert tuple(outer)[2] == 0
+    published = store.tables["`main`.`meteoswiss`.`smn_d_recent`"]
+    assert published["run"].to_list() == ["outer", "outer"]
+    assert not [name for name in store.tables if "__foehn_staging" in name]
 
 
 def _written_tables(spark):
@@ -486,7 +566,21 @@ def test_a_failed_later_chunk_leaves_the_published_table_alone(smn_bronze_dir, m
     assert failed == 1  # the data group; the meta table was written before it
     assert written == ["`main`.`meteoswiss`.`smn_meta_parameters`"]
     mock_spark.table.return_value.write.mode.return_value.option.return_value.saveAsTable.assert_not_called()
-    mock_spark.sql.assert_any_call("DROP TABLE IF EXISTS `main`.`meteoswiss`.`smn_d_recent__foehn_staging`")
+    dropped = [call.args[0].removeprefix("DROP TABLE IF EXISTS ") for call in mock_spark.sql.call_args_list]
+    assert any(_STAGING_RE.fullmatch(name) for name in dropped)
+
+
+@pytest.mark.parametrize("size", ["0", "-1"])
+def test_a_chunk_size_below_one_is_refused_before_spark(size, capsys):
+    """Zero stopped range() mid-run; a negative size published a staging table it never wrote."""
+    with (
+        patch("sys.argv", ["ingest_delta.py", "--historical", "--chunk-size", size]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+
+    assert exited.value.code == 2
+    assert "must be at least 1" in capsys.readouterr().err
 
 
 def test_a_write_failure_is_reported_with_its_reason(smn_bronze_dir, mock_spark, capsys):
@@ -509,7 +603,7 @@ def test_an_unreadable_normals_file_fails_the_table_instead_of_shrinking_it(clim
 
 def test_main_exits_non_zero_when_a_table_fails(smn_bronze_dir, capsys):
     """The scheduled job reported success over stale tables: failures were "skipped"."""
-    pytest.importorskip("pyspark")  # main() imports SparkSession before anything else
+    pytest.importorskip("pyspark")  # main() imports SparkSession once its arguments parse
     from foehn.workspace import Workspace
 
     workspace = Workspace(smn_bronze_dir / "volume")

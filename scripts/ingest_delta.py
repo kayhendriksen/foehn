@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import os
 import re
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,8 +135,15 @@ def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mo
 
 
 def _staging_table(table: str) -> str:
-    """The sibling a chunked group is built in before it replaces *table*."""
-    return f"{table[:-1]}__foehn_staging`"
+    """A sibling, unique to this run, that a chunked group is built in before it replaces *table*.
+
+    Unique because two overlapping ingests shared one fixed name: each
+    overwrote, appended to, published and dropped the other's chunks, and both
+    reported a table neither had built. A run killed outright leaves its own
+    ``<table>__foehn_staging_<id>`` behind; nothing publishes it, and it can be
+    dropped by hand.
+    """
+    return f"{table[:-1]}__foehn_staging_{uuid.uuid4().hex[:12]}`"
 
 
 def _publish_staged(spark: SparkSession, staging: str, table: str) -> None:
@@ -401,9 +409,20 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
     return Tally(written=1)
 
 
-def main() -> None:
-    from pyspark.sql import SparkSession
+def _chunk_size(value: str) -> int:
+    """``--chunk-size``, refused below 1 before Spark starts or a table is touched.
 
+    Zero stopped ``range()`` part-way through a run, and a negative size skipped
+    the chunk loop and went straight to publishing a staging table it had never
+    written.
+    """
+    size = int(value)
+    if size < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {size}")
+    return size
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest MeteoSwiss CSVs → Delta tables via Polars + Spark.")
     parser.add_argument("--catalog", default="main")
     parser.add_argument("--schema", default="meteoswiss")
@@ -423,7 +442,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--chunk-size",
-        type=int,
+        type=_chunk_size,
         default=DEFAULT_CHUNK_SIZE,
         help=f"Station files per chunk for large historical collections (default: {DEFAULT_CHUNK_SIZE})",
     )
@@ -432,6 +451,10 @@ def main() -> None:
     cat = _validate_identifier(args.catalog, "catalog")
     sch = _validate_identifier(args.schema, "schema")
     vol = _validate_identifier(args.volume, "volume")
+
+    # Imported once the arguments are known to be good, so a bad one is
+    # refused without pyspark being importable at all.
+    from pyspark.sql import SparkSession
 
     spark = SparkSession.builder.appName("foehn-ingest").getOrCreate()
     spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")

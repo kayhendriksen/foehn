@@ -110,6 +110,8 @@ _Avoid_: resolution, interval
 **Forecast run**:
 The `YYYYMMDDHHMM` issue time embedded in a forecast **Asset**'s filename — when
 the forecast was made. Sorts lexicographically, so the newest run is `max()`.
+A run is published file by file, so "the latest run" means the newest *complete*
+one: the newest run with at least as many files as most listed runs have.
 _Avoid_: reference timestamp, forecast time
 
 **Reference timestamp**:

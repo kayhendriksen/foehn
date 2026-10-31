@@ -5,8 +5,8 @@ the file; the cell centres live in a separate horizontal-constants asset on the
 collection. Joining the two is upstream's convention, so it sits below the grid
 reader that needs it — :mod:`foehn.odim`'s counterpart for the GRIB2 kind.
 
-The parsed coordinates are memoised for the life of the process, which is the
-one piece of state in the grid path. :func:`clear_cache` is part of the
+The parsed coordinates are memoised per revision of the constants file, which
+is the one piece of state in the grid path. :func:`clear_cache` is part of the
 interface for that reason: the test suite has to reset it between tests, and
 reaching into a module global to do that is not an interface.
 """
@@ -31,11 +31,12 @@ if TYPE_CHECKING:
     import xarray as xr
 
 # Parsed ICON/KENDA cell lat/lon — the constants GRIB is ~11 MB and the same grid
-# for every field in a collection, so parse it once. Keyed by (dataset,
-# workspace root): the constants file is resolved inside the workspace, so
-# keying on the dataset alone hands a second workspace the first one's
-# coordinates.
-_COORDS_CACHE: dict[tuple[str, str], tuple] = {}
+# for every field in a collection, so parse it once per revision. Keyed by
+# (dataset, workspace root): the constants file is resolved inside the
+# workspace, so keying on the dataset alone hands a second workspace the first
+# one's coordinates. Stored beside the identity of the file they were parsed
+# from — path, size, mtime — which is what says whether they still apply.
+_COORDS_CACHE: dict[tuple[str, str], tuple[tuple[str, int, int], tuple]] = {}
 
 
 def constants_file(dataset: str, workspace: Workspace, *, fetcher: Fetcher) -> Path | None:
@@ -120,31 +121,40 @@ def unstructured_lonlat(
     """Return (lat, lon) cell-centre arrays for an ICON/KENDA grid, or (None, None).
 
     Read from the collection's horizontal-constants GRIB (``tlat``/``tlon`` on
-    the same ``values`` dimension as the forecast fields). Cached per collection.
+    the same ``values`` dimension as the forecast fields). Cached per revision
+    of that file: :func:`constants_file` checks it against the collection on
+    every call, and a parse is reused only while the file on disk is the one it
+    came from. Answered from memory before that check, a long-running process
+    attached the first coordinates it ever parsed to every later field, however
+    the collection had restated them since.
     """
+    path = constants_file(dataset, workspace, fetcher=fetcher)
+    if path is None:
+        # With no constants there is nothing for cfgrib to do, and the grid is
+        # returned without coordinates.
+        return None, None
+    stat = path.stat()
+    revision = (str(path), stat.st_size, stat.st_mtime_ns)
     cache_key = (dataset, str(workspace.root))
-    if cache_key in _COORDS_CACHE:
-        return _COORDS_CACHE[cache_key]
+    cached = _COORDS_CACHE.get(cache_key)
+    if cached is not None and cached[0] == revision:
+        return cached[1]
+
+    import cfgrib
 
     lat = lon = None
-    path = constants_file(dataset, workspace, fetcher=fetcher)
-    if path is not None:
-        # Only once there is a file to read: with no constants there is nothing
-        # for cfgrib to do, and the grid is returned without coordinates.
-        import cfgrib
-
-        with quiet_cfgrib():
-            constants = cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
-        for ds in constants:
-            if "tlat" in ds.variables:
-                lat = ds["tlat"].values
-            if "tlon" in ds.variables:
-                lon = ds["tlon"].values
+    with quiet_cfgrib():
+        constants = cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
+    for ds in constants:
+        if "tlat" in ds.variables:
+            lat = ds["tlat"].values
+        if "tlon" in ds.variables:
+            lon = ds["tlon"].values
     # Only memoise a real answer. Caching the (None, None) from a transient
     # failure — offline, a half-written constants file — would poison every
     # later open in this process with an ungeoreferenced grid.
     if lat is not None and lon is not None:
-        _COORDS_CACHE[cache_key] = (lat, lon)
+        _COORDS_CACHE[cache_key] = (revision, (lat, lon))
     return lat, lon
 
 
@@ -177,10 +187,13 @@ def attach_lonlat(ds: xr.Dataset, dataset: str, workspace: Workspace, *, fetcher
             stacklevel=2,
         )
         return ds
-    return ds.assign_coords(
+    attached = ds.assign_coords(
         lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
         lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
     )
+    # A new Dataset, which xarray does not hand the source's closer.
+    attached.set_close(ds.close)
+    return attached
 
 
 def clear_cache() -> None:
