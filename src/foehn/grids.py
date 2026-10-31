@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import xarray as xr
+    from xarray import Dataset as XrDataset  # for scopes where a parameter named ``xr`` hides the module
 
 
 # --- Optional dependencies -------------------------------------------------
@@ -684,7 +685,7 @@ def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kw
     label their time axis "years since 1991-01-01", which is not CF-compliant.
     """
 
-    def _do(*, decode_times: bool) -> xr.Dataset:
+    def _do(*, decode_times: bool) -> XrDataset:
         kwargs: dict = {"engine": engine, "decode_times": decode_times}
         if backend_kwargs:
             kwargs["backend_kwargs"] = backend_kwargs
