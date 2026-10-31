@@ -29,6 +29,16 @@ def test_a_marker_that_cannot_be_understood_blocks(tmp_path, content):
     assert coherence.read_pending(out_dir) is None
 
 
+def test_a_marker_that_is_not_utf8_blocks(tmp_path):
+    """A torn write can leave bytes that do not decode; that blocked by raising instead."""
+    out_dir = tmp_path / "bronze" / "surface_derived_grid"
+    out_dir.mkdir(parents=True)
+    (out_dir / coherence.MARKER).write_bytes(b'{"pending": ["a_rhiresd.nc"]}\xff\xfe')
+
+    assert coherence.read_pending(out_dir) is None
+    assert coherence.blocked(out_dir, ["a_rhiresd.nc"]) == {"a_rhiresd.nc"}
+
+
 def test_clearing_leaves_an_unreadable_marker_alone(tmp_path):
     """Replacing it with a guess would release whatever it was protecting."""
 

@@ -6,9 +6,10 @@ engine="streaming" to keep peak memory low — even for collections that
 exceed RAM (e.g. SMN historical ~20 GB of 10-minute data).
 
 The resulting DataFrame is converted to a Spark DataFrame via Arrow
-(zero-copy) and written to a Delta table.  For large collections in
-historical mode, station files are chunked so that each Arrow→Spark
-transfer stays manageable.
+(zero-copy) and written to a Delta table.  The historical time slice is
+only ingested in historical mode (``--historical``), where station files of
+the large collections are chunked so that each Arrow→Spark transfer stays
+manageable; the daily pass leaves those tables alone.
 
 After writing each table, column comments are set from the English
 metadata descriptions in _meta_parameters.csv.
@@ -219,12 +220,16 @@ def _ingest_collection(
     catalog: str,
     schema: str,
     *,
+    historical: bool = False,
     chunked: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> Tally:
     """Ingest a single collection's CSVs into Delta tables.
 
-    Returns how many tables were written, skipped for lack of input, and failed.
+    The historical groups are only ingested when *historical* is set: Bronze
+    keeps them after a backfill, and they change once a year.
+
+    Returns how many tables were written, skipped, and failed.
     """
     metadata_types = load_metadata_types(csv_dir)
     groups = group_csv_files(csv_dir, key)
@@ -238,6 +243,14 @@ def _ingest_collection(
     for group_key, files in sorted(groups.items()):
         tbl_name = f"{key}{_table_suffix(group_key)}"
         table = f"{catalog}.{schema}.`{tbl_name}`"
+
+        if "historical" in group_key and not historical:
+            # The daily pass used to rebuild these every day once a backfill
+            # had left them in Bronze — SMN's alone is ~20 GB of 10-minute
+            # values, read in one piece because only --historical chunks it.
+            print(f"  --  {tbl_name:25s}   skipped (historical; ingested by --historical)", flush=True)
+            tally.skipped += 1
+            continue
 
         try:
             if chunked and key in LARGE_COLLECTIONS and len(files) > chunk_size:
@@ -282,6 +295,11 @@ def _ingest_collection(
 
 RADAR_COLLECTIONS = ("radar_precip", "radar_hail")
 
+# The product prefix of a radar filename, matched in either case and reported in
+# upper case: MeteoSwiss names the files ``cpc2630112000_00060.001.h5``, so an
+# uppercase-only pattern matched nothing and every product came back empty.
+RADAR_PRODUCT_PATTERN = "^[A-Za-z]+"
+
 
 def _ingest_radar(
     spark: SparkSession,
@@ -316,7 +334,7 @@ def _ingest_radar(
                 # CombiPrecip reanalysis (CPCH) shares CPC's filename, so it stays "CPC"
                 # here — distinguish reanalysis via modification_time, which trails the
                 # product time embedded in the filename by ~8 days.
-                "regexp_extract(element_at(split(path, '/'), -1), '^[A-Z]+', 0) as product",
+                f"upper(regexp_extract(element_at(split(path, '/'), -1), '{RADAR_PRODUCT_PATTERN}', 0)) as product",
                 "modificationTime as modification_time",
                 "length as size_bytes",
             )
@@ -331,7 +349,9 @@ def _ingest_radar(
 
         view = f"_{key}_new"
         new_df.createOrReplaceTempView(view)
-        # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too).
+        # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too),
+        # and rows whose product an earlier version left empty — it matched only
+        # uppercase names, and MeteoSwiss's are lowercase.
         # The interpolated names are not user-controlled SQL: `table` is built from
         # `cat`/`sch`, which both passed _validate_identifier (alphanumerics, underscore,
         # hyphen; backtick-quoted), and from `key`, which the caller constrains to
@@ -339,8 +359,9 @@ def _ingest_radar(
         # suppression on the MERGE below.
         merge_sql = (
             f"MERGE INTO {table} t USING {view} s ON t.path = s.path "  # nosec B608
-            "WHEN MATCHED AND s.modification_time > t.modification_time THEN UPDATE SET "
-            "  modification_time = s.modification_time, size_bytes = s.size_bytes "
+            "WHEN MATCHED AND (s.modification_time > t.modification_time "
+            "  OR t.product IS DISTINCT FROM s.product) THEN UPDATE SET "
+            "  product = s.product, modification_time = s.modification_time, size_bytes = s.size_bytes "
             "WHEN NOT MATCHED THEN INSERT *"
         )
         spark.sql(merge_sql)
@@ -390,7 +411,7 @@ def main() -> None:
     parser.add_argument(
         "--historical",
         action="store_true",
-        help="Enable chunked writes for large collections (SMN, etc.)",
+        help="Also ingest the historical time slice, with chunked writes for large collections (SMN, etc.)",
     )
     parser.add_argument(
         "--radar",
@@ -452,6 +473,7 @@ def main() -> None:
             csv_dir,
             cat,
             sch,
+            historical=args.historical,
             chunked=args.historical,
             chunk_size=args.chunk_size,
         )

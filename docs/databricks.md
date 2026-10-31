@@ -48,9 +48,9 @@ databricks bundle deploy -t prod
 
 This deploys two jobs:
 
-**`foehn_daily`** -- runs at 13:30 UTC every day. Downloads the recent time slice and refreshes Delta tables.
+**`foehn_daily`** -- runs at 13:30 UTC every day. Downloads the recent time slice and refreshes Delta tables. It leaves the `*_historical` tables alone, even though the backfill's CSVs stay in the volume.
 
-**`foehn_historical`** -- paused by default. Trigger manually for the initial backfill or on January 1 for the annual archive slice.
+**`foehn_historical`** -- paused by default. Trigger manually for the initial backfill or on January 1 for the annual archive slice. The only job that writes the `*_historical` tables.
 
 ## Published table semantics
 

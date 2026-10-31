@@ -68,7 +68,9 @@ def read_pending(out_dir: Path) -> set[str] | None:
         raw = (out_dir / MARKER).read_text(encoding="utf-8")
     except FileNotFoundError:
         return set()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Bytes that are not UTF-8 are as unreadable as a failed read. Raised,
+        # they surfaced as a decode error from whichever read or refresh asked.
         return None
     try:
         recorded = json.loads(raw)

@@ -101,7 +101,8 @@ def stac_download(
     write: Writer = stream_to_disk,
     skip: SkipRule | None = None,
     etags: bool = False,
-    max_items: int | None = None,
+    list_items: Callable[[str, Fetcher], list[dict]] | None = None,
+    excludes: str | None = None,
     time_sliced: bool = False,
     latest_run: bool = False,
     with_metadata: bool = False,
@@ -128,12 +129,18 @@ def stac_download(
             straight to disk for binaries.
         skip: Decided locally before anything is queued.
         etags: Whether this kind keeps an ETag store (the conditional-GET path).
-        max_items: Stop paginating early. The ephemeral collections only ever
-            want the newest page.
+        list_items: How to list the Collection, for a kind whose plain walk is
+            too slow — the GRIB2 forecasts are one item per file. Defaults to
+            :meth:`~foehn.fetch.Fetcher.items`. Not a ``max_items`` shortcut:
+            the API lists oldest first, so a truncated walk only ever reached the
+            oldest run, whose files were already expiring.
+        excludes: Drop assets whose name contains this, e.g. the ensemble
+            members of a forecast run.
         time_sliced: Whether ``time_slice`` narrows this kind's assets. False
             where the filenames carry no slice.
-        latest_run: Keep only the newest **Forecast run**. One run is ~32 files
-            at ~30 MB, and the retained window is ~40 of them.
+        latest_run: Keep only the newest **Forecast run**. A forecast_local run
+            is ~32 CSVs at ~30 MB; an ICON-CH1 run's control member is ~3,500
+            GRIB2 files at ~2 MB.
         with_metadata: Whether the collection-level metadata files are fetched
             in the same pass and reported as one result.
         coherent: Whether this kind's files are read as a *set*, so a half-done
@@ -161,12 +168,12 @@ def stac_download(
         out_dir = workspace.bronze(dataset)
         _banner(f"{title}: {collection_id}", out_dir)
 
-        items = fetcher.items(collection_id, max_items=max_items)
-        logger.info("  Found %d items%s", len(items), " (latest page)" if max_items else "")
+        items = fetcher.items(collection_id) if list_items is None else list_items(collection_id, fetcher)
+        logger.info("  Found %d items", len(items))
 
         # ``every`` is the full pre-filter set — the prune universe below, so
         # ETags for slices outside this run's time_slice are kept.
-        every = assets_of(items, suffixes=suffixes)
+        every = assets_of(items, suffixes=suffixes, excludes=excludes)
         wanted = select(
             every,
             time_slices=time_slice if time_sliced else None,

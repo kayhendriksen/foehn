@@ -218,6 +218,14 @@ def test_a_missing_file_is_never_current(tmp_path):
     assert already_current(asset, tmp_path / "absent.h5") is False
 
 
+@pytest.mark.parametrize(("updated", "current"), [("2000-01-01T00:00:00", True), ("2999-01-01T00:00:00", False)])
+def test_an_updated_stamp_without_an_offset_is_read_as_utc(tmp_path, updated, current):
+    """Compared as given, a naive stamp raised a TypeError that ended the whole download."""
+    path = tmp_path / "f.h5"
+    path.write_bytes(b"x")
+    assert already_current(Asset.from_stac("d", {"href": "https://x/f.h5", "updated": updated}), path) is current
+
+
 def test_a_legacy_marker_is_rewritten_before_it_is_trusted(tmp_path):
     """Accepting a pre-0.5 marker is not enough to make it safe.
 

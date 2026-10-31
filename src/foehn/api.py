@@ -81,8 +81,9 @@ def download(
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
         time_slice: Time slices to download. Options: $time_slices.
-            Defaults to ["$default_time_slice"]. Ignored for binary/grid datasets
-            (GRIB2/NetCDF), which fetch the latest assets.
+            Defaults to ["$default_time_slice"]. Ignored for binary/grid datasets:
+            NetCDF and radar fetch what the collection holds, and GRIB2 forecasts
+            fetch the control member of the newest run (~8 GB for ICON-CH1).
         since: ISO timestamp for incremental updates — only assets updated after
             it are fetched. This function does not track state itself: pass the
             previous run's timestamp, or use the ``foehn download`` CLI, which

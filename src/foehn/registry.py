@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -41,7 +42,7 @@ from foehn.downloads import (
     stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
-from foehn.gridfiles import ensure_grid_files
+from foehn.gridfiles import ensure_grid_files, list_forecast
 from foehn.grids import (
     GridReader,
     cube_grib2,
@@ -130,24 +131,32 @@ _download_netcdf = stac_download(
     coherent=True,
 )
 
-# The ephemeral collections only ever want the newest page, and MeteoSwiss
-# overwrites their files in place (CombiPrecip reanalysis reuses a filename
-# ~8 days later), so the skip rule compares timestamps rather than existence.
+# MeteoSwiss overwrites the ephemeral collections' files in place (CombiPrecip
+# reanalysis reuses a filename ~8 days later), so their skip rule compares
+# timestamps rather than existence.
+#
+# A forecast download is the control member of the newest run. The listing is
+# oldest first, so the first page this used to stop at was the oldest run at
+# lead 0 — files about to expire. The whole run is ~85 GB for ICON-CH1 and
+# ~145 GB for ICON-CH2, almost all of it ensemble members; the control member is
+# a tenth to a twentieth of that, and KENDA ships nothing else.
 _download_grib2 = stac_download(
     suffixes=(".grib2", ".grib"),
     title="GRIB2 collection",
     label="binary file",
     skip=already_current,
-    max_items=100,
+    list_items=partial(list_forecast, cache=False),
+    excludes="-perturb",
+    latest_run=True,
     coherent=True,
 )
 
+# Radar items are days, ~16 of them, so the full listing is one page.
 _download_radar = stac_download(
     suffixes=(".h5", ".hdf5"),
     title="Radar collection",
     label="binary file",
     skip=already_current,
-    max_items=100,
     coherent=True,
 )
 

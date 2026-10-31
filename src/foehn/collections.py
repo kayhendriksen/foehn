@@ -270,15 +270,22 @@ def granularity_from_filename(filename: str) -> str | None:
 # column inside the file (the end of each forecast step's aggregation interval).
 _FORECAST_RUN_RE = re.compile(r"^vnut\d+\.lssw\.(\d{12})\.(.+)\.csv$")
 
+# GRIB2 forecast and analysis files carry the run the same way, after the model
+# name and before the lead time in hours:
+# ``icon-ch1-eps-<YYYYMMDDHHMM>-<lead>-<param>-<member>.grib2``.
+_GRIB2_RUN_RE = re.compile(r"^[a-z][a-z0-9-]*?-(\d{12})-\d+-[^/]+\.grib2?$")
+
 
 def forecast_run_from_filename(filename: str) -> str | None:
-    """Return the run timestamp of a forecast CSV asset, or None if unrecognised.
+    """Return the run timestamp of a forecast CSV or GRIB2 asset, or None if unrecognised.
 
-    e.g. ``vnut12.lssw.202607210600.dkl010h0.csv`` → ``"202607210600"``. The
+    e.g. ``vnut12.lssw.202607210600.dkl010h0.csv`` and
+    ``icon-ch1-eps-202607210600-0-t_2m-ctrl.grib2`` → ``"202607210600"``. The
     zero-padded ``YYYYMMDDHHMM`` form sorts lexicographically, so callers can
     pick the newest run by ``max()`` without parsing it into a datetime.
     """
-    match = _FORECAST_RUN_RE.match(filename.rsplit("/", 1)[-1])
+    name = filename.rsplit("/", 1)[-1]
+    match = _FORECAST_RUN_RE.match(name) or _GRIB2_RUN_RE.match(name)
     return match.group(1) if match else None
 
 
