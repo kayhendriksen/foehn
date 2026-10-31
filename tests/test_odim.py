@@ -83,3 +83,21 @@ def test_a_nan_undetect_sentinel_zeroes_nothing(tmp_path):
     assert np.isnan(values[1, 0])  # the raw NaN is left as missing, not read as zero rain
     assert np.isnan(values[0, 2])  # -999 is the nodata sentinel here
     assert values[0, 1] == 1.5
+
+
+def test_the_grid_sits_on_meteoswiss_whole_kilometre_lattice(tmp_path):
+    """The float32 corner put the centres 0.2 m east and 3 m north of the real grid."""
+    path = tmp_path / "cpc.h5"
+    write_odim_composite(path)
+
+    ds = open_composite(xr, path)
+
+    assert list(ds["x"].values) == [2_255_500.0, 2_256_500.0, 2_257_500.0]
+    assert list(ds["y"].values) == [1_479_500.0, 1_478_500.0]
+
+
+def test_the_stated_unit_is_carried_onto_the_variable(tmp_path):
+    path = tmp_path / "cpc.h5"
+    write_odim_composite(path, unit=b"mm")
+
+    assert open_composite(xr, path)["acrr"].attrs["units"] == "mm"

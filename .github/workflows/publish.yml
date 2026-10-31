@@ -30,11 +30,11 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
-      # build and twine come from requirements-publish.txt, locked with hashes:
-      # this job produces what reaches PyPI, so it installs exactly the bytes
-      # that were reviewed. ci.yml's build job reads the same pins — it is this
-      # job's smoke test, and only catches its failures if both run the same
-      # toolchain. twine < 7 rejects Metadata-Version 2.5, which hatchling emits.
+      # build, twine and hatchling come from requirements-publish.txt, locked
+      # with hashes: this job produces what reaches PyPI, so it installs exactly
+      # the bytes that were reviewed. ci.yml's build job reads the same pins — it
+      # is this job's smoke test, and only catches its failures if both run the
+      # same toolchain. twine < 7 rejects Metadata-Version 2.5, which hatchling emits.
       - name: Resolve pinned SBOM tool
         id: pins
         run: scripts/tool_version.sh cyclonedx-bom | sed 's/^version=/cyclonedx=/' >> "$GITHUB_OUTPUT"
@@ -47,7 +47,10 @@ jobs:
             echo "Tag ($TAG) does not match pyproject.toml version ($PKG)"
             exit 1
           fi
-      - run: python3 -m build
+      # --no-isolation builds with the hatchling installed above. An isolated
+      # build resolves `hatchling >= 1.26` from PyPI on the spot, unhashed, and
+      # the backend is the part that actually writes the wheel.
+      - run: python3 -m build --no-isolation
       - run: twine check dist/*
       # CycloneDX SBOM of what actually ships, resolved by installing the built
       # wheel rather than from the pyproject specs. Written outside dist/ — the
@@ -133,7 +136,9 @@ jobs:
           path: attestations/
 
   attach-assets:
-    needs: [build, attest]
+    # After publish, so the release lists the wheel and sdist only once PyPI
+    # has them: a refused upload left them attached as if it had worked.
+    needs: [build, attest, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

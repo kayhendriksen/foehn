@@ -126,6 +126,10 @@ def already_current(asset: Asset, filepath: Path) -> bool:
         local_dt = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
     except (ValueError, OSError):
         return True
+    if remote_dt.tzinfo is None:
+        # STAC timestamps are UTC. One written without its offset raised a
+        # TypeError comparing naive with aware, which ended the whole download.
+        remote_dt = remote_dt.replace(tzinfo=UTC)
     return remote_dt <= local_dt
 
 

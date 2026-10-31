@@ -16,10 +16,10 @@ from foehn.fetch import FetchError
 from foehn.gridfiles import (
     _available_runs_hint,
     _list_by_window,
-    _list_forecast,
     _product_range_hint,
     _run_datetime_filter,
     ensure_grid_files,
+    list_forecast,
 )
 from foehn.workspace import Workspace
 from tests.fakes import InMemoryFetcher
@@ -752,7 +752,7 @@ def test_an_unreachable_collection_falls_back_to_the_plain_walk():
 
     fake = _NoCollection()
     fake.any_items = _items_for("icon-ch1-eps-202610241800-0-t_2m-ctrl.grib2")
-    items = _list_forecast("ch.meteoschweiz.ogd-forecasting-icon-ch1", fake)
+    items = list_forecast("ch.meteoschweiz.ogd-forecasting-icon-ch1", fake)
 
     assert len(items) == 1
     assert [dt for _, _, dt, _ in fake.listings] == [None]

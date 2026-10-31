@@ -23,7 +23,7 @@ PUBLISH = ROOT / "requirements-publish.txt"
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 
 HOOK_TOOLS = ["ruff-pre-commit", "zizmor-pre-commit"]
-CI_TOOLS = ["bandit", "build", "cyclonedx-bom", "pip-audit", "twine"]
+CI_TOOLS = ["bandit", "build", "cyclonedx-bom", "hatchling", "pip-audit", "twine"]
 
 
 def _tool_version(name: str) -> str:
@@ -77,14 +77,16 @@ def test_the_publish_toolchain_is_locked_by_hash():
         else:
             pins.append(line)
 
-    assert {"build", "twine"} <= {pin.split("==", 1)[0] for pin in pins}
+    # hatchling too: publish.yml builds with --no-isolation, so the backend that
+    # writes the wheel is installed from here rather than resolved on the spot.
+    assert {"build", "hatchling", "twine"} <= {pin.split("==", 1)[0] for pin in pins}
     unhashed = [pin.split()[0] for pin in pins if "--hash=sha256:" not in pin]
     assert not unhashed, f"requirements-publish.txt pins {unhashed} without a hash"
 
 
 def test_each_packaging_tool_is_pinned_in_one_requirements_file():
-    """build and twine moved to the hash-locked file; a copy left behind would drift."""
-    for name in ("build", "twine"):
+    """The packaging tools live in the hash-locked file; a copy left behind would drift."""
+    for name in ("build", "hatchling", "twine"):
         assert not re.search(rf"^{name}==", REQUIREMENTS.read_text(), re.MULTILINE)
         assert re.search(rf"^{name}==", PUBLISH.read_text(), re.MULTILINE)
 

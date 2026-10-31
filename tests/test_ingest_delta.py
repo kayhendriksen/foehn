@@ -1,5 +1,6 @@
 """Tests for the Polars-based Delta ingestion script."""
 
+import re
 import shutil
 from unittest.mock import MagicMock, patch
 
@@ -10,10 +11,12 @@ from conftest import FIXTURES_DIR
 from foehn import registry
 from scripts.ingest_delta import (
     INGESTED_DATASETS,
+    RADAR_PRODUCT_PATTERN,
     _apply_column_comments,
     _ingest_climate_normals,
     _ingest_collection,
     _ingest_metadata,
+    _ingest_radar,
     _scan_and_collect,
     _table_suffix,
     _validate_identifier,
@@ -302,6 +305,34 @@ def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
     published.assert_called_once_with("`main`.`meteoswiss`.`smn_d_recent`")
 
 
+def _written_tables(spark):
+    return {c.args[0] for c in spark.createDataFrame.return_value.write.saveAsTable.call_args_list}
+
+
+def test_daily_ingest_leaves_the_historical_tables_alone(smn_bronze_dir, mock_spark):
+    """A backfill's historical CSVs stay in Bronze; the daily pass used to rebuild them every day."""
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    shutil.copy(FIXTURES_DIR / "smn_sample.csv", smn_bronze_dir / "smn" / "ogd-smn_ber_d_historical.csv")
+
+    ok, skip, failed = _ingest_collection(mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`")
+
+    assert (ok, skip, failed) == (2, 1, 0)
+    assert "`main`.`meteoswiss`.`smn_d_historical`" not in _written_tables(mock_spark)
+    assert "`main`.`meteoswiss`.`smn_d_recent`" in _written_tables(mock_spark)
+
+
+def test_historical_ingest_writes_the_historical_tables(smn_bronze_dir, mock_spark):
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    shutil.copy(FIXTURES_DIR / "smn_sample.csv", smn_bronze_dir / "smn" / "ogd-smn_ber_d_historical.csv")
+
+    ok, skip, failed = _ingest_collection(
+        mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", historical=True
+    )
+
+    assert (ok, skip, failed) == (3, 0, 0)
+    assert "`main`.`meteoswiss`.`smn_d_historical`" in _written_tables(mock_spark)
+
+
 def test_ingest_collection_empty(tmp_path, mock_spark):
     empty_dir = tmp_path / "smn"
     empty_dir.mkdir()
@@ -386,6 +417,34 @@ def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
     assert ok == 0
     assert skip == 1
     assert failed == 0
+
+
+# ── _ingest_radar ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("name", "product"),
+    [("cpc2630112000_00060.001.h5", "CPC"), ("rzc263011200rl.001.h5", "RZC"), ("mzc263021145pl.850.h5", "MZC")],
+)
+def test_radar_product_reads_meteoswiss_lowercase_names(name, product):
+    """MeteoSwiss names radar files in lower case; an uppercase-only pattern left every product empty."""
+    found = re.match(RADAR_PRODUCT_PATTERN, name)
+    assert found is not None
+    assert found.group(0).upper() == product
+
+
+def test_radar_merge_backfills_products_an_earlier_run_left_empty(tmp_path, mock_spark):
+    h5_dir = tmp_path / "radar_precip"
+    h5_dir.mkdir()
+    (h5_dir / "cpc2630112000_00060.001.h5").write_bytes(b"x")
+
+    _ingest_radar(mock_spark, tmp_path, "`main`", "`meteoswiss`", ("radar_precip",))
+
+    select = mock_spark.read.format.return_value.option.return_value.load.return_value.selectExpr
+    assert any(arg.startswith("upper(regexp_extract(") for arg in select.call_args.args)
+    merge = next(c.args[0] for c in mock_spark.sql.call_args_list if c.args[0].startswith("MERGE"))
+    assert "t.product IS DISTINCT FROM s.product" in merge
+    assert "product = s.product" in merge
 
 
 # ── INGESTED_COLLECTIONS ─────────────────────────────────────────────────────

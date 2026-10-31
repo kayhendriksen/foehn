@@ -101,7 +101,7 @@ def _temporal_extent(collection: dict) -> tuple[datetime, datetime] | None:
     return bounds if bounds[0] <= bounds[1] else None
 
 
-def _list_by_window(collection_id: str, fetcher: Fetcher) -> list[dict] | None:
+def _list_by_window(collection_id: str, fetcher: Fetcher, *, cache: bool = True) -> list[dict] | None:
     """Every item of a forecast collection, listed in parallel time windows.
 
     None when the collection's extent is unknown or implausibly wide, so the
@@ -123,7 +123,7 @@ def _list_by_window(collection_id: str, fetcher: Fetcher) -> list[dict] | None:
         return None
 
     def _window(window: str) -> list[dict]:
-        return fetcher.items(collection_id, cache=True, datetime_filter=window)
+        return fetcher.items(collection_id, cache=cache, datetime_filter=window)
 
     with ThreadPoolExecutor(max_workers=min(_LISTING_WORKERS, len(windows))) as pool:
         pages = list(pool.map(_window, windows))
@@ -139,10 +139,15 @@ def _list_by_window(collection_id: str, fetcher: Fetcher) -> list[dict] | None:
     return items
 
 
-def _list_forecast(collection_id: str, fetcher: Fetcher) -> list[dict]:
-    """A forecast collection's full listing: by window when possible, else in one walk."""
-    by_window = _list_by_window(collection_id, fetcher)
-    return by_window if by_window is not None else fetcher.items(collection_id, cache=True)
+def list_forecast(collection_id: str, fetcher: Fetcher, *, cache: bool = True) -> list[dict]:
+    """A forecast collection's full listing: by window when possible, else in one walk.
+
+    Also the download path's listing for these collections, which passes
+    ``cache=False``: noticing a new run is that path's whole job. The API lists
+    oldest first, so nothing short of the full listing reaches the newest run.
+    """
+    by_window = _list_by_window(collection_id, fetcher, cache=cache)
+    return by_window if by_window is not None else fetcher.items(collection_id, cache=cache)
 
 
 def _available_runs_hint(assets: list[Asset]) -> str:
@@ -301,7 +306,7 @@ def _refresh(
         if datetime_filter is not None:
             items = fetcher.items(collection_id, cache=True, datetime_filter=datetime_filter)
         elif run_datetime:
-            items = _list_forecast(collection_id, fetcher)
+            items = list_forecast(collection_id, fetcher)
         else:
             items = fetcher.items(collection_id, cache=True)
     except FetchError as exc:
@@ -329,7 +334,7 @@ def _refresh(
         # report a file as missing on the strength of an optimisation, fall back
         # to the full walk — slow, but it is exactly what happened before.
         logger.debug("No %s assets for %r under datetime=%s; retrying unfiltered", sfx, match, datetime_filter)
-        items = _list_forecast(collection_id, fetcher)
+        items = list_forecast(collection_id, fetcher)
         matched, other_exts = _grid_assets(items, suffixes, match)
 
     if not matched:
@@ -417,4 +422,4 @@ def _refresh(
     return sorted(set(cached))
 
 
-__all__ = ["ensure_grid_files"]
+__all__ = ["ensure_grid_files", "list_forecast"]

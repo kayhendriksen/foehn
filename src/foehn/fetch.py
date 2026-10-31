@@ -98,7 +98,7 @@ class Fetcher(Protocol):
         ``cache`` permits serving a recent listing instead of re-walking; how
         long one stays valid is the fetcher's decision, not the caller's.
         ``datetime_filter`` narrows the listing server-side. ``max_items`` stops
-        paginating early, newest first.
+        paginating early, in the API's order — which is oldest first.
         """
         ...
 
@@ -218,10 +218,11 @@ class HttpFetcher:
         the fetcher can measure that, which is why callers say whether a stale
         listing is acceptable and not for how long.
 
-        ``max_items`` stops after the first page(s) covering that many items. The
-        ephemeral collections only ever want the newest, so walking the whole
-        listing is pure cost. Truncated listings are never cached, so a partial
-        result is never served later as if it were complete.
+        ``max_items`` stops after the first page(s) covering that many items.
+        The API lists oldest first, so those are the *oldest* items: no download
+        path uses it, because the newest run or timestep is never on the first
+        page. Truncated listings are never cached, so a partial result is never
+        served later as if it were complete.
         """
         cacheable = cache and max_items is None
         key = (collection_id, datetime_filter)

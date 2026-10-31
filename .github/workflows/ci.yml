@@ -126,9 +126,14 @@ jobs:
       - name: Resolve pinned twine
         id: twine
         run: scripts/tool_version.sh twine >> "$GITHUB_OUTPUT"
-      - run: uvx --from "build==${BUILD_PIN}" pyproject-build
+      - name: Resolve pinned hatchling
+        id: hatchling
+        run: scripts/tool_version.sh hatchling >> "$GITHUB_OUTPUT"
+      # --no-isolation with the pinned hatchling, as publish.yml builds.
+      - run: uvx --from "build==${BUILD_PIN}" --with "hatchling==${HATCHLING_PIN}" pyproject-build --no-isolation
         env:
           BUILD_PIN: ${{ steps.build.outputs.version }}
+          HATCHLING_PIN: ${{ steps.hatchling.outputs.version }}
       - run: uvx "twine@${TWINE_PIN}" check dist/*
         env:
           TWINE_PIN: ${{ steps.twine.outputs.version }}

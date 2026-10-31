@@ -208,7 +208,10 @@ def test_a_wrong_sized_constants_grid_is_ignored_rather_than_broadcast(tmp_path)
     from foehn.icon import attach_lonlat
 
     mismatched = (np.arange(9.0), np.arange(9.0))
-    with patch("foehn.icon.unstructured_lonlat", return_value=mismatched):
+    with (
+        patch("foehn.icon.unstructured_lonlat", return_value=mismatched),
+        pytest.warns(UserWarning, match="constants file has 9 cells and the field 4"),
+    ):
         ds = attach_lonlat(_unstructured(4), "forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake(), what="x")
 
     assert "lat" not in ds.coords

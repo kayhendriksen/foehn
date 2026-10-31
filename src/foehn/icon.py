@@ -160,17 +160,27 @@ def attach_lonlat(ds: xr.Dataset, dataset: str, workspace: Workspace, *, fetcher
         return ds
     try:
         lat, lon = unstructured_lonlat(dataset, workspace, fetcher=fetcher)
-        if lat is not None and lon is not None and lat.size == ds.sizes["values"]:
-            return ds.assign_coords(
-                lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
-                lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
-            )
     except Exception as exc:  # noqa: BLE001 - coordinates are best effort; the field still opens, with a warning
         warnings.warn(
             f"Could not attach ICON lat/lon for {dataset!r} ({type(exc).__name__}); {what}",
             stacklevel=2,
         )
-    return ds
+        return ds
+    if lat is None or lon is None:
+        return ds
+    if not lat.size == lon.size == ds.sizes["values"]:
+        # A constants file for another grid. Returned without a word, the field
+        # looked georeferenced-but-missing rather than mismatched.
+        warnings.warn(
+            f"Could not attach ICON lat/lon for {dataset!r}: the constants file has {lat.size} cells and "
+            f"the field {ds.sizes['values']}; {what}",
+            stacklevel=2,
+        )
+        return ds
+    return ds.assign_coords(
+        lat=("values", lat, {"units": "degrees_north", "standard_name": "latitude"}),
+        lon=("values", lon, {"units": "degrees_east", "standard_name": "longitude"}),
+    )
 
 
 def clear_cache() -> None:

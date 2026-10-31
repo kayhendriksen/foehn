@@ -436,13 +436,54 @@ def test_binary_download_skips_existing_file(tmp_path):
     assert (out_dir / "forecast.grib2").read_bytes() == b"existing"
 
 
-def test_binary_download_reads_only_the_newest_page(tmp_path):
-    """These collections hold thousands of ephemeral items; walking them all is pure cost."""
-    fake = _fake([_stac_item("https://data.geo.admin.ch/forecast.grib2")], body=b"GRIBdata")
+def _one_item_per_file(*names):
+    """GRIB2 forecasts are one STAC item per file, listed oldest first like the API."""
+    return [
+        {
+            "id": name.split(".")[0],
+            "assets": {"data": {"href": f"https://data.geo.admin.ch/{name}"}},
+            "properties": {"updated": "2026-01-01T00:00:00Z"},
+        }
+        for name in names
+    ]
 
-    registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
-    assert [max_items for *_, max_items in fake.listings] == [100]
+def test_grib2_download_fetches_the_control_member_of_the_newest_run(tmp_path):
+    """Stopping at the first page of the oldest-first listing fetched the oldest run, at lead 0."""
+    fake = _fake(
+        _one_item_per_file(
+            "icon-ch1-eps-202610281200-0-t_2m-ctrl.grib2",
+            "icon-ch1-eps-202610281200-0-t_2m-perturb.grib2",
+            "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2",
+            "icon-ch1-eps-202610290900-0-t_2m-perturb.grib2",
+            "icon-ch1-eps-202610290900-1-t_2m-ctrl.grib2",
+        ),
+        body=b"GRIBdata",
+    )
+
+    result = registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
+
+    assert sorted(result.filenames) == [
+        "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202610290900-1-t_2m-ctrl.grib2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("dataset", "name"),
+    [
+        ("forecast_icon_ch1", "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2"),
+        ("radar_precip", "cpc2630112000_00060.001.h5"),
+    ],
+)
+def test_ephemeral_downloads_walk_the_whole_listing_uncached(tmp_path, dataset, name):
+    """A truncated listing reaches only the oldest items; a cached one can hide the newest."""
+    fake = _fake(_one_item_per_file(name), body=b"data")
+
+    registry.download(dataset, Workspace(tmp_path), fetcher=fake)
+
+    assert fake.listings
+    assert {(cache, max_items) for _, cache, _, max_items in fake.listings} == {(False, None)}
 
 
 # --- the static listing path (registry: NETCDF_GRID) ---
