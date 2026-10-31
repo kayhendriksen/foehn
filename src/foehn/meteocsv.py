@@ -40,6 +40,66 @@ from foehn.collections import (
 
 logger = logging.getLogger(__name__)
 
+# Polars decompresses gzip, zlib and zstd input transparently — in read_csv and
+# scan_csv alike, from bytes or from a path, and in memory. MeteoSwiss publishes
+# plain CSV, so compressed bytes where a CSV belongs are refused rather than
+# inflated: a small payload can expand to gigabytes before any check runs, and
+# the ZIP bomb cap in ``foehn.archives`` never sees it. Most compressed streams
+# are mangled by the UTF-8 normalisation below, but one made only of ASCII bytes
+# behind a zlib header survives it unchanged. Found by fuzz/fuzz_csv.py.
+_COMPRESSED_MAGIC = (
+    b"\x1f\x8b",  # gzip
+    b"\x78\x01",  # zlib, by compression level
+    b"\x78\x5e",
+    b"\x78\x9c",
+    b"\x78\xda",
+    b"\x28\xb5\x2f\xfd",  # zstd
+)
+
+
+def refuse_compressed(head: bytes, source: str) -> None:
+    """Raise ValueError if *head* starts like a stream Polars would decompress."""
+    if head.startswith(_COMPRESSED_MAGIC):
+        raise ValueError(f"{source}: compressed data where a plain CSV was expected — refusing to decompress it.")
+
+
+def _head(source: bytes | bytearray | memoryview | io.BytesIO | Path | str) -> bytes:
+    # Any bytes-like value, not only bytes: utf8_meteoswiss_csv hands back a
+    # zero-copy memoryview for input that starts with a BOM.
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        return bytes(memoryview(source)[:4])
+    if isinstance(source, io.BytesIO):
+        return source.getbuffer()[:4].tobytes()
+    with Path(source).open("rb") as handle:
+        return handle.read(4)
+
+
+def _read_csv(source: bytes | bytearray | memoryview | io.BytesIO | Path | str, **options: object) -> pl.DataFrame:
+    """``pl.read_csv``, refusing compressed input first. Every eager CSV read in foehn goes through here.
+
+    Some malformed input makes Polars panic rather than raise (``slice index
+    starts at 1 but ends at 0``, found by fuzz/fuzz_csv.py on Polars 1.44 and
+    2.0). A panic is a ``BaseException``, so it slipped past every
+    ``except Exception`` that keeps one bad file from failing a whole run. It is
+    re-raised as the ComputeError a parse failure is everywhere else.
+    """
+    label = str(source) if isinstance(source, (str, Path)) else "CSV"
+    refuse_compressed(_head(source), label)
+    if isinstance(source, (bytearray, memoryview)):
+        source = bytes(source)  # Polars reads bytes, a file or a path, not a buffer view
+    try:
+        # Pass-through options: Polars types each keyword, and object cannot satisfy them.
+        return pl.read_csv(source, **options)  # ty: ignore[invalid-argument-type]
+    except pl.exceptions.PanicException as exc:
+        raise pl.exceptions.ComputeError(f"Polars failed to parse {label}: {exc}") from exc
+
+
+def _scan_csv(path: Path | str, **options: object) -> pl.LazyFrame:
+    """``pl.scan_csv``, refusing compressed input first. Every lazy CSV scan in foehn goes through here."""
+    refuse_compressed(_head(path), str(path))
+    return pl.scan_csv(path, **options)  # ty: ignore[invalid-argument-type]
+
+
 _Frame = TypeVar("_Frame", pl.DataFrame, pl.LazyFrame)
 # The helpers typed with it return the kind of frame they were given. Polars'
 # methods are typed per class, and ty does not solve a constrained TypeVar
@@ -132,7 +192,7 @@ def parse_metadata_types(content: bytes | str) -> dict[str, type[pl.DataType]]:
     try:
         if isinstance(content, str):
             content = content.encode("utf-8")
-        meta = pl.read_csv(io.BytesIO(content), separator=";", infer_schema_length=0)
+        meta = _read_csv(io.BytesIO(content), separator=";", infer_schema_length=0)
     except Exception:  # noqa: BLE001 - declared types only refine inference
         return {}
 
@@ -202,7 +262,7 @@ def parse_csv_bytes(
             # Parse the header line alone — wrapping the whole payload to read one
             # line costs a copy of the entire file.
             end = data.find(b"\n")
-            header = pl.read_csv(
+            header = _read_csv(
                 data[: end + 1] if end != -1 else data, separator=";", n_rows=0, infer_schema_length=0
             ).columns
         except Exception as exc:  # noqa: BLE001 - the header only narrows the parse
@@ -224,7 +284,7 @@ def parse_csv_bytes(
                 overrides[col] = metadata_types[col]
 
     try:
-        return pl.read_csv(
+        return _read_csv(
             data,
             separator=";",
             infer_schema_length=100,
@@ -245,7 +305,7 @@ def parse_csv_bytes(
                 break  # not a column we're reading; widening it would be rejected
             overrides[bad_col] = pl.Float64
             try:
-                return pl.read_csv(
+                return _read_csv(
                     data,
                     separator=";",
                     infer_schema_length=100,
@@ -276,11 +336,11 @@ def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataTyp
     overrides = schema_overrides
     if overrides:
         try:
-            header = pl.read_csv(path, separator=";", n_rows=0, infer_schema_length=0).columns
+            header = _read_csv(path, separator=";", n_rows=0, infer_schema_length=0).columns
             overrides = {column: dtype for column, dtype in overrides.items() if column in header}
         except Exception:  # noqa: BLE001 - the header only narrows the parse
             overrides = None
-    return pl.scan_csv(
+    return _scan_csv(
         path,
         separator=";",
         try_parse_dates=True,
@@ -291,7 +351,7 @@ def scan_standard_csv(path: Path, *, schema_overrides: dict[str, type[pl.DataTyp
 
 def read_metadata_csv(path: Path) -> pl.DataFrame:
     """Read one Collection Metadata table with the shared CSV conventions."""
-    return pl.read_csv(path, separator=";", infer_schema_length=10_000, try_parse_dates=True)
+    return _read_csv(path, separator=";", infer_schema_length=10_000, try_parse_dates=True)
 
 
 def parse_forecast_points(content: bytes) -> pl.DataFrame:
@@ -301,12 +361,12 @@ def parse_forecast_points(content: bytes) -> pl.DataFrame:
     every point that is not a postal code centre, which the sample window would
     otherwise read as nulls and then integers depending on row order.
     """
-    return pl.read_csv(decode_meteoswiss_csv(content).encode("utf-8"), separator=";", infer_schema_length=0)
+    return _read_csv(decode_meteoswiss_csv(content).encode("utf-8"), separator=";", infer_schema_length=0)
 
 
 def read_normals_txt(path: Path) -> pl.DataFrame:
     """Read one Direct ZIP climate-normal table from Bronze."""
-    return pl.read_csv(
+    return _read_csv(
         path,
         separator="\t",
         skip_rows=8,
@@ -504,12 +564,12 @@ def parse_indoor_csv(content: bytes, filename: str) -> pl.DataFrame:
     converter uses :func:`scan_indoor_csv`. Both are given a member the caller
     has already accepted via :func:`indoor_station`.
     """
-    return _add_indoor_columns(pl.read_csv(content, **_INDOOR_CSV_OPTIONS), _indoor_identity(filename))
+    return _add_indoor_columns(_read_csv(content, **_INDOOR_CSV_OPTIONS), _indoor_identity(filename))
 
 
 def scan_indoor_csv(path: Path) -> pl.LazyFrame:
     """Lazily scan one extracted indoor archive member, tagged from its filename."""
-    return _add_indoor_columns(pl.scan_csv(path, **_INDOOR_CSV_OPTIONS), _indoor_identity(path.name))
+    return _add_indoor_columns(_scan_csv(path, **_INDOOR_CSV_OPTIONS), _indoor_identity(path.name))
 
 
 def _indoor_identity(filename: str) -> tuple[str, str, str, str]:
@@ -598,7 +658,7 @@ def parse_climate_scenarios_csv(content: bytes | str, filename: str) -> pl.DataF
     station, variable, gwl = _parse_climate_scenarios_filename(filename)
 
     table = "\n".join(lines[header_idx:])
-    df = pl.read_csv(
+    df = _read_csv(
         io.BytesIO(table.encode("utf-8")),
         separator=";",
         infer_schema_length=20_000,
@@ -628,7 +688,7 @@ def scan_climate_scenarios_csv(path: Path) -> pl.LazyFrame:
     shift the header offset.
     """
     station, variable, gwl = _parse_climate_scenarios_filename(path.name)
-    lf = pl.scan_csv(
+    lf = _scan_csv(
         path,
         separator=";",
         skip_lines=_climate_scenarios_preamble_lines(path),

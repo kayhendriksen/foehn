@@ -382,3 +382,81 @@ def test_reading_a_non_data_member_says_to_ask_first():
 
     with pytest.raises(ValueError, match="indoor_station"):
         parse_indoor_csv(b"a,b\n1,2\n", "metadata.csv")
+
+
+# --- Compressed input is refused, never inflated ---
+
+_PLAIN_CSV = b"station_abbr;tre200d0\n" + b"BER;1.5\n" * 3
+
+
+@pytest.mark.parametrize(
+    "compress",
+    [
+        pytest.param(lambda data: __import__("gzip").compress(data), id="gzip"),
+        pytest.param(lambda data: __import__("zlib").compress(data, 1), id="zlib-78-01"),
+        pytest.param(lambda data: __import__("zlib").compress(data), id="zlib-78-9c"),
+        pytest.param(lambda data: __import__("zlib").compress(data, 9), id="zlib-78-da"),
+        pytest.param(lambda data: b"\x28\xb5\x2f\xfd" + data, id="zstd"),
+    ],
+)
+def test_compressed_bytes_are_refused_rather_than_decompressed(compress, tmp_path):
+    """Polars inflates gzip/zlib/zstd in read_csv and scan_csv, in memory, before anything checks size.
+
+    These entry points hand their bytes or file to Polars as they are. The ones
+    that decode first (``parse_forecast_points``) mangle most streams beyond
+    recognition, and the one that survives is the ASCII test below.
+    """
+    from foehn.meteocsv import parse_csv_bytes, scan_standard_csv
+
+    data = compress(_PLAIN_CSV)
+    path = tmp_path / "ogd-smn_ber_d_recent.csv"
+    path.write_bytes(data)
+
+    with pytest.raises(ValueError, match="compressed data"):
+        parse_csv_bytes(data, {})
+    with pytest.raises(ValueError, match="compressed data"):
+        scan_standard_csv(path)
+
+
+def test_an_ascii_zlib_stream_survives_utf8_normalisation_and_is_still_refused():
+    """The case that reaches Polars in practice: a 78 01 header followed only by ASCII bytes."""
+    from foehn.meteocsv import parse_csv_bytes, parse_forecast_points, utf8_meteoswiss_csv
+
+    crafted = b"\x78\x01" + b"station_abbr;tre200d0\n"
+    assert utf8_meteoswiss_csv(crafted) == crafted
+    with pytest.raises(ValueError, match="compressed data"):
+        parse_csv_bytes(utf8_meteoswiss_csv(crafted), {})
+    with pytest.raises(ValueError, match="compressed data"):
+        parse_forecast_points(crafted)
+
+
+def test_metadata_types_stay_total_on_compressed_input():
+    from foehn.meteocsv import parse_metadata_types
+
+    assert parse_metadata_types(__import__("zlib").compress(_PLAIN_CSV, 1)) == {}
+
+
+def test_input_that_makes_polars_panic_raises_a_parse_error():
+    """Found by fuzz/fuzz_csv.py: the dtype-widening retry makes Polars 1.44 and 2.0 panic.
+
+    A panic is a BaseException, so it skipped every ``except Exception`` that
+    keeps one bad file from failing a whole run.
+    """
+    from foehn.meteocsv import parse_csv_bytes, utf8_meteoswiss_csv
+
+    data = (Path(__file__).parent / "fixtures" / "polars_panic.bin").read_bytes()
+
+    for body in (data, utf8_meteoswiss_csv(data)):
+        with pytest.raises(pl.exceptions.ComputeError):
+            parse_csv_bytes(body, {})
+
+
+def test_the_compression_guard_reads_any_bytes_like_input():
+    """utf8_meteoswiss_csv returns a memoryview for BOM input; the guard must take it too."""
+    from foehn.meteocsv import _read_csv, utf8_meteoswiss_csv
+
+    view = utf8_meteoswiss_csv(b"\xef\xbb\xbfstation_abbr;tre200d0\nBER;1.5\n")
+    assert isinstance(view, memoryview)
+
+    assert _read_csv(view, separator=";").shape == (1, 2)
+    assert _read_csv(bytearray(b"a;b\n1;2\n"), separator=";").shape == (1, 2)
