@@ -103,7 +103,10 @@ def run_conversions(groups: Iterable[ConversionGroup], convert_one: ConvertOne, 
         group.out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             failed += convert_one(group)
-        except Exception as e:  # noqa: BLE001 - one group's failure is counted, not allowed to stop the rest
+        # PanicException too: a malformed source can make Polars panic while the
+        # lazy scan streams, and a panic is a BaseException that would otherwise
+        # end the whole run here instead of failing this one group.
+        except (Exception, pl.exceptions.PanicException) as e:  # noqa: BLE001 - one group's failure is counted, not allowed to stop the rest
             failed += 1
             logger.warning("  %s (%d files)... FAIL: %s", group.out_path.name, len(group.sources), e)
             continue

@@ -294,7 +294,9 @@ def _ingest_collection(
             tally.written += 1
             _apply_column_comments(spark, table, csv_dir)
 
-        except Exception as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
+        # PanicException too: Polars can panic on a malformed source while it
+        # collects, and a panic is a BaseException that would end the whole job.
+        except (Exception, pl.exceptions.PanicException) as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
             _report_failure(tbl_name, e)
             tally.failed += 1
 
