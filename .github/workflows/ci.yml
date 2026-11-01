@@ -16,7 +16,7 @@ concurrency:
 
 # No tool versions here. Every pin lives in the one file Dependabot can bump —
 # .pre-commit-config.yaml for the tools that also run as local hooks,
-# requirements-ci.txt for the ones only CI runs, the pyproject dev extra for ty —
+# requirements-ci.txt for the ones only CI runs, the pyproject dev group for ty —
 # and the jobs resolve it with scripts/tool_version.sh. Duplicating a version
 # into this block is how they went unbumped, and how build/twine drifted out of
 # step with publish.yml.
@@ -58,8 +58,8 @@ jobs:
           enable-cache: true
       # foehn ships py.typed, so downstream type checkers trust these annotations.
       # Nothing verified them before this job existed.
-      # ty is pinned in the pyproject dev extra, so Dependabot bumps it there.
-      - run: uv sync --locked --extra dev --python 3.12
+      # ty is pinned in the pyproject dev group, so Dependabot bumps it there.
+      - run: uv sync --locked --group dev --python 3.12
       - run: uv run --no-sync ty check src/
 
   test:
@@ -82,7 +82,7 @@ jobs:
       # lock no longer matches pyproject.toml. A fresh `uv pip install` resolved
       # around the lock instead: CI stayed green while `uv sync` produced an
       # environment whose GRIB2 tests could not pass.
-      - run: uv sync --locked --extra dev
+      - run: uv sync --locked --group dev
       # Coverage floor lives in [tool.coverage.report] fail_under in pyproject.toml.
       - run: uv run --no-sync pytest --cov=foehn --cov-report=term-missing
 

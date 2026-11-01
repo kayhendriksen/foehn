@@ -43,8 +43,13 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/kayhendriksen/foehn"
+Documentation = "https://kayhendriksen.github.io/foehn/"
 Repository = "https://github.com/kayhendriksen/foehn"
+Changelog = "https://github.com/kayhendriksen/foehn/blob/main/CHANGELOG.md"
 Issues = "https://github.com/kayhendriksen/foehn/issues"
+
+[project.scripts]
+foehn = "foehn.cli:main"
 
 [project.optional-dependencies]
 databricks = [
@@ -86,13 +91,24 @@ grids = [
     "eccodeslib>=2.43; platform_system != 'Windows'",
     "pyproj>=3.0",
 ]
+
+# Development dependencies (PEP 735). Not extras: an extra is published metadata,
+# so `pip install foehn[dev]` used to pull a linter, a type checker and pytest
+# into a user's environment. uv installs the dev group by default (`uv sync`,
+# `uv run`); nothing outside this repository ever sees it.
+[dependency-groups]
 dev = [
+    # Runs the hooks in .pre-commit-config.yaml. In the group rather than run
+    # through uvx, so `uv run pre-commit install` writes a git hook pointing at
+    # .venv — and `uv sync`, which removes anything the lock does not list,
+    # cannot delete the interpreter's pre-commit out from under that hook.
+    "pre-commit>=4.0",
     "ruff>=0.9",
     # Pinned, not floored: ty typechecks src/ in CI, it is pre-1.0, and a version
-    # bump can turn a green PR red on its own. Dependabot bumps this weekly, so
-    # the upgrade arrives as its own reviewable PR rather than landing on whoever
-    # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
-    # which CI reads — see scripts/tool_version.sh.)
+    # bump can turn a green PR red on its own. Dependabot's uv ecosystem bumps this
+    # and uv.lock together, so the upgrade arrives as its own reviewable PR rather
+    # than landing on whoever opens the next one. (ruff and zizmor are pinned in
+    # .pre-commit-config.yaml, which CI reads — see scripts/tool_version.sh.)
     "ty==0.0.91",
     "numpy>=1.24",
     "pydantic>=2.0",
@@ -113,9 +129,13 @@ dev = [
     "h5py>=3.0",
     "pyproj>=3.0",
 ]
-
-[project.scripts]
-foehn = "foehn.cli:main"
+# The documentation site: `uv run --group docs mkdocs serve`. mkdocstrings
+# imports foehn to read its docstrings, so the site is built from what the
+# package actually exports, with the vocabulary placeholders already rendered.
+docs = [
+    "mkdocs-material>=9.6",
+    "mkdocstrings[python]>=0.29",
+]
 
 [tool.ruff]
 line-length = 120

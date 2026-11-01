@@ -187,3 +187,26 @@ refresh changed assets, while retaining a complete cache as the offline fallback
 See the [gridded data documentation](grids.md) for
 `open_dataset`, `to_zarr`, `match`, the GRIB2/radar single-file requirement, and
 the Swiss-grid coordinate notes.
+
+## Logging and diagnostics
+
+foehn logs through the standard `logging` module under the `foehn` logger and
+attaches no handler of its own. Warnings reach stderr through Python's default
+handling; progress messages stay hidden until you configure logging:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)  # download progress, conversion results
+logging.getLogger("foehn").setLevel(logging.DEBUG)
+```
+
+When reporting a bug, include the environment report — foehn's version, Python,
+the platform, the data directory and every dependency's version:
+
+```python
+foehn.show_versions()
+```
+
+`foehn version` prints the same from the command line. Every public function is
+documented in the [API reference](reference/api.md).

@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://kayhendriksen.github.io/foehn/
+    about: Guides for the Python API, CLI, gridded data, the MCP server and Databricks.
+  - name: Report a security vulnerability
+    url: https://github.com/kayhendriksen/foehn/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.
+  - name: MeteoSwiss Open Data
+    url: https://opendatadocs.meteoswiss.ch
+    about: Questions about the data itself — parameters, stations, coverage — belong with MeteoSwiss.

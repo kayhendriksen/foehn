@@ -1,21 +1,138 @@
 # CLI Reference
 
-The CLI uses subcommands that mirror the Python API. `foehn --version` prints
-the installed version.
+The CLI uses subcommands that mirror the Python API. Run `foehn --help`, or
+`foehn <command> --help` for one command's flags and examples. `python -m foehn`
+is the same command line.
 
-A command that fails on its input — an unknown dataset, a filter the dataset
-does not support, an unreachable API — prints one `foehn: error: ...` line to
-stderr and exits with status 1.
+```text
+foehn [GLOBAL OPTIONS] <COMMAND> [OPTIONS]
+```
+
+| Command | What it does |
+|---|---|
+| [`list`](#foehn-list) | List the available datasets |
+| [`load`](#foehn-load-dataset) | Load a dataset from the API and print it, or write it to a file |
+| [`metadata`](#foehn-metadata-table-dataset) | Show a dataset's parameters, stations, forecast points or inventory |
+| [`download`](#foehn-download-dataset) | Download datasets to disk and convert them to Parquet |
+| [`to-parquet`](#foehn-to-parquet-dataset) | Convert downloaded CSVs to Parquet |
+| [`open`](#foehn-open-dataset) | Open a gridded dataset and print its xarray summary |
+| [`to-zarr`](#foehn-to-zarr-dataset) | Write a gridded dataset to a Zarr store |
+| [`mcp`](#foehn-mcp) | Start the MCP server |
+| [`version`](#foehn-version) | Show foehn's version, the platform and every dependency's version |
+
+---
+
+## Global options
+
+Accepted before or after the subcommand (`foehn -q download` and
+`foehn download -q` are the same).
+
+| Flag | Description |
+|---|---|
+| `-q`, `--quiet` | Print no progress. Repeat (`-qq`) to silence warnings too; errors always print |
+| `-v`, `--verbose` | Print debug detail from the library |
+| `--color WHEN` | Colour diagnostics: `auto` (default — only on a terminal), `always`, or `never` |
+| `-V`, `--version` | Print `foehn <version>` and exit (before the subcommand only) |
+| `-h`, `--help` | Show help and exit |
+
+## Output and exit status
+
+**Data goes to stdout, diagnostics to stderr.** Tables, CSV/JSON output and the
+version report are written to stdout; progress, warnings, errors and the
+library's log go to stderr. So redirecting stdout captures only the data:
+
+```bash
+foehn load smn --station BER --frequency d --output-format csv > ber.csv
+foehn metadata stations smn --output-format json | jq '.[].name'
+```
+
+An error is one line on stderr, with a hint where there is one:
+
+```text
+$ foehn download smm
+foehn: error: unknown dataset 'smm'
+  hint: did you mean 'smn'?
+```
+
+| Status | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | The command failed: bad input, an unreachable API, or a download/conversion that only partly succeeded |
+| `2` | Usage error: an unknown flag, a missing argument, or an invalid value such as `--workers 0` |
+| `130` | Interrupted (Ctrl-C) |
+| `141` | stdout was closed by its reader, e.g. `foehn metadata inventory smn \| head` |
 
 ---
 
 ## `foehn list`
 
-List all available datasets.
+List all available datasets, grouped by MeteoSwiss category.
 
 ```bash
 foehn list
+foehn list --category A
+foehn list --format GRIB2 --output-format json
 ```
+
+| Flag | Description |
+|---|---|
+| `--category`, `-c` | Only datasets in this category (`A`, `C`, `D`, `E`) |
+| `--format`, `-f` | Only datasets in this file format (`CSV`, `TXT`, `NetCDF`, `GRIB2`, `HDF5`) |
+| `--output-format` | `table` (default), `json` (the `foehn.list_datasets()` rows) or `csv` |
+| `--data-dir PATH` | Accepted for symmetry with the other commands; listing reads nothing from disk |
+
+---
+
+## `foehn load DATASET`
+
+Load a dataset from the API and print a preview. No files are written to disk
+unless you pass `--output`.
+
+```bash
+foehn load smn --station BER --frequency d
+foehn load smn --station BER ZUR --frequency d h -n 50
+foehn load smn --station BER --frequency d --year 2026 --month 1 2 3
+foehn load smn --station BER --frequency d --date-from 2025-06-01 --date-to 2025-08-31
+foehn load smn --station BER --frequency d --columns tre200d0 rre150d0 --sort desc
+foehn load smn --station BER --frequency d --output-format csv > ber.csv
+foehn load smn --station BER --frequency d --time-slice historical -o ber.parquet
+```
+
+| Flag | Description |
+|---|---|
+| `--station` | Filter by station(s) |
+| `--frequency` | Filter by frequency (t, h, d, m, y) |
+| `--time-slice` | Time slices to include (default: recent) |
+| `--year` | Filter by year(s) (e.g. 2025 2026) |
+| `--month` | Filter by month(s) (1--12) |
+| `--date-from` | Start date inclusive (YYYY-MM-DD) |
+| `--date-to` | End date inclusive (YYYY-MM-DD) |
+| `--columns` | Only return these columns |
+| `--drop-null` | Drop rows where this column is null |
+| `--sort` | Sort by timestamp: asc or desc |
+| `--limit` | Cap the loaded DataFrame to N rows, after sorting. Bounds the result, not the bytes downloaded |
+| `--workers` | Concurrent CSV downloads; must be positive (default: 8) |
+| `-n` | Rows to show in the table preview (default: 20). Ignored by `--output-format` and `--output`, which write every row |
+| `--output-format` | `table` (default, a preview), or every row as `csv`, `json` (one array of objects) or `ndjson` |
+| `--output`, `-o` `PATH` | Write every row to `PATH` instead of printing. The suffix picks the format: `.parquet`, `.csv`, `.json`, `.ndjson` or `.jsonl` |
+
+---
+
+## `foehn metadata TABLE DATASET`
+
+Show dataset metadata fetched live from the API. `TABLE` is one of `parameters`, `stations`, `points`, or `inventory`.
+
+```bash
+foehn metadata parameters smn   # what each column name means
+foehn metadata stations smn     # station locations and info
+foehn metadata inventory smn    # which station has which parameter
+foehn metadata points forecast_local  # forecast points: stations, postal codes, ...
+foehn metadata stations smn --output-format csv > stations.csv
+```
+
+| Flag | Description |
+|---|---|
+| `--output-format` | `table` (default), `csv`, `json` or `ndjson` |
 
 ---
 
@@ -35,6 +152,7 @@ is 85–145 GB); fetch one with `foehn open --match`.
 ```bash
 foehn download              # all non-grid datasets
 foehn download smn pollen   # specific datasets only
+foehn download smn --all    # historical + recent + now
 ```
 
 | Flag | Description |
@@ -46,7 +164,7 @@ foehn download smn pollen   # specific datasets only
 | `--grids` | Include NetCDF, GRIB2, and HDF5/radar datasets when no datasets are named |
 | `--no-parquet` | Skip CSV to Parquet conversion |
 | `--workers` | Concurrent downloads per dataset; must be positive (default: 8) |
-| `--data-dir PATH` | Output root (default: `./data/meteoswiss`) |
+| `--data-dir PATH` | Output root (default: `$FOEHN_DATA_DIR`, else `./data/meteoswiss`) |
 
 ---
 
@@ -63,47 +181,6 @@ foehn to-parquet smn        # single dataset
 | Flag | Description |
 |---|---|
 | `--data-dir PATH` | Root data directory |
-
----
-
-## `foehn metadata TABLE DATASET`
-
-Show dataset metadata fetched live from the API. `TABLE` is one of `parameters`, `stations`, `points`, or `inventory`.
-
-```bash
-foehn metadata parameters smn   # what each column name means
-foehn metadata stations smn     # station locations and info
-foehn metadata inventory smn    # which station has which parameter
-foehn metadata points forecast_local  # forecast points: stations, postal codes, ...
-```
-
----
-
-## `foehn load DATASET`
-
-Load a dataset from the API and print a preview. No files are written to disk.
-
-```bash
-foehn load smn --station BER --frequency d
-foehn load smn --station BER ZUR --frequency d h -n 50
-foehn load smn --station BER --frequency d --year 2026 --month 1 2 3
-foehn load smn --station BER --frequency d --date-from 2025-06-01 --date-to 2025-08-31
-foehn load smn --station BER --frequency d --columns tre200d0 rre150d0 --sort desc
-```
-
-| Flag | Description |
-|---|---|
-| `--station` | Filter by station(s) |
-| `--frequency` | Filter by frequency (t, h, d, m, y) |
-| `--time-slice` | Time slices to include (default: recent) |
-| `--year` | Filter by year(s) (e.g. 2025 2026) |
-| `--month` | Filter by month(s) (1--12) |
-| `--date-from` | Start date inclusive (YYYY-MM-DD) |
-| `--date-to` | End date inclusive (YYYY-MM-DD) |
-| `--columns` | Only return these columns |
-| `--drop-null` | Drop rows where this column is null |
-| `--sort` | Sort by timestamp: asc or desc |
-| `-n` | Number of rows to show (default: 20) |
 
 ---
 
@@ -125,6 +202,7 @@ foehn open radar_precip --match cpcYYDDDHHMM                   # one radar compo
 |---|---|
 | `--variables` | Restrict to these data variable(s) |
 | `--match` | Keep only source files whose name contains this substring (required for GRIB2/radar, selects 1 file) |
+| `--data-dir PATH` | Root data directory; source files are cached under its `bronze/` |
 
 ---
 
@@ -150,17 +228,37 @@ foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack    # GRIB2 -> (time, 
 | `--match` | Keep only source files whose name contains this substring |
 | `--out` | Explicit output path for the .zarr store |
 | `--stack` | Cube the matched files, by whichever method the dataset's kind uses (radar → time,y,x; GRIB2 → N-D). Takes no value; the v0.4 spellings `--stack auto` and `--stack time` are still accepted and select nothing the kind does not already decide |
+| `--data-dir PATH` | Root data directory; the default store lands under its `zarr/` |
 
 ---
 
 ## `foehn mcp`
 
 Start the [MCP server](mcp-server.md). Needs the `mcp` extra
-(`pip install "foehn[mcp]"`).
+(`pip install "foehn[mcp]"`). Under the default stdio transport, stdout carries
+the protocol, so everything foehn logs goes to stderr.
 
 | Flag | Description |
 |---|---|
 | `--transport` | `stdio` (default), `streamable-http`, or `sse` (deprecated by MCP in favour of `streamable-http`) |
+
+---
+
+## `foehn version`
+
+Print foehn's version, the Python version and platform, where the data
+directory resolves to, and the installed version of every dependency foehn can
+use. Paste it into bug reports. `foehn.show_versions()` prints the same from
+Python; `foehn --version` prints only the version.
+
+```bash
+foehn version
+foehn version --output-format json
+```
+
+| Flag | Description |
+|---|---|
+| `--output-format` | `table` (default, the plain-text report) or `json` |
 
 ---
 
@@ -172,3 +270,5 @@ Settings can also be configured via environment variables. CLI flags always take
 |---|---|---|
 | `FOEHN_DATA_DIR` | `--data-dir` | Root data directory. Also honoured by the Python API, which uses it whenever `data_dir=` is not passed. |
 | `FOEHN_FULL_REFRESH` | `--full-refresh` | Set to `1`, `true`, or `yes` to ignore incremental tracking |
+| `NO_COLOR` | `--color never` | Any non-empty value turns colour off ([no-color.org](https://no-color.org)) |
+| `FORCE_COLOR` | `--color always` | Any non-empty value turns colour on, even when stderr is not a terminal. `NO_COLOR` wins if both are set |

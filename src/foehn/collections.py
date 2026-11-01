@@ -99,6 +99,7 @@ format — this is what each foehn reader relies on:
             ODIM reader extracts these to build the scaled, LV95-georeferenced grid.
 """
 
+import difflib
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -137,7 +138,23 @@ def collection_id(dataset: str) -> str:
     try:
         return COLLECTIONS[dataset]
     except KeyError:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.") from None
+        message = f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets."
+        suggestion = suggest_dataset(dataset)
+        if suggestion is not None:
+            message += f" Did you mean {suggestion!r}?"
+        raise ValueError(message) from None
+
+
+def suggest_dataset(name: object) -> str | None:
+    """The known **Dataset** closest to a mistyped *name*, or None if nothing is close.
+
+    Shared by every front end, so ``foehn.load("smm")``, ``foehn load smm`` and
+    the MCP tools all answer a typo with the same suggestion.
+    """
+    if not isinstance(name, str):
+        return None
+    matches = difflib.get_close_matches(name.lower(), COLLECTIONS, n=1, cutoff=0.6)
+    return matches[0] if matches else None
 
 
 def kind(dataset: str) -> DatasetKind:

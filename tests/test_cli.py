@@ -295,8 +295,10 @@ def test_list_format_filter(tmp_path, capsys):
 
 def test_list_no_matches(tmp_path, capsys):
     _run("list", ["--category", "Z"], tmp_path)
-    out = capsys.readouterr().out
-    assert "No datasets match" in out
+    captured = capsys.readouterr()
+    # A diagnostic, not output: stdout stays empty so `foehn list ... | wc -l` reads 0.
+    assert "No datasets match" in captured.err
+    assert captured.out == ""
 
 
 # --- incremental update ---
@@ -313,9 +315,9 @@ def test_incremental_prints_since(tmp_path, capsys):
         for p in patchers:
             p.stop()
 
-    out = capsys.readouterr().out
-    assert "Incremental update" in out
-    assert "changes since 2025-01-01T00:00:00+00:00" in out
+    err = capsys.readouterr().err
+    assert "Incremental update" in err
+    assert "changes since 2025-01-01T00:00:00+00:00" in err
 
 
 # --- failure gating ---
@@ -542,8 +544,9 @@ def test_metadata_empty(capsys):
         patch("sys.argv", ["foehn", "metadata", "parameters", "smn"]),
     ):
         main()
-    out = capsys.readouterr().out
-    assert "No parameters metadata found" in out
+    captured = capsys.readouterr()
+    assert "No parameters metadata found" in captured.err
+    assert captured.out == ""
 
 
 # --- The grid subcommands ---
@@ -669,3 +672,344 @@ def test_successive_downloads_each_list_what_they_have_never_fetched(tmp_path, c
 
     assert (workspace.bronze("pollen") / "ogd-pollen_pbe_d_recent.csv").exists()
     assert (workspace.bronze("smn") / "ogd-smn_ber_d_historical.csv").exists()
+
+
+# --- Output conventions: data on stdout, diagnostics on stderr ---
+
+
+def _main(argv, capsys):
+    """Run ``foehn <argv>`` and return (exit status, stdout, stderr)."""
+    code = 0
+    try:
+        main(argv)
+    except SystemExit as exc:
+        code = exc.code
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_load_preview_shows_every_requested_row(capsys):
+    """Polars cuts any frame to ten rows by default, so -n 30 printed ten and an ellipsis."""
+    fake_df = pl.DataFrame({"a": range(100)})
+    with patch("foehn.api.load", return_value=fake_df):
+        code, out, _ = _main(["load", "smn", "-n", "30"], capsys)
+
+    assert code == 0
+    assert "…" not in out
+    assert "│ 29  │" in out
+    assert "│ 30  │" not in out
+
+
+def test_load_preview_of_zero_rows_shows_none(capsys):
+    """``-n 0`` meant 20: the default was applied with ``or``, which 0 fails."""
+    fake_df = pl.DataFrame({"a": [101, 102, 103]})
+    with patch("foehn.api.load", return_value=fake_df):
+        code, out, _ = _main(["load", "smn", "-n", "0"], capsys)
+
+    assert code == 0
+    assert "101" not in out
+    assert "[3 rows x 1 columns]" in out
+
+
+@pytest.mark.parametrize(
+    ("output_format", "expected"),
+    [
+        ("csv", "a,b\n1,x\n2,y\n"),
+        ("ndjson", '{"a":1,"b":"x"}\n{"a":2,"b":"y"}\n'),
+    ],
+)
+def test_load_writes_every_row_in_a_machine_format(capsys, output_format, expected):
+    fake_df = pl.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    with patch("foehn.api.load", return_value=fake_df):
+        code, out, _ = _main(["load", "smn", "--output-format", output_format], capsys)
+
+    assert code == 0
+    assert out == expected
+
+
+def test_load_json_is_one_array_of_rows(capsys):
+    import json
+
+    fake_df = pl.DataFrame({"a": [1, 2]})
+    with patch("foehn.api.load", return_value=fake_df):
+        _, out, _ = _main(["load", "smn", "--output-format", "json"], capsys)
+
+    assert json.loads(out) == [{"a": 1}, {"a": 2}]
+
+
+@pytest.mark.parametrize("suffix", [".parquet", ".csv", ".json", ".ndjson", ".jsonl"])
+def test_load_output_writes_the_format_its_suffix_names(tmp_path, capsys, suffix):
+    fake_df = pl.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    target = tmp_path / "nested" / f"out{suffix}"
+    with patch("foehn.api.load", return_value=fake_df):
+        code, out, err = _main(["load", "smn", "-o", str(target)], capsys)
+
+    assert code == 0
+    assert out == ""
+    assert "Wrote 2 rows x 2 columns" in err
+    readers = {
+        ".parquet": pl.read_parquet,
+        ".csv": pl.read_csv,
+        ".json": pl.read_json,
+        ".ndjson": pl.read_ndjson,
+        ".jsonl": pl.read_ndjson,
+    }
+    assert readers[suffix](target).equals(fake_df)
+
+
+def test_load_output_with_an_unknown_suffix_names_the_ones_it_knows(tmp_path, capsys):
+    with patch("foehn.api.load", return_value=pl.DataFrame({"a": [1]})):
+        code, _, err = _main(["load", "smn", "-o", str(tmp_path / "out.xlsx")], capsys)
+
+    assert code == 1
+    assert "foehn: error: cannot tell which format" in err
+    assert "hint: end the path in one of .parquet" in err
+    assert not (tmp_path / "out.xlsx").exists()
+
+
+@pytest.mark.parametrize("output_format", ["csv", "json", "ndjson"])
+def test_metadata_writes_a_machine_format(capsys, output_format):
+    fake_df = pl.DataFrame({"shortname": ["tre200d0"], "unit": ["°C"]})
+    with patch("foehn.cli.metadata", return_value=fake_df):
+        code, out, _ = _main(["metadata", "parameters", "smn", "--output-format", output_format], capsys)
+
+    assert code == 0
+    assert "tre200d0" in out
+    assert "°C" in out
+    assert "─" not in out  # no table rule
+
+
+def test_list_json_is_the_list_datasets_rows(capsys):
+    import json
+
+    import foehn
+
+    code, out, _ = _main(["list", "--output-format", "json"], capsys)
+
+    assert code == 0
+    assert json.loads(out) == foehn.list_datasets()
+
+
+def test_list_csv_flattens_the_list_columns(capsys):
+    code, out, _ = _main(["list", "--category", "A", "--output-format", "csv"], capsys)
+
+    assert code == 0
+    header, *rows = out.splitlines()
+    assert header.startswith("dataset,collection_id,")
+    smn = next(row for row in rows if row.startswith("smn,"))
+    assert '"t,h,d,m,y"' in smn
+
+
+def test_the_librarys_log_goes_to_stderr_never_stdout(tmp_path, capsys):
+    """stdout is the command's output — and, under `foehn mcp`, the JSON-RPC stream.
+
+    The CLI's handler wrote the library's log to stdout, so any download behind
+    an MCP tool call (describe_grid opens a grid, which fetches its file) put a
+    progress line into the protocol channel.
+    """
+    import logging
+
+    def download(*_args, **_kwargs):
+        logging.getLogger("foehn.transfer").info("  [1/1] Downloaded: x.csv")
+        logging.getLogger("foehn.transfer").warning("  Failed: y.csv")
+        return type("Result", (), {"failed": 0})()
+
+    with patch("foehn.registry.download", side_effect=download), patch("foehn.registry.convert", return_value=0):
+        code, out, err = _main(["download", "smn", "--data-dir", str(tmp_path)], capsys)
+
+    assert code == 0
+    assert out == ""
+    assert "[1/1] Downloaded: x.csv" in err
+    assert "warning:   Failed: y.csv" in err
+
+
+def test_a_logged_error_is_labelled_and_survives_double_quiet(tmp_path, capsys):
+    import logging
+
+    def download(*_args, **_kwargs):
+        logging.getLogger("foehn.transfer").error("disk full")
+        return type("Result", (), {"failed": 0})()
+
+    with patch("foehn.registry.download", side_effect=download), patch("foehn.registry.convert", return_value=0):
+        _, out, err = _main(["download", "smn", "-qq", "--data-dir", str(tmp_path)], capsys)
+
+    assert out == ""
+    assert err == "error: disk full\n"
+
+
+def test_mcp_logs_to_stderr(capsys):
+    import logging
+
+    def serve(transport):
+        logging.getLogger("foehn.grids").info("downloading a grid file")
+
+    with patch("foehn.mcp_server.run", side_effect=serve):
+        code, out, err = _main(["mcp"], capsys)
+
+    assert code == 0
+    assert out == ""
+    assert "downloading a grid file" in err
+
+
+@pytest.mark.parametrize("argv", [["-q", "download", "smn"], ["download", "smn", "--quiet"]])
+def test_quiet_silences_progress_before_or_after_the_subcommand(tmp_path, capsys, argv):
+    import logging
+
+    def download(*_args, **_kwargs):
+        logging.getLogger("foehn.transfer").info("  [1/1] Downloaded: x.csv")
+        return type("Result", (), {"failed": 0})()
+
+    with patch("foehn.registry.download", side_effect=download), patch("foehn.registry.convert", return_value=0):
+        code, out, err = _main([*argv, "--data-dir", str(tmp_path)], capsys)
+
+    assert code == 0
+    assert out == err == ""
+
+
+def test_double_quiet_silences_warnings(tmp_path, capsys):
+    mocks, patchers = _start_mocks()
+    mocks["download"].return_value.failed = 1
+    try:
+        code, _, err = _main(["download", "smn", "-qq", "--data-dir", str(tmp_path)], capsys)
+    finally:
+        for p in patchers:
+            p.stop()
+
+    assert code == 1
+    assert err == ""
+
+
+def test_verbose_shows_the_librarys_debug_log(tmp_path, capsys):
+    import logging
+
+    def download(*_args, **_kwargs):
+        logging.getLogger("foehn.fetch").debug("GET https://example")
+        return type("Result", (), {"failed": 0})()
+
+    with patch("foehn.registry.download", side_effect=download), patch("foehn.registry.convert", return_value=0):
+        _, _, quiet_err = _main(["download", "smn", "--data-dir", str(tmp_path)], capsys)
+        _, _, verbose_err = _main(["-v", "download", "smn", "--data-dir", str(tmp_path)], capsys)
+
+    assert "GET https://example" not in quiet_err
+    assert "GET https://example" in verbose_err
+
+
+# --- Errors ---
+
+
+@pytest.mark.parametrize("flag", ["--workers", "-n", "--limit"])
+def test_a_bad_count_is_a_usage_error_before_anything_runs(tmp_path, capsys, flag):
+    """--workers 0 used to print a header, create the Workspace, then fail deep in the run."""
+    value = "0" if flag == "--workers" else "-1"
+    workspace = tmp_path / "ws"
+    argv = (
+        ["download", "smn", "--workers", value, "--data-dir", str(workspace)]
+        if flag == "--workers"
+        else ["load", "smn", flag, value]
+    )
+    with patch("foehn.api.load") as load:
+        code, out, err = _main(argv, capsys)
+
+    assert code == 2
+    assert out == ""
+    assert flag in err
+    load.assert_not_called()
+    assert not workspace.exists()
+
+
+def test_an_unknown_dataset_suggests_the_closest_one(tmp_path, capsys):
+    code, _, err = _main(["download", "smm", "--data-dir", str(tmp_path / "ws")], capsys)
+
+    assert code == 1
+    assert err.splitlines() == ["foehn: error: unknown dataset 'smm'", "  hint: did you mean 'smn'?"]
+    assert not (tmp_path / "ws").exists()
+
+
+def test_an_unknown_dataset_with_nothing_close_points_at_foehn_list(tmp_path, capsys):
+    _, _, err = _main(["to-parquet", "bogus", "--data-dir", str(tmp_path)], capsys)
+
+    assert "hint: run 'foehn list'" in err
+
+
+def test_a_closed_stdout_ends_quietly(capsys):
+    """`foehn metadata inventory smn | head` died with a BrokenPipeError traceback."""
+    with patch("foehn.cli.metadata", side_effect=BrokenPipeError):
+        code, _, err = _main(["metadata", "inventory", "smn"], capsys)
+
+    assert code == 141
+    assert err == ""
+
+
+def test_interrupt_exits_130(capsys):
+    with patch("foehn.cli.metadata", side_effect=KeyboardInterrupt):
+        code, _, _ = _main(["metadata", "inventory", "smn"], capsys)
+
+    assert code == 130
+
+
+@pytest.mark.parametrize(
+    ("env", "argv", "colored"),
+    [
+        ({}, [], False),  # captured stderr is not a terminal
+        ({"FORCE_COLOR": "1"}, [], True),
+        ({"FORCE_COLOR": "1", "NO_COLOR": "1"}, [], False),
+        ({"NO_COLOR": "1"}, ["--color", "always"], True),
+        ({"FORCE_COLOR": "1"}, ["--color", "never"], False),
+    ],
+)
+def test_error_colour_follows_the_flag_then_the_environment(capsys, monkeypatch, env, argv, colored):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    _, _, err = _main([*argv, "load", "bogus"], capsys)
+
+    assert ("\033[" in err) is colored
+
+
+# --- version ---
+
+
+def test_version_subcommand_prints_the_report(capsys):
+    import foehn
+
+    code, out, _ = _main(["version"], capsys)
+
+    assert code == 0
+    assert f"foehn:       {foehn.__version__}" in out
+    assert "polars:" in out
+
+
+def test_version_subcommand_json(capsys):
+    import json
+
+    import foehn
+
+    code, out, _ = _main(["version", "--output-format", "json"], capsys)
+
+    report = json.loads(out)
+    assert code == 0
+    assert report["foehn"] == foehn.__version__
+    assert report["dependencies"]["polars"] == pl.__version__
+
+
+def test_short_version_flag(capsys):
+    import foehn
+
+    code, out, _ = _main(["-V"], capsys)
+
+    assert code == 0
+    assert out.strip() == f"foehn {foehn.__version__}"
+
+
+def test_python_dash_m_runs_the_cli():
+    import subprocess
+    import sys
+
+    import foehn
+
+    # S603: a fixed argument list running this interpreter, not input.
+    result = subprocess.run([sys.executable, "-m", "foehn", "--version"], capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == f"foehn {foehn.__version__}"

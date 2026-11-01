@@ -1,5 +1,7 @@
 """Tests for collections constants and routing sets."""
 
+import pytest
+
 from foehn.api import list_datasets
 from foehn.collections import (
     CATEGORIES,
@@ -303,3 +305,23 @@ def test_copying_a_nested_catalogue_list_hands_back_a_plain_list():
     assert type(clone) is list
     clone.append("mine")  # the copy is theirs to change
     assert COLLECTION_META["smn"]["time_slices"] == ["historical", "recent", "now"]
+
+
+# --- typo suggestions ---
+
+
+@pytest.mark.parametrize(
+    ("typo", "expected"),
+    [("smm", "smn"), ("SMN", "smn"), ("climate_normal", "climate_normals"), ("nope", None), (None, None)],
+)
+def test_suggest_dataset(typo, expected):
+    from foehn.collections import suggest_dataset
+
+    assert suggest_dataset(typo) == expected
+
+
+def test_an_unknown_dataset_error_suggests_the_closest_one():
+    import foehn
+
+    with pytest.raises(ValueError, match=r"Unknown dataset: 'smm'\. .* Did you mean 'smn'\?"):
+        foehn.load("smm")
