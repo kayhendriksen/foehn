@@ -10,10 +10,10 @@ from pathlib import Path
 
 import polars as pl
 
-from foehn import registry
+from foehn import __version__, registry
 from foehn.api import METADATA_TABLES, list_datasets, metadata
 from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS, DEFAULT_TIME_SLICE
-from foehn.fetch import DEFAULT_WORKERS, default_fetcher
+from foehn.fetch import DEFAULT_WORKERS, FetchError, default_fetcher
 from foehn.state import advance_cursor, load_cursor, run_watermark
 from foehn.workspace import Workspace
 
@@ -82,6 +82,8 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_download(args: argparse.Namespace) -> None:
+    # Resolved first, so an unknown name is refused before anything is created.
+    datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
     workspace = Workspace.resolve(args.data_dir)
     workspace.bronze().mkdir(parents=True, exist_ok=True)
 
@@ -96,7 +98,6 @@ def cmd_download(args: argparse.Namespace) -> None:
     print("Full download" if full_refresh else "Incremental update (per-dataset cursors)", flush=True)
     print(f"Time slices: {time_slices}", flush=True)
 
-    datasets = _resolve_datasets(args.datasets, allow_grids=args.grids)
     fetcher = default_fetcher()
     watermark = run_watermark()
 
@@ -225,7 +226,16 @@ def cmd_to_zarr(args: argparse.Namespace) -> None:
 
 
 def cmd_mcp(args: argparse.Namespace) -> None:
-    from foehn.mcp_server import run
+    try:
+        from foehn.mcp_server import run
+    except ModuleNotFoundError as exc:
+        # By package, not module: an mcp too old to have ``mcp.server.mcpserver``
+        # is fixed by the same install.
+        if (exc.name or "").split(".")[0] not in {"mcp", "pydantic"}:
+            raise
+        raise ImportError(
+            "The MCP server needs the optional 'mcp' dependencies. Install them with: pip install \"foehn[mcp]\""
+        ) from exc
 
     run(transport=args.transport)
 
@@ -301,6 +311,7 @@ def main() -> None:
         prog="foehn",
         description="Download MeteoSwiss Open Data and convert to Parquet.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- foehn list ---
@@ -402,11 +413,18 @@ def main() -> None:
     sub_mcp = subparsers.add_parser("mcp", help="Start the MCP server for LLM integration")
     sub_mcp.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "streamable-http", "sse"],
         default="stdio",
-        help="Transport protocol (default: stdio)",
+        help="Transport protocol (default: stdio). 'sse' is deprecated by MCP in favour of 'streamable-http'",
     )
     sub_mcp.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except (ValueError, FetchError, ImportError) as exc:
+        # The messages foehn raises for these name the fix already; a traceback
+        # under them only buries it.
+        parser.exit(1, f"{parser.prog}: error: {exc}\n")
+    except KeyboardInterrupt:
+        parser.exit(130)

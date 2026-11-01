@@ -601,6 +601,9 @@ def _write_zarr(
     if rechunk:
         _require_dask()
         ds = ds.chunk(rechunk)
+    # Created here, at the first write, rather than by the caller up front: a
+    # refused request must not leave an empty directory behind.
+    store.parent.mkdir(parents=True, exist_ok=True)
     with warnings.catch_warnings():
         # xarray writes consolidated metadata by default. zarr-python 3 warns that
         # this is outside the Zarr v3 spec, but we keep it on purpose: it's purely
@@ -1135,39 +1138,50 @@ def cube_grib2(
     """
     xr = _require_xarray()
 
-    with icon.quiet_cfgrib():
-        datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs={"indexpath": ""}) for f in sorted(files)]
-    # Promote whichever independent axes actually differ across the matched files.
-    varying = [
-        coord
-        for coord in ("number", "time", "step")
-        if len({ds[coord].values.tobytes() for ds in datasets if coord in ds.coords}) > 1
-    ]
-    if not varying:
-        raise ValueError(
-            f"The match selected files that don't differ in number/time/step for {dataset!r} — "
-            "nothing to assemble into a cube (open it as a single field instead)."
-        )
-    # Only where the axis is still a scalar: a control file carries ``number=0``,
-    # but a perturbed file holds every member and already has ``number`` as a
-    # dimension, which expanding again refused outright.
-    prepared = [
-        ds.drop_vars("valid_time", errors="ignore").expand_dims([coord for coord in varying if coord not in ds.dims])
-        for ds in datasets
-    ]
-    cube = xr.combine_by_coords(prepared, combine_attrs="drop_conflicts")
-    if "time" in cube.coords and "step" in cube.coords:
-        cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])
+    # Closed on every exit, the way _open_grid closes its per-file opens: a cube
+    # is up to 1000 files, and leaving each one open until garbage collection
+    # can run a process out of descriptors before the write is reached.
+    datasets: list = []
+    try:
+        with icon.quiet_cfgrib():
+            for source in sorted(files):
+                # Not a comprehension: the finally below needs the partial list.
+                datasets.append(xr.open_dataset(source, engine="cfgrib", backend_kwargs={"indexpath": ""}))  # noqa: PERF401
+        # Promote whichever independent axes actually differ across the matched files.
+        varying = [
+            coord
+            for coord in ("number", "time", "step")
+            if len({ds[coord].values.tobytes() for ds in datasets if coord in ds.coords}) > 1
+        ]
+        if not varying:
+            raise ValueError(
+                f"The match selected files that don't differ in number/time/step for {dataset!r} — "
+                "nothing to assemble into a cube (open it as a single field instead)."
+            )
+        # Only where the axis is still a scalar: a control file carries ``number=0``,
+        # but a perturbed file holds every member and already has ``number`` as a
+        # dimension, which expanding again refused outright.
+        prepared = [
+            ds.drop_vars("valid_time", errors="ignore").expand_dims(
+                [coord for coord in varying if coord not in ds.dims]
+            )
+            for ds in datasets
+        ]
+        cube = xr.combine_by_coords(prepared, combine_attrs="drop_conflicts")
+        if "time" in cube.coords and "step" in cube.coords:
+            cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])
 
-    cube = select_variables(cube, variables)
-    cube = icon.attach_lonlat(
-        cube,
-        dataset,
-        workspace,
-        fetcher=fetcher,
-        what="the cube is on the bare unstructured grid.",
-    )
-    _write_zarr(cube, store, mode)
+        cube = select_variables(cube, variables)
+        cube = icon.attach_lonlat(
+            cube,
+            dataset,
+            workspace,
+            fetcher=fetcher,
+            what="the cube is on the bare unstructured grid.",
+        )
+        _write_zarr(cube, store, mode)
+    finally:
+        _close_each(datasets)
 
 
 __all__ = [

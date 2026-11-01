@@ -1,6 +1,11 @@
 # CLI Reference
 
-The CLI uses subcommands that mirror the Python API.
+The CLI uses subcommands that mirror the Python API. `foehn --version` prints
+the installed version.
+
+A command that fails on its input — an unknown dataset, a filter the dataset
+does not support, an unreachable API — prints one `foehn: error: ...` line to
+stderr and exits with status 1.
 
 ---
 
@@ -37,7 +42,7 @@ foehn download smn pollen   # specific datasets only
 | `--historical` | Include historical time slice |
 | `--now` | Include realtime "now" time slice |
 | `--all` | Include all time slices (historical + recent + now) |
-| `--full-refresh` | Ignore incremental tracking, re-download everything |
+| `--full-refresh` | Ignore incremental tracking and re-download everything, without sending stored ETags or trusting local files — repairs a damaged cache |
 | `--grids` | Include NetCDF, GRIB2, and HDF5/radar datasets when no datasets are named |
 | `--no-parquet` | Skip CSV to Parquet conversion |
 | `--workers` | Concurrent downloads per dataset; must be positive (default: 8) |
@@ -145,6 +150,17 @@ foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack    # GRIB2 -> (time, 
 | `--match` | Keep only source files whose name contains this substring |
 | `--out` | Explicit output path for the .zarr store |
 | `--stack` | Cube the matched files, by whichever method the dataset's kind uses (radar → time,y,x; GRIB2 → N-D). Takes no value; the v0.4 spellings `--stack auto` and `--stack time` are still accepted and select nothing the kind does not already decide |
+
+---
+
+## `foehn mcp`
+
+Start the [MCP server](mcp-server.md). Needs the `mcp` extra
+(`pip install "foehn[mcp]"`).
+
+| Flag | Description |
+|---|---|
+| `--transport` | `stdio` (default), `streamable-http`, or `sse` (deprecated by MCP in favour of `streamable-http`) |
 
 ---
 

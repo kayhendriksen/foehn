@@ -77,7 +77,13 @@ grids = [
     "h5py>=3.0",
     "zarr>=3.0",
     "cfgrib>=0.9.12",
-    "eccodes>=1.7",
+    # From 2.43 the ecCodes C library ships in eccodeslib rather than inside the
+    # eccodes wheels. eccodes declares it only in its py3-none-any wheel, which
+    # uv's universal lock does not read (it takes the Windows wheel's metadata,
+    # where the library is bundled), so a uv-managed install had no ecCodes
+    # library at all on Linux and macOS. Stated here, every installer gets it.
+    "eccodes>=2.43",
+    "eccodeslib>=2.43; platform_system != 'Windows'",
     "pyproj>=3.0",
 ]
 dev = [
@@ -86,7 +92,7 @@ dev = [
     # bump can turn a green PR red on its own. Dependabot bumps this weekly, so
     # the upgrade arrives as its own reviewable PR rather than landing on whoever
     # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
-    # which CI reads — see scripts/hook_version.sh.)
+    # which CI reads — see scripts/tool_version.sh.)
     "ty==0.0.91",
     "numpy>=1.24",
     "pydantic>=2.0",
@@ -102,7 +108,8 @@ dev = [
     "h5netcdf>=1.0",
     "zarr>=3.0",
     "cfgrib>=0.9.12",
-    "eccodes>=1.7",
+    "eccodes>=2.43",
+    "eccodeslib>=2.43; platform_system != 'Windows'",
     "h5py>=3.0",
     "pyproj>=3.0",
 ]

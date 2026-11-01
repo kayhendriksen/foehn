@@ -34,6 +34,22 @@ Add foehn to your MCP client config:
 }
 ```
 
+Or, without installing anything first, let [uv](https://docs.astral.sh/uv/) fetch
+it on demand — this is also what MCP Registry clients run:
+
+```json
+{
+  "mcpServers": {
+    "foehn": {
+      "command": "uvx",
+      "args": ["--with=foehn[mcp]", "foehn", "mcp"]
+    }
+  }
+}
+```
+
+`foehn mcp --transport streamable-http` serves over HTTP instead of stdio.
+
 ---
 
 ## Available tools

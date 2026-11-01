@@ -145,11 +145,17 @@ def unstructured_lonlat(
     lat = lon = None
     with quiet_cfgrib():
         constants = cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
-    for ds in constants:
-        if "tlat" in ds.variables:
-            lat = ds["tlat"].values
-        if "tlon" in ds.variables:
-            lon = ds["tlon"].values
+    try:
+        for ds in constants:
+            if "tlat" in ds.variables:
+                lat = ds["tlat"].values
+            if "tlon" in ds.variables:
+                lon = ds["tlon"].values
+    finally:
+        # ``.values`` has read the arrays; the open files are not needed past here.
+        for ds in constants:
+            with contextlib.suppress(Exception):
+                ds.close()
     # Only memoise a real answer. Caching the (None, None) from a transient
     # failure — offline, a half-written constants file — would poison every
     # later open in this process with an ungeoreferenced grid.

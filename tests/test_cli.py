@@ -217,6 +217,66 @@ def test_unknown_dataset_exits(tmp_path):
         _run("download", ["nonexistent_dataset"], tmp_path)
 
 
+def test_unknown_dataset_is_refused_before_the_workspace_is_created(tmp_path):
+    workspace = tmp_path / "ws"
+    with pytest.raises(SystemExit):
+        _run("download", ["nonexistent_dataset", "--data-dir", str(workspace)], tmp_path)
+
+    assert not workspace.exists()
+
+
+# --- errors and version ---
+
+
+def test_version_prints_the_package_version(capsys):
+    import foehn
+
+    with patch("sys.argv", ["foehn", "--version"]), pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"foehn {foehn.__version__}"
+
+
+def test_a_user_error_is_one_line_on_stderr_not_a_traceback(capsys):
+    with patch("sys.argv", ["foehn", "load", "bogus"]), pytest.raises(SystemExit) as exc:
+        main()
+
+    err = capsys.readouterr().err
+    assert exc.value.code == 1
+    assert err.startswith("foehn: error: Unknown dataset: 'bogus'")
+    assert "Traceback" not in err
+
+
+def test_a_network_failure_is_reported_without_a_traceback(capsys):
+    from foehn.fetch import FetchError
+
+    with (
+        patch("foehn.api.load", side_effect=FetchError("ConnectionError fetching https://data.geo.admin.ch/x")),
+        patch("sys.argv", ["foehn", "load", "smn"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        main()
+
+    assert exc.value.code == 1
+    assert "foehn: error: ConnectionError fetching" in capsys.readouterr().err
+
+
+def test_mcp_without_its_extra_names_the_install_command(capsys, monkeypatch):
+    import sys
+
+    # Unimportable ``mcp``, and a fresh import of the server module that needs it.
+    for name in [m for m in sys.modules if m.startswith("mcp.")] + ["foehn.mcp_server"]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "mcp", None)
+
+    with patch("sys.argv", ["foehn", "mcp"]), pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    assert 'pip install "foehn[mcp]"' in capsys.readouterr().err
+
+
 # --- list filters ---
 
 
@@ -529,14 +589,15 @@ def test_to_zarr_prints_the_store_path(tmp_path, capsys):
     assert str(store) in capsys.readouterr().out
 
 
-def test_mcp_starts_the_server_on_the_requested_transport():
+@pytest.mark.parametrize("transport", ["stdio", "streamable-http", "sse"])
+def test_mcp_starts_the_server_on_the_requested_transport(transport):
     with (
         patch("foehn.mcp_server.run") as run,
-        patch("sys.argv", ["foehn", "mcp", "--transport", "sse"]),
+        patch("sys.argv", ["foehn", "mcp", "--transport", transport]),
     ):
         main()
 
-    run.assert_called_once_with(transport="sse")
+    run.assert_called_once_with(transport=transport)
 
 
 def test_named_datasets_are_used_as_given(tmp_path):

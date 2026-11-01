@@ -14,13 +14,22 @@
       "registryType": "pypi",
       "identifier": "foehn",
       "version": "0.5.0",
+      "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
       },
       "runtimeArguments": [
         {
+          "type": "named",
+          "name": "--with",
+          "value": "foehn[mcp]==0.5.0",
+          "description": "Install the optional MCP server dependencies alongside foehn"
+        }
+      ],
+      "packageArguments": [
+        {
           "type": "positional",
-          "valueHint": "mcp"
+          "value": "mcp"
         }
       ]
     }

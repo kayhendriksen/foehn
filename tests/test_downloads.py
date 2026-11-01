@@ -126,6 +126,54 @@ def test_csv_download_skips_unchanged_asset(tmp_path):
     assert out.read_text() == "existing"  # untouched
 
 
+def test_forced_csv_download_replaces_a_file_its_etag_still_matches(tmp_path):
+    """``--full-refresh`` must repair a damaged cache, not get a 304 over it."""
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(url)])
+    _serve(fake, b"station_abbr;value\nTST;1.0\n", etag='"v1"')
+    save_etags(Workspace(tmp_path), {url: '"v1"'})
+    out = tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("corrupted")
+
+    result = registry.download("smn", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.downloaded == 1
+    assert result.skipped == 0
+    assert out.read_text() == "station_abbr;value\nTST;1.0\n"
+    assert load_etags(Workspace(tmp_path)) == {url: '"v1"'}
+
+
+def test_a_failed_forced_csv_download_forgets_the_etag(tmp_path):
+    """The file on disk is no longer vouched for, so the next run fetches it outright."""
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(url)])
+    _serve(fake, etag='"v1"')
+    save_etags(Workspace(tmp_path), {url: '"v1"'})
+    out = tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("corrupted")
+    fake.fail(url)
+
+    result = registry.download("smn", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.failed == 1
+    assert url not in load_etags(Workspace(tmp_path))
+
+
+def test_forced_binary_download_replaces_an_existing_file(tmp_path):
+    href = "https://data.geo.admin.ch/forecast.grib2"
+    fake = _fake([_stac_item(href)], body=b"GRIBdata")
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    (out_dir / "forecast.grib2").write_bytes(b"existing")
+
+    result = registry.download("forecast_icon_ch1", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.downloaded == 1
+    assert (out_dir / "forecast.grib2").read_bytes() == b"GRIBdata"
+
+
 def test_csv_download_ignores_stored_etag_when_file_is_gone(tmp_path):
     """Otherwise a 304 would report 'skipped' over a file that no longer exists."""
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
