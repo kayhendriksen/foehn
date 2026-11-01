@@ -92,31 +92,29 @@ def download(
             advances a dataset's when that dataset fully succeeds. Must carry a
             timezone; it is compared as an instant, not as text.
         workers: Concurrent HTTP downloads (default $default_workers).
-        force: Re-download even when local files look up to date. Currently
-            only affects ZIP-shipped datasets (e.g. climate_scenarios_indoor),
-            which otherwise skip when already extracted; other formats refresh
-            via ``since``/ETags.
+        force: Re-download every selected file even when the local copy looks
+            up to date: no freshness check, and no stored ETag sent, so a
+            damaged file in the cache is replaced. ``since`` still narrows which
+            files are selected.
 
     Returns:
         DownloadResult summarising the download. Use ``result.downloaded > 0``
         to gate expensive downstream processing and ``result.failed`` to detect
         partial failures.
     """
-    workspace = Workspace.resolve(data_dir)
-    workspace.bronze().mkdir(parents=True, exist_ok=True)
-    fetcher = default_fetcher()
-
     # Each kind knows its own download path, including the grid kinds, which have
     # no Parquet stage but still fetch their raw assets so the Python API mirrors
-    # the CLI's --grids behaviour (and open_dataset/to_zarr).
+    # the CLI's --grids behaviour (and open_dataset/to_zarr). The registry checks
+    # the dataset and time slices first, and the paths below it create the
+    # directories they write to — so a refused call leaves nothing behind.
     return registry.download(
         dataset,
-        workspace,
+        Workspace.resolve(data_dir),
         time_slice=time_slice,
         since=since,
         workers=workers,
         force=force,
-        fetcher=fetcher,
+        fetcher=default_fetcher(),
     )
 
 
@@ -133,13 +131,15 @@ def to_parquet(
 
     Raises:
         RuntimeError: If one or more groups fail to convert. Each failure is
-            also printed to stdout. Mirrors the CLI's exit-1 semantics so
-            Python callers can't accidentally treat partial output as success.
+            also logged as a warning on the ``foehn`` logger, naming the group
+            and the cause. Mirrors the CLI's exit-1 semantics so Python callers
+            can't accidentally treat partial output as success.
     """
     failures = registry.convert(dataset, Workspace.resolve(data_dir))
     if failures:
         raise RuntimeError(
-            f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
+            f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. "
+            "Each failure is logged as a warning by the 'foehn' logger."
         )
 
 
@@ -485,11 +485,11 @@ def to_zarr(
     # Where the default store lands, and how ``match`` is spelled into its name,
     # are the workspace's layout rather than facts stated here.
     store_path = Path(store) if store is not None else workspace.zarr(dataset, match)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Which method writes it — cube or single — is the kind's row, not a branch
     # here. So is whether the dataset has a Zarr path at all, which is what makes
-    # this the unknown-dataset guard too.
+    # this the unknown-dataset guard too; the store's directory is only created
+    # once something is written to it.
     registry.write_zarr(
         dataset,
         store_path,

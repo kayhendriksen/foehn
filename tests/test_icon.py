@@ -89,6 +89,28 @@ def test_icon_unstructured_lonlat_reads_and_caches(tmp_path):
     _COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)
 
 
+def test_the_constants_file_is_closed_once_its_coordinates_are_read(tmp_path):
+    pytest.importorskip("xarray")
+    cfgrib = pytest.importorskip("cfgrib")
+    import numpy as np
+    import xarray as xr
+
+    closed = []
+    const = xr.Dataset({"tlat": ("values", np.array([46.0])), "tlon": ("values", np.array([7.0]))})
+    const.set_close(lambda: closed.append(True))
+    fake_path = tmp_path / "hc.grib2"
+    fake_path.write_bytes(b"x")
+
+    with (
+        patch("foehn.icon.constants_file", return_value=fake_path),
+        patch.object(cfgrib, "open_datasets", return_value=[const]),
+    ):
+        lat, _ = unstructured_lonlat("forecast_icon_ch1", Workspace(tmp_path), fetcher=_fake())
+
+    assert list(lat) == [46.0]
+    assert closed == [True]
+
+
 def test_icon_unstructured_lonlat_none_when_no_constants(tmp_path):
     """No constants file → (None, None); the caller leaves the grid un-georeferenced."""
     _COORDS_CACHE.pop(("forecast_icon_ch1", str(tmp_path / "bronze")), None)

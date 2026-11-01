@@ -70,6 +70,16 @@ def test_download_unknown_dataset_raises():
         download("nonexistent")
 
 
+def test_a_refused_download_leaves_no_directory_behind(tmp_path):
+    workspace = tmp_path / "ws"
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        download("nonexistent", data_dir=workspace)
+    with pytest.raises(ValueError, match="Invalid time_slice"):
+        download("smn", data_dir=workspace, time_slice="bogus")
+
+    assert not workspace.exists()
+
+
 @pytest.mark.parametrize("dataset", ["smn", "forecast_icon_ch1", "surface_derived_grid", "climate_scenarios_indoor"])
 @patch("foehn.registry.download")
 def test_download_delegates_to_the_registry(mock_dl, dataset, tmp_path):

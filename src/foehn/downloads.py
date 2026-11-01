@@ -127,7 +127,8 @@ def stac_download(
         label: Noun for the per-file log lines ("CSV", "binary file").
         write: How one asset becomes one file — conditional GET for CSV,
             straight to disk for binaries.
-        skip: Decided locally before anything is queued.
+        skip: Decided locally before anything is queued. A ``force`` call
+            bypasses it, and the ETag store too.
         etags: Whether this kind keeps an ETag store (the conditional-GET path).
         list_items: How to list the Collection, for a kind whose plain walk is
             too slow — the GRIB2 forecasts are one item per file. Defaults to
@@ -156,8 +157,8 @@ def stac_download(
         time_slice: list[str],
         since: str | None = None,
         workers: int = DEFAULT_WORKERS,
+        force: bool = False,
         fetcher: Fetcher,
-        **_: object,
     ) -> DownloadResult:
         _since_instant(since)
         result = DownloadResult()
@@ -216,6 +217,12 @@ def stac_download(
             # so the ETag store is this kind's skip rule.
             etag_run = EtagRun.begin(workspace) if etags else None
             store = etag_run.values if etag_run is not None else None
+            if force and store is not None:
+                # Unconditional GETs: a stored ETag would come back 304 and keep
+                # whatever is on disk, however damaged. Each asset that downloads
+                # records its new ETag again; one that fails stays without one.
+                for asset in wanted:
+                    store.pop(asset.href, None)
 
             # Files a previous run left half-replaced are fetched again whatever
             # the freshness rule says. Without this a retry found both current —
@@ -223,7 +230,10 @@ def stac_download(
             # mtime is newer than it — skipped everything, called that success
             # and cleared a marker over a cache it had not repaired.
             forced = coherence.blocked(out_dir, names) if coherent else set()
-            run_skip = _skip_except(skip, forced) if forced else skip
+            if force:
+                run_skip = None
+            else:
+                run_skip = _skip_except(skip, forced) if forced else skip
 
             # Only the files this run replaces can leave the set mixed; the rest
             # are not touched and keep the generation they had. Marking the whole

@@ -31,13 +31,12 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - run: uv venv --python 3.12
-      - run: uv pip install -e ".[dev]"
+      - run: uv sync --locked --extra dev --python 3.12
 
       - name: Run live tests
         id: live
         # -m live overrides the default `-m 'not live'` from addopts.
-        run: .venv/bin/pytest -m live -v --no-header
+        run: uv run --no-sync pytest -m live -v --no-header
 
       - name: Open or update tracking issue on failure
         if: failure() && steps.live.outcome == 'failure'

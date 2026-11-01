@@ -21,10 +21,11 @@ zarr for writing:
 pip install "foehn[grids]"
 ```
 
-Core foehn stays at two dependencies; nothing above is imported until you call a
-grid function. One caveat: **eccodes** (pulled in for GRIB2) ships a system C
-library whose wheel can fail to build on some platforms — if so, that breaks the
-whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
+Core foehn depends only on requests, Polars and urllib3; nothing above is
+imported until you call a grid function. One caveat: GRIB2 needs the ecCodes C
+library, which arrives as the `eccodeslib` wheel on Linux (x86-64, aarch64) and
+macOS, and inside the `eccodes` wheel on Windows. On a platform with neither,
+that breaks the whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
 (`pip install dask`), deliberately **not** bundled in the extra.
 
 ---

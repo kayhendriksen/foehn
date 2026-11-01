@@ -768,6 +768,57 @@ def test_grib2_cube_refuses_a_match_whose_files_do_not_differ(fetcher, tmp_path)
         to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
 
 
+@pytest.mark.parametrize("builds", [True, False], ids=["written", "refused"])
+def test_a_grib2_cube_closes_every_file_it_opened(fetcher, tmp_path, monkeypatch, builds):
+    """Up to 1000 files per cube: each one held open until GC can exhaust descriptors."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+    pytest.importorskip("zarr")
+    names = (
+        ["icon-ch1-eps-202605230000-0-t_2m-ctrl", "icon-ch1-eps-202605230000-6-t_2m-ctrl"]
+        if builds
+        else ["icon-ch1-eps-202605230000-0-t_2m-ctrl", "icon-ch1-eps-202605230000-0-t_2m-ctrl-copy"]
+    )
+    fetcher.any_items = _items_for(*(f"{name}.grib2" for name in names))
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    for name in names:
+        _write_grib2(base / f"{name}.grib2", step=6 if name.endswith("-6-t_2m-ctrl") else 0)
+
+    opened, closed = [], []
+    real_open, real_close = xr.open_dataset, xr.Dataset.close
+
+    def tracking_open(*args, **kwargs):
+        ds = real_open(*args, **kwargs)
+        opened.append(ds)
+        return ds
+
+    def tracking_close(self):
+        closed.append(self)
+        return real_close(self)
+
+    monkeypatch.setattr(xr, "open_dataset", tracking_open)
+    monkeypatch.setattr(xr.Dataset, "close", tracking_close)
+
+    if builds:
+        to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
+    else:
+        with pytest.raises(ValueError, match="nothing to assemble"):
+            to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
+
+    assert len(opened) == 2
+    assert all(any(ds is shut for shut in closed) for ds in opened)
+
+
+def test_refused_to_zarr_leaves_no_directory_behind(tmp_path):
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        to_zarr("bogus", data_dir=tmp_path / "ws")
+    with pytest.raises(ValueError, match="tabular"):
+        to_zarr("smn", data_dir=tmp_path / "ws")
+
+    assert not (tmp_path / "ws").exists()
+
+
 def test_radar_cube_refuses_a_composite_with_no_time(fetcher, tmp_path):
     """Without a stamp there is no axis to append along, and appending anyway would misdate it."""
     pytest.importorskip("xarray")
