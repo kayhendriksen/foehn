@@ -7,7 +7,7 @@
 # with scripts/tool_version.sh rather than repeating them.
 #
 # ruff and zizmor are NOT here: they are pinned in .pre-commit-config.yaml, so
-# that local hooks and CI cannot disagree. ty is pinned in pyproject's dev extra,
+# that local hooks and CI cannot disagree. ty is pinned in pyproject's dev group,
 # because the typecheck job installs it rather than running it through uvx.
 # build, twine and hatchling are in requirements-publish.txt, locked with
 # hashes, because they produce and check the artifact that is published.

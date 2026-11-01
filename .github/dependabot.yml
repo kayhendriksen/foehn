@@ -1,6 +1,10 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  # pyproject.toml and uv.lock, bumped together. CI installs with
+  # `uv sync --locked`, which refuses a lockfile that no longer matches
+  # pyproject.toml — and the pip ecosystem below edits pyproject.toml alone, so
+  # every ty bump it opened would have failed CI on arrival.
+  - package-ecosystem: uv
     directory: "/"
     schedule:
       interval: weekly
@@ -17,6 +21,36 @@ updates:
       semver-patch-days: 7
     groups:
       # Split so a breaking major can't hold the safe patches hostage in one PR.
+      uv-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      uv-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
+
+  # requirements-ci.txt and the hash-locked requirements-publish.txt: the CI
+  # and release tools nothing imports. The one exact pin in pyproject.toml (ty)
+  # sits in [dependency-groups], which the uv ecosystem above owns along with
+  # uv.lock; everything in [project] is a floor, which this ecosystem leaves be.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:05"
+      timezone: Europe/Zurich
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 7
+    groups:
       python-patch-minor:
         patterns:
           - "*"

@@ -2,7 +2,7 @@
 
 The versions live in .pre-commit-config.yaml (tools that also run as local
 hooks), requirements-ci.txt (tools only CI runs), requirements-publish.txt (the
-hash-locked packaging toolchain) and the pyproject dev extra (ty) — four files
+hash-locked packaging toolchain) and the pyproject dev group (ty) — four files
 Dependabot bumps. The workflows read them back with
 scripts/tool_version.sh instead of repeating them. These tests guard that
 contract from the repo side, where a break shows up before it reaches CI.
@@ -162,7 +162,7 @@ def test_the_two_sources_do_not_overlap():
 def test_ty_is_pinned_exactly():
     """A floor would let a pre-1.0 bump land on an unrelated PR."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    dev = pyproject["dependency-groups"]["dev"]
     ty = next(d for d in dev if d.startswith("ty"))
 
     assert ty.startswith("ty=="), f"expected an exact pin, got {ty!r}"

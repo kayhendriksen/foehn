@@ -26,6 +26,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from foehn import __version__
 from foehn._urls import validate_download_href, validate_stac_url
 from foehn.atomicwrite import staged
 from foehn.collections import STAC_API_BASE
@@ -49,6 +50,11 @@ DEFAULT_WORKERS = 8
 _LISTING_TTL_FACTOR = 10.0
 _LISTING_TTL_MIN_SECONDS = 120.0
 _LISTING_TTL_MAX_SECONDS = 1800.0
+
+# Sent with every request, so the operators of the STAC API and the CDNs can tell
+# foehn's traffic apart from any other ``python-requests`` client — and know
+# where to report a problem with it — as uv and pip identify themselves.
+USER_AGENT = f"foehn/{__version__} (+https://github.com/kayhendriksen/foehn) python-requests/{requests.__version__}"
 
 
 class FetchError(Exception):
@@ -142,6 +148,7 @@ class HttpFetcher:
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
+        session.headers["User-Agent"] = USER_AGENT
         retry = Retry(
             total=self._retries,
             backoff_factor=self._backoff_factor,

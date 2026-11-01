@@ -383,6 +383,14 @@ def test_session_retries_transient_statuses():
     assert 503 in retry.status_forcelist
 
 
+def test_session_identifies_foehn():
+    import foehn
+
+    agent = HttpFetcher()._session().headers["User-Agent"]
+
+    assert agent.startswith(f"foehn/{foehn.__version__} (+https://github.com/kayhendriksen/foehn)")
+
+
 # --- the process-wide default --------------------------------------------
 
 

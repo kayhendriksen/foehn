@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in foehn does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please search the [existing issues](https://github.com/kayhendriksen/foehn/issues) first.
+        For a security vulnerability, do **not** open an issue — see [SECURITY.md](https://github.com/kayhendriksen/foehn/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The smallest command or Python snippet that shows the problem. Include the full error output.
+        MeteoSwiss data changes daily, so name the dataset, station and dates involved.
+      placeholder: |
+        foehn load smn --station BER --frequency d --year 2025
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of `foehn version` (or `python -c "import foehn; foehn.show_versions()"`).
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which part of foehn?
+      multiple: true
+      options:
+        - Python API
+        - CLI
+        - MCP server
+        - Gridded data (xarray / Zarr)
+        - Databricks ingestion
+        - Documentation
