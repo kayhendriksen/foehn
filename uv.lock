@@ -785,7 +785,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "cfgrib", marker = "extra == 'grids'", specifier = ">=0.9.12" },
-    { name = "delta-spark", marker = "extra == 'databricks'", specifier = ">=2.4,<5.0" },
+    { name = "delta-spark", marker = "extra == 'databricks'", specifier = ">=4.0,<5.0" },
     { name = "eccodes", marker = "extra == 'grids'", specifier = ">=2.43" },
     { name = "eccodeslib", marker = "sys_platform != 'win32' and extra == 'grids'", specifier = ">=2.43" },
     { name = "h5netcdf", marker = "extra == 'grids'", specifier = ">=1.0" },
@@ -797,7 +797,7 @@ requires-dist = [
     { name = "polars", extras = ["rtcompat"], marker = "extra == 'databricks'", specifier = ">=1.34" },
     { name = "pydantic", marker = "extra == 'mcp'", specifier = ">=2.0" },
     { name = "pyproj", marker = "extra == 'grids'", specifier = ">=3.0" },
-    { name = "pyspark", marker = "extra == 'databricks'", specifier = ">=3.5,<5.0" },
+    { name = "pyspark", marker = "extra == 'databricks'", specifier = ">=4.0,<5.0" },
     { name = "requests", specifier = ">=2.32" },
     { name = "urllib3", specifier = ">=1.26" },
     { name = "xarray", marker = "extra == 'grids'", specifier = ">=2024.1" },
@@ -822,7 +822,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
-    { name = "ruff", specifier = ">=0.9" },
+    { name = "ruff", specifier = ">=0.17.2" },
     { name = "ty", specifier = "==0.0.92" },
     { name = "xarray", specifier = ">=2024.1" },
     { name = "zarr", specifier = ">=3.0" },

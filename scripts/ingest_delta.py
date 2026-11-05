@@ -32,7 +32,7 @@ import contextlib
 import os
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -123,6 +123,23 @@ def _scan_and_collect(dataset: str, files: list[Path], metadata_types: dict[str,
         return combine_frames(frames, dataset)
 
 
+# What a Delta column name may not contain unless the table maps its columns by name.
+_DELTA_INVALID_NAME_CHARACTERS = frozenset(" ,;{}()\n\t=")
+
+
+def _needs_column_mapping(columns: Iterable[str]) -> bool:
+    """Whether a table with these columns can only be written with Delta column mapping.
+
+    The climate normals publish ``Altitude [m asl]``, ``CH coordinates`` and
+    ``Reference period``, and Delta refuses those names outright — so that table
+    was never written, and since a failed table fails the run, the daily ingest
+    exited 1 over it. Renaming them would part Delta from the Parquet and load
+    paths, which publish the same names; mapping by name keeps them. Applied only
+    where a name needs it, because it raises the table's reader protocol.
+    """
+    return any(_DELTA_INVALID_NAME_CHARACTERS & set(name) for name in columns)
+
+
 def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mode: str = "overwrite") -> None:
     """Convert a Polars DataFrame to Spark via Arrow and write to a Delta table."""
     spark_df = spark.createDataFrame(polars_df.to_arrow())
@@ -131,6 +148,8 @@ def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mo
         writer = writer.option("overwriteSchema", "true")
     else:
         writer = writer.option("mergeSchema", "true")
+    if _needs_column_mapping(polars_df.columns):
+        writer = writer.option("delta.columnMapping.mode", "name")
     writer.saveAsTable(table)
 
 
@@ -148,7 +167,11 @@ def _staging_table(table: str) -> str:
 
 def _publish_staged(spark: SparkSession, staging: str, table: str) -> None:
     """Replace *table* with the finished *staging* table in one overwrite."""
-    spark.table(staging).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+    staged = spark.table(staging)
+    writer = staged.write.mode("overwrite").option("overwriteSchema", "true")
+    if _needs_column_mapping(staged.columns):
+        writer = writer.option("delta.columnMapping.mode", "name")
+    writer.saveAsTable(table)
     spark.sql(f"DROP TABLE IF EXISTS {staging}")
 
 
@@ -184,8 +207,11 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
         # Escape backslashes before quotes — a trailing ``\'`` in the metadata
         # would otherwise escape the escape and close the SQL string literal.
         comment_escaped = comment.replace("\\", "\\\\").replace("'", "\\'")
+        # A backtick inside a quoted identifier is written twice; one of its own
+        # closed the identifier early. The name comes from upstream's CSV header.
+        column = shortname.replace("`", "``")
         with contextlib.suppress(Exception):
-            spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{shortname}` COMMENT '{comment_escaped}'")
+            spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{column}` COMMENT '{comment_escaped}'")
 
 
 def _ingest_metadata(

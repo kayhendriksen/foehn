@@ -2,7 +2,7 @@
 
 import re
 import shutil
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import polars as pl
 import pytest
@@ -212,6 +212,30 @@ def test_write_to_delta(mock_spark):
     writer.mode.return_value.option.assert_called_with("overwriteSchema", "true")
 
 
+def test_write_to_delta_maps_columns_by_name_when_a_name_needs_it(mock_spark):
+    """Delta refuses a space in a column name unless the table maps its columns by name.
+
+    The climate normals publish ``Altitude [m asl]``, so that table could never be
+    written — and since a failed table fails the run, the daily ingest exited 1
+    over it. Renaming the columns would part Delta from the Parquet and load
+    paths; mapping keeps the names they share.
+    """
+    _require_arrow()
+    _write_to_delta(mock_spark, pl.DataFrame({"Station": ["Bern"], "Altitude [m asl]": [553]}), "`c`.`s`.`t`")
+
+    writer = mock_spark.createDataFrame.return_value.write
+    assert call("delta.columnMapping.mode", "name") in writer.option.call_args_list
+
+
+def test_write_to_delta_leaves_an_ordinary_table_unmapped(mock_spark):
+    """Mapping raises a table's reader protocol, so it is not applied where nothing needs it."""
+    _require_arrow()
+    _write_to_delta(mock_spark, pl.DataFrame({"tre200d0": [1.5]}), "`c`.`s`.`t`")
+
+    writer = mock_spark.createDataFrame.return_value.write
+    assert all(c.args[0] != "delta.columnMapping.mode" for c in writer.option.call_args_list)
+
+
 def test_write_to_delta_append_mode(mock_spark):
     _require_arrow()
     df = pl.DataFrame({"a": [1]})
@@ -268,6 +292,23 @@ def test_apply_column_comments_escapes_backslashes_and_quotes(tmp_path):
     sql_calls = [c.args[0] for c in spark.sql.call_args_list]
     # Backslash doubled first, then the quote escaped: it's 5\ [°C] → it\'s 5\\ [°C]
     assert any("COMMENT 'it\\'s 5\\\\ [°C]'" in s for s in sql_calls)
+
+
+def test_apply_column_comments_escapes_a_backtick_in_the_column_name(tmp_path):
+    """The column name sits inside backticks; one of its own closed the identifier."""
+    (tmp_path / "x_meta_parameters.csv").write_text(
+        "parameter_shortname;parameter_description_en;parameter_unit\nweird`col;A description;mm\n",
+        encoding="utf-8",
+    )
+    spark = MagicMock()
+    field = MagicMock()
+    field.name = "weird`col"
+    spark.table.return_value.schema.fields = [field]
+
+    _apply_column_comments(spark, "`cat`.`sch`.`tbl`", tmp_path)
+
+    sql_calls = [c.args[0] for c in spark.sql.call_args_list]
+    assert any("ALTER COLUMN `weird``col` COMMENT" in s for s in sql_calls)
 
 
 # ── _ingest_collection ───────────────────────────────────────────────────────
@@ -335,6 +376,10 @@ class _TableStore:
 class _Frame:
     def __init__(self, store, frame):
         self.store, self.frame, self._mode = store, frame, "error"
+
+    @property
+    def columns(self):
+        return self.frame.columns
 
     @property
     def write(self):

@@ -11,9 +11,10 @@ pip install "foehn[databricks]"
 pip install databricks-cli
 ```
 
-The `databricks` extra adds PySpark, Delta, and Polars' compatibility runtime
+The `databricks` extra adds PySpark 4, Delta 4, and Polars' compatibility runtime
 (`polars[rtcompat]`) for CPUs without AVX2; Polars uses it automatically when it
-is installed. Earlier versions installed `polars-lts-cpu` instead, which ships
+is installed. PySpark 4 is required: the ingest hands Spark Arrow tables, which
+PySpark 3.5 cannot read. Running Spark locally needs Java 17 or 21. Earlier versions installed `polars-lts-cpu` instead, which ships
 the same `polars` package as the regular build, so the two overwrite each
 other's files (typically `ImportError: cannot import name ... from 'polars...'`).
 In an environment that has both, remove the old one and repair Polars:
@@ -76,7 +77,11 @@ The Delta ingest path uses the same MeteoSwiss CSV readers as `foehn.load()` and
 the Parquet conversion path. Standard station CSVs, preamble climate scenarios,
 local forecasts, indoor archive members, metadata CSVs, and climate-normal TXT
 files therefore receive the same column names, timestamps, encodings, and dtype
-normalisation before Spark writes them. Overwrite passes replace the stored
+normalisation before Spark writes them. Where a name holds a character Delta
+refuses — the climate normals' `Altitude [m asl]`, for one — the table is written
+with Delta column mapping (`delta.columnMapping.mode = name`) so the name is kept;
+such a table needs a Delta reader that supports column mapping, which Databricks
+does. Overwrite passes replace the stored
 schema and chunked append passes merge compatible additions, so a normalized
 schema change can migrate an existing table.
 

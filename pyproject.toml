@@ -59,8 +59,12 @@ databricks = [
     # could leave a polars that no longer imports. Since 1.34 it is a runtime
     # extra of polars itself, and polars loads it in preference when present.
     "polars[rtcompat]>=1.34",
-    "pyspark>=3.5,<5.0",
-    "delta-spark>=2.4,<5.0",
+    # 4.0, not 3.5: the Delta ingest hands Spark a pyarrow.Table, which
+    # createDataFrame accepts only from PySpark 4.0 — 3.5 iterated it as rows.
+    # Databricks Runtime 17.3, which databricks.yml deploys on, is Spark 4.0.
+    "pyspark>=4.0,<5.0",
+    # Delta 4.x is the line built for Spark 4.
+    "delta-spark>=4.0,<5.0",
 ]
 mcp = [
     "mcp[cli]>=2.0",
@@ -103,7 +107,10 @@ dev = [
     # .venv — and `uv sync`, which removes anything the lock does not list,
     # cannot delete the interpreter's pre-commit out from under that hook.
     "pre-commit>=4.0",
-    "ruff>=0.9",
+    # Floored at the rev .pre-commit-config.yaml pins, which is what CI runs. The
+    # lock sat a minor version behind it, so `uv run ruff` — what CONTRIBUTING
+    # suggests — checked with different rules than the lint job. Bump the two together.
+    "ruff>=0.17.2",
     # Pinned, not floored: ty typechecks src/ in CI, it is pre-1.0, and a version
     # bump can turn a green PR red on its own. Dependabot's uv ecosystem bumps this
     # and uv.lock together, so the upgrade arrives as its own reviewable PR rather
