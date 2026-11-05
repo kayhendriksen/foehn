@@ -422,6 +422,78 @@ def test_open_netcdf_combines_multiple_files_without_dask(tmp_path):
     assert list(ds["x"].values) == [0, 1, 2, 3]
 
 
+def _two_netcdf_files(tmp_path):
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    import numpy as np
+
+    files = [tmp_path / "a.nc", tmp_path / "b.nc"]
+    for path, values, coords in zip(files, ([1.0, 2.0], [3.0, 4.0]), ([0, 1], [2, 3]), strict=True):
+        xr.Dataset({"t": (("x",), np.array(values))}, coords={"x": coords}).to_netcdf(path, engine="h5netcdf")
+    return files
+
+
+def test_combining_without_dask_warns_when_it_reads_a_lot_into_memory(tmp_path, monkeypatch):
+    """Without dask the combine reads every value as it builds the Dataset: 382 MB for four 67 MB files."""
+    files = _two_netcdf_files(tmp_path)
+    monkeypatch.setattr(grids, "_dask_available", lambda: False)
+    monkeypatch.setattr(grids, "_IN_MEMORY_COMBINE_WARN_BYTES", 0)
+
+    with pytest.warns(UserWarning, match="into memory"):
+        grids.open_netcdf(files, dataset="surface_derived_grid")
+
+
+def test_combining_with_dask_stays_lazy(tmp_path):
+    pytest.importorskip("dask")
+    files = _two_netcdf_files(tmp_path)
+
+    ds = grids.open_netcdf(files, dataset="surface_derived_grid")
+
+    assert not ds["t"].variable._in_memory
+    assert list(ds["t"].values) == [1.0, 2.0, 3.0, 4.0]
+
+
+@pytest.mark.parametrize("lazy", [True, False])
+def test_the_files_behind_a_combined_dataset_are_released(monkeypatch, lazy):
+    """Lazily combined, the result is new and needs a closer for every file it reads from.
+
+    Combined without dask, every value is already in memory, so the files are
+    released at once rather than held, locks and all, until the result is closed.
+    """
+    xr = pytest.importorskip("xarray")
+    from types import SimpleNamespace
+
+    closed = []
+
+    def open_one(source, **_):
+        ds = xr.Dataset({"t": ("x", [1.0])}, coords={"x": [int(source)]})
+        ds.set_close(lambda: closed.append(source))
+        return ds
+
+    monkeypatch.setattr(grids, "_dask_available", lambda: lazy)
+    stub = SimpleNamespace(open_dataset=open_one, combine_by_coords=xr.combine_by_coords)
+
+    combined = grids._open_grid(stub, ["0", "1"], engine=None)
+    if lazy:
+        assert closed == []
+        combined.close()
+
+    assert closed == ["0", "1"]
+
+
+def test_selecting_variables_keeps_the_closer():
+    """A selection is a new Dataset: closing it, or leaving a ``with`` block, kept the file open."""
+    xr = pytest.importorskip("xarray")
+    closed = []
+    ds = xr.Dataset({"a": ("x", [1.0]), "b": ("x", [2.0])})
+    ds.set_close(lambda: closed.append(True))
+
+    with grids.select_variables(ds, "a"):
+        pass
+
+    assert closed == [True]
+
+
 def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
     """Differing global attrs (history/source) must not block an otherwise-clean combine."""
     xr = pytest.importorskip("xarray")
@@ -694,6 +766,57 @@ def test_grib2_cube_refuses_a_match_whose_files_do_not_differ(fetcher, tmp_path)
 
     with pytest.raises(ValueError, match="nothing to assemble into a cube"):
         to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
+
+
+@pytest.mark.parametrize("builds", [True, False], ids=["written", "refused"])
+def test_a_grib2_cube_closes_every_file_it_opened(fetcher, tmp_path, monkeypatch, builds):
+    """Up to 1000 files per cube: each one held open until GC can exhaust descriptors."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("cfgrib")
+    pytest.importorskip("eccodes")
+    pytest.importorskip("zarr")
+    names = (
+        ["icon-ch1-eps-202605230000-0-t_2m-ctrl", "icon-ch1-eps-202605230000-6-t_2m-ctrl"]
+        if builds
+        else ["icon-ch1-eps-202605230000-0-t_2m-ctrl", "icon-ch1-eps-202605230000-0-t_2m-ctrl-copy"]
+    )
+    fetcher.any_items = _items_for(*(f"{name}.grib2" for name in names))
+    base = tmp_path / "bronze" / "forecast_icon_ch1"
+    for name in names:
+        _write_grib2(base / f"{name}.grib2", step=6 if name.endswith("-6-t_2m-ctrl") else 0)
+
+    opened, closed = [], []
+    real_open, real_close = xr.open_dataset, xr.Dataset.close
+
+    def tracking_open(*args, **kwargs):
+        ds = real_open(*args, **kwargs)
+        opened.append(ds)
+        return ds
+
+    def tracking_close(self):
+        closed.append(self)
+        return real_close(self)
+
+    monkeypatch.setattr(xr, "open_dataset", tracking_open)
+    monkeypatch.setattr(xr.Dataset, "close", tracking_close)
+
+    if builds:
+        to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
+    else:
+        with pytest.raises(ValueError, match="nothing to assemble"):
+            to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl", stack=True)
+
+    assert len(opened) == 2
+    assert all(any(ds is shut for shut in closed) for ds in opened)
+
+
+def test_refused_to_zarr_leaves_no_directory_behind(tmp_path):
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        to_zarr("bogus", data_dir=tmp_path / "ws")
+    with pytest.raises(ValueError, match="tabular"):
+        to_zarr("smn", data_dir=tmp_path / "ws")
+
+    assert not (tmp_path / "ws").exists()
 
 
 def test_radar_cube_refuses_a_composite_with_no_time(fetcher, tmp_path):
@@ -1211,9 +1334,14 @@ def test_a_refresh_cannot_land_between_validating_the_files_and_opening_them(fet
     base.mkdir(parents=True)
 
     def write_grid(name, value, coord):
+        # Published the way foehn's refreshes publish: staged, then renamed over
+        # the target. Written in place, it collides with the HDF5 lock a lazy
+        # reader holds on the file it is still reading.
+        staged = base / f".{name}.staged"
         xr.Dataset({"v": ("x", np.array([value], "float64"))}, coords={"x": [coord]}).to_netcdf(
-            base / name, engine="h5netcdf"
+            staged, engine="h5netcdf"
         )
+        staged.replace(base / name)
 
     write_grid("a_rhiresd.nc", 1.0, 0)
     write_grid("b_rhiresd.nc", 2.0, 1)
@@ -1727,3 +1855,59 @@ def test_a_store_that_cannot_be_checked_is_left_to_the_append_path(tmp_path):
 
     for store in (unreadable, timeless, tmp_path / "absent.zarr"):
         _refuse_a_duplicated_axis(xr, store)
+
+
+# --- Snapshots a caller is done with ---
+
+
+def test_a_snapshot_taken_in_a_transient_scope_is_removed_when_it_ends(tmp_path):
+    """A read that closes its Dataset itself — the MCP server's describe_grid — gives its snapshot back.
+
+    Held until exit, a long-running server kept one per call, each pinning the
+    generation of the files it linked after upstream had replaced them.
+    """
+    from foehn.grids import _clean_snapshots, _made, _snapshot, transient_snapshots
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with transient_snapshots():
+        linked = _snapshot([source], tmp_path)
+        assert linked[0].read_bytes() == b"payload"
+
+    assert not linked[0].parent.exists()
+    assert _made == []
+    assert source.exists()
+
+
+def test_a_snapshot_also_handed_to_an_ordinary_read_outlives_the_scope(tmp_path):
+    """Reuse shares one snapshot; a Dataset from outside the scope may still be reading through it."""
+    from foehn.grids import _clean_snapshots, _snapshot, transient_snapshots
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    kept = _snapshot([source], tmp_path)
+    with transient_snapshots():
+        assert _snapshot([source], tmp_path) == kept
+
+    assert kept[0].exists()
+    _clean_snapshots()
+
+
+def test_a_shared_snapshot_goes_only_when_its_last_scope_ends(tmp_path):
+    from foehn.grids import _clean_snapshots, _snapshot, transient_snapshots
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with transient_snapshots():
+        outer = _snapshot([source], tmp_path)
+        with transient_snapshots():
+            assert _snapshot([source], tmp_path) == outer
+        assert outer[0].exists()
+
+    assert not outer[0].parent.exists()

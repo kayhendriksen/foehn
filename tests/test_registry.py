@@ -286,15 +286,19 @@ def test_only_the_forecast_kind_narrows_to_the_newest_run(tmp_path):
     assert result.filenames == ["vnut12.lssw.202607211200.dkl010h0.csv"]
 
 
-def test_only_the_ephemeral_kinds_stop_at_the_first_page(tmp_path):
-    """Forecast and radar hold thousands of items; walking them all is pure cost."""
-    fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/f.grib2")])
-    registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
-    assert [max_items for *_, max_items in fake.listings] == [100]
-
-    fake = _fetcher([stac_item("i1", "https://data.geo.admin.ch/grid.nc")])
-    registry.download("surface_derived_grid", Workspace(tmp_path), fetcher=fake)
-    assert [max_items for *_, max_items in fake.listings] == [None]
+@pytest.mark.parametrize(
+    ("dataset", "href"),
+    [
+        ("forecast_icon_ch1", "https://data.geo.admin.ch/f.grib2"),
+        ("radar_precip", "https://data.geo.admin.ch/cpc2630112000_00060.001.h5"),
+        ("surface_derived_grid", "https://data.geo.admin.ch/grid.nc"),
+    ],
+)
+def test_no_download_stops_at_the_first_page(tmp_path, dataset, href):
+    """The API lists oldest first, so a first page holds the oldest run or timestep."""
+    fake = _fetcher([stac_item("i1", href)])
+    registry.download(dataset, Workspace(tmp_path), fetcher=fake)
+    assert {max_items for *_, max_items in fake.listings} == {None}
 
 
 @pytest.mark.parametrize(

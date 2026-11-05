@@ -1,0 +1,26 @@
+# How to cite foehn. GitHub renders this as "Cite this repository".
+cff-version: 1.2.0
+message: "If you use foehn in your research, please cite it as below."
+title: "foehn: a Python toolkit for MeteoSwiss Open Government Data"
+type: software
+authors:
+  - family-names: Hendriksen
+    given-names: Kay
+repository-code: "https://github.com/kayhendriksen/foehn"
+url: "https://kayhendriksen.github.io/foehn/"
+license: MIT
+version: 0.5.0
+date-released: "2026-10-25"
+keywords:
+  - meteoswiss
+  - weather
+  - climate
+  - open-data
+  - switzerland
+  - parquet
+  - xarray
+abstract: >-
+  foehn downloads every MeteoSwiss Open Government Data collection through the
+  STAC API, converts station CSVs to Parquet with Polars, opens gridded NetCDF,
+  GRIB2 and ODIM radar data as xarray Datasets or Zarr stores, and serves the
+  data to LLMs through a Model Context Protocol server.

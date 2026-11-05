@@ -15,7 +15,10 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
-    "polars>=1.18",
+    # Verified against the suite, and the databricks extra's floor too. 1.18
+    # cannot stream the forecast join to Parquet ("sink_parquet ... not yet
+    # supported in standard engine"), so every forecast_local conversion failed.
+    "polars>=1.34",
     # Imported directly in fetch.py (Retry). It arrives via requests today, but
     # relying on a transitive dep breaks silently if requests ever swaps backends.
     # Floor is where Retry gained allowed_methods.
@@ -40,8 +43,13 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/kayhendriksen/foehn"
+Documentation = "https://kayhendriksen.github.io/foehn/"
 Repository = "https://github.com/kayhendriksen/foehn"
+Changelog = "https://github.com/kayhendriksen/foehn/blob/main/CHANGELOG.md"
 Issues = "https://github.com/kayhendriksen/foehn/issues"
+
+[project.scripts]
+foehn = "foehn.cli:main"
 
 [project.optional-dependencies]
 databricks = [
@@ -51,8 +59,12 @@ databricks = [
     # could leave a polars that no longer imports. Since 1.34 it is a runtime
     # extra of polars itself, and polars loads it in preference when present.
     "polars[rtcompat]>=1.34",
-    "pyspark>=3.5,<5.0",
-    "delta-spark>=2.4,<5.0",
+    # 4.0, not 3.5: the Delta ingest hands Spark a pyarrow.Table, which
+    # createDataFrame accepts only from PySpark 4.0 — 3.5 iterated it as rows.
+    # Databricks Runtime 17.3, which databricks.yml deploys on, is Spark 4.0.
+    "pyspark>=4.0,<5.0",
+    # Delta 4.x is the line built for Spark 4.
+    "delta-spark>=4.0,<5.0",
 ]
 mcp = [
     "mcp[cli]>=2.0",
@@ -74,17 +86,37 @@ grids = [
     "h5py>=3.0",
     "zarr>=3.0",
     "cfgrib>=0.9.12",
-    "eccodes>=1.7",
+    # From 2.43 the ecCodes C library ships in eccodeslib rather than inside the
+    # eccodes wheels. eccodes declares it only in its py3-none-any wheel, which
+    # uv's universal lock does not read (it takes the Windows wheel's metadata,
+    # where the library is bundled), so a uv-managed install had no ecCodes
+    # library at all on Linux and macOS. Stated here, every installer gets it.
+    "eccodes>=2.43",
+    "eccodeslib>=2.43; platform_system != 'Windows'",
     "pyproj>=3.0",
 ]
+
+# Development dependencies (PEP 735). Not extras: an extra is published metadata,
+# so `pip install foehn[dev]` used to pull a linter, a type checker and pytest
+# into a user's environment. uv installs the dev group by default (`uv sync`,
+# `uv run`); nothing outside this repository ever sees it.
+[dependency-groups]
 dev = [
-    "ruff>=0.9",
+    # Runs the hooks in .pre-commit-config.yaml. In the group rather than run
+    # through uvx, so `uv run pre-commit install` writes a git hook pointing at
+    # .venv — and `uv sync`, which removes anything the lock does not list,
+    # cannot delete the interpreter's pre-commit out from under that hook.
+    "pre-commit>=4.0",
+    # Floored at the rev .pre-commit-config.yaml pins, which is what CI runs. The
+    # lock sat a minor version behind it, so `uv run ruff` — what CONTRIBUTING
+    # suggests — checked with different rules than the lint job. Bump the two together.
+    "ruff>=0.17.2",
     # Pinned, not floored: ty typechecks src/ in CI, it is pre-1.0, and a version
-    # bump can turn a green PR red on its own. Dependabot bumps this weekly, so
-    # the upgrade arrives as its own reviewable PR rather than landing on whoever
-    # opens the next one. (ruff and zizmor are pinned in .pre-commit-config.yaml,
-    # which CI reads — see scripts/hook_version.sh.)
-    "ty==0.0.91",
+    # bump can turn a green PR red on its own. Dependabot's uv ecosystem bumps this
+    # and uv.lock together, so the upgrade arrives as its own reviewable PR rather
+    # than landing on whoever opens the next one. (ruff and zizmor are pinned in
+    # .pre-commit-config.yaml, which CI reads — see scripts/tool_version.sh.)
+    "ty==0.0.92",
     "numpy>=1.24",
     "pydantic>=2.0",
     # Strict YAML parsing for the workflow-structure test: PyYAML silently
@@ -99,13 +131,18 @@ dev = [
     "h5netcdf>=1.0",
     "zarr>=3.0",
     "cfgrib>=0.9.12",
-    "eccodes>=1.7",
+    "eccodes>=2.43",
+    "eccodeslib>=2.43; platform_system != 'Windows'",
     "h5py>=3.0",
     "pyproj>=3.0",
 ]
-
-[project.scripts]
-foehn = "foehn.cli:main"
+# The documentation site: `uv run --group docs mkdocs serve`. mkdocstrings
+# imports foehn to read its docstrings, so the site is built from what the
+# package actually exports, with the vocabulary placeholders already rendered.
+docs = [
+    "mkdocs-material>=9.6",
+    "mkdocstrings[python]>=0.29",
+]
 
 [tool.ruff]
 line-length = 120

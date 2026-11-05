@@ -8,6 +8,7 @@ without either owning the other.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -39,8 +40,20 @@ logger = logging.getLogger(__name__)
 _ParquetCompression = Literal["zstd", "snappy"]
 
 
+# The footer key naming the Bronze files an output was built from.
+_SOURCES_KEY = "foehn_sources"
+
+
+def _source_names(sources: Iterable[Path]) -> list[str]:
+    return sorted(path.name for path in sources)
+
+
 def _write_parquet_atomic(
-    frame: pl.LazyFrame | pl.DataFrame, path: Path, compression: _ParquetCompression = "zstd"
+    frame: pl.LazyFrame | pl.DataFrame,
+    path: Path,
+    compression: _ParquetCompression = "zstd",
+    *,
+    sources: list[Path],
 ) -> None:
     """Write a frame to *path* via a sibling temp file + Path.replace.
 
@@ -50,12 +63,17 @@ def _write_parquet_atomic(
     up-to-date checks in the converters below read as "already converted" and
     skip from then on, so the next run reports success over a corrupt file.
     Staging into a temp file means a failed write leaves nothing at all.
+
+    The footer records which *sources* the output was built from, so a source
+    deleted from Bronze is noticed: every one left behind is older than the
+    output, and by mtime alone the stale table was current.
     """
+    metadata = {_SOURCES_KEY: json.dumps(_source_names(sources))}
     with staged(path) as tmp:
         if isinstance(frame, pl.LazyFrame):
-            frame.sink_parquet(tmp, compression=compression)
+            frame.sink_parquet(tmp, compression=compression, metadata=metadata)
         else:
-            frame.write_parquet(tmp, compression=compression)
+            frame.write_parquet(tmp, compression=compression, metadata=metadata)
 
 
 @dataclass(frozen=True)
@@ -69,12 +87,30 @@ class ConversionGroup:
 ConvertOne = Callable[[ConversionGroup], int]
 
 
+def _built_from(path: Path, sources: list[Path]) -> bool:
+    """Whether the output at *path* was built from exactly *sources*."""
+    try:
+        recorded = pl.read_parquet_metadata(path).get(_SOURCES_KEY)
+    except Exception:  # noqa: BLE001 - an unreadable footer is a reason to rebuild, never to fail
+        return False
+    if recorded is None:
+        # Written before outputs recorded their sources. The mtime rule is all
+        # there is; judging these stale would reconvert every table on upgrade.
+        return True
+    try:
+        return json.loads(recorded) == _source_names(sources)
+    except json.JSONDecodeError:
+        return False
+
+
 def _is_up_to_date(group: ConversionGroup) -> bool:
-    """True when the output exists and is at least as new as every source."""
+    """True when the output exists, is as new as every source, and was built from exactly them."""
     if not group.out_path.exists():
         return False
     out_mtime = group.out_path.stat().st_mtime
-    return all(f.stat().st_mtime <= out_mtime for f in group.sources)
+    if not all(f.stat().st_mtime <= out_mtime for f in group.sources):
+        return False
+    return _built_from(group.out_path, group.sources)
 
 
 def run_conversions(groups: Iterable[ConversionGroup], convert_one: ConvertOne, *, label: str) -> int:
@@ -141,7 +177,7 @@ def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[
                 lazy_frames = [scan_standard_csv(f, schema_overrides=overrides) for f in group.sources]
                 combined = combine_frames(lazy_frames, collection_key)
                 combined = derive_timestamp(combined, collection_key)
-                _write_parquet_atomic(combined, group.out_path)
+                _write_parquet_atomic(combined, group.out_path, sources=group.sources)
                 break
             except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
                 col = column_from_dtype_error(str(e))
@@ -219,7 +255,7 @@ def convert_indoor_to_parquet(dataset: str, workspace: Workspace) -> int:
             frames.append(scan_indoor_csv(f))
         if not frames:
             return 0
-        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path)
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path, sources=group.sources)
         logger.info("  Done: wrote %s (%d files, %d non-data skipped)", group.out_path.name, len(frames), skipped)
         return 0
 
@@ -258,7 +294,7 @@ def convert_preamble_to_parquet(dataset: str, workspace: Workspace) -> int:
                 len(group.sources),
             )
             return failed
-        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path)
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path, sources=group.sources)
         logger.info("  Done: wrote %s (%d files)", group.out_path.name, len(frames))
         return failed
 
@@ -279,7 +315,7 @@ def convert_normals_to_parquet(dataset: str, workspace: Workspace) -> int:
     def convert_one(group: ConversionGroup) -> int:
         source = group.sources[0]
         df = read_normals_txt(source)
-        _write_parquet_atomic(df, group.out_path, compression="snappy")
+        _write_parquet_atomic(df, group.out_path, compression="snappy", sources=group.sources)
         logger.info("  %s... Converted", source.name)
         return 0
 

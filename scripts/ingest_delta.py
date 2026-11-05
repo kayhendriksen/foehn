@@ -6,9 +6,10 @@ engine="streaming" to keep peak memory low — even for collections that
 exceed RAM (e.g. SMN historical ~20 GB of 10-minute data).
 
 The resulting DataFrame is converted to a Spark DataFrame via Arrow
-(zero-copy) and written to a Delta table.  For large collections in
-historical mode, station files are chunked so that each Arrow→Spark
-transfer stays manageable.
+(zero-copy) and written to a Delta table.  The historical time slice is
+only ingested in historical mode (``--historical``), where station files of
+the large collections are chunked so that each Arrow→Spark transfer stays
+manageable; the daily pass leaves those tables alone.
 
 After writing each table, column comments are set from the English
 metadata descriptions in _meta_parameters.csv.
@@ -30,7 +31,8 @@ import argparse
 import contextlib
 import os
 import re
-from collections.abc import Iterator
+import uuid
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -121,6 +123,23 @@ def _scan_and_collect(dataset: str, files: list[Path], metadata_types: dict[str,
         return combine_frames(frames, dataset)
 
 
+# What a Delta column name may not contain unless the table maps its columns by name.
+_DELTA_INVALID_NAME_CHARACTERS = frozenset(" ,;{}()\n\t=")
+
+
+def _needs_column_mapping(columns: Iterable[str]) -> bool:
+    """Whether a table with these columns can only be written with Delta column mapping.
+
+    The climate normals publish ``Altitude [m asl]``, ``CH coordinates`` and
+    ``Reference period``, and Delta refuses those names outright — so that table
+    was never written, and since a failed table fails the run, the daily ingest
+    exited 1 over it. Renaming them would part Delta from the Parquet and load
+    paths, which publish the same names; mapping by name keeps them. Applied only
+    where a name needs it, because it raises the table's reader protocol.
+    """
+    return any(_DELTA_INVALID_NAME_CHARACTERS & set(name) for name in columns)
+
+
 def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mode: str = "overwrite") -> None:
     """Convert a Polars DataFrame to Spark via Arrow and write to a Delta table."""
     spark_df = spark.createDataFrame(polars_df.to_arrow())
@@ -129,17 +148,30 @@ def _write_to_delta(spark: SparkSession, polars_df: pl.DataFrame, table: str, mo
         writer = writer.option("overwriteSchema", "true")
     else:
         writer = writer.option("mergeSchema", "true")
+    if _needs_column_mapping(polars_df.columns):
+        writer = writer.option("delta.columnMapping.mode", "name")
     writer.saveAsTable(table)
 
 
 def _staging_table(table: str) -> str:
-    """The sibling a chunked group is built in before it replaces *table*."""
-    return f"{table[:-1]}__foehn_staging`"
+    """A sibling, unique to this run, that a chunked group is built in before it replaces *table*.
+
+    Unique because two overlapping ingests shared one fixed name: each
+    overwrote, appended to, published and dropped the other's chunks, and both
+    reported a table neither had built. A run killed outright leaves its own
+    ``<table>__foehn_staging_<id>`` behind; nothing publishes it, and it can be
+    dropped by hand.
+    """
+    return f"{table[:-1]}__foehn_staging_{uuid.uuid4().hex[:12]}`"
 
 
 def _publish_staged(spark: SparkSession, staging: str, table: str) -> None:
     """Replace *table* with the finished *staging* table in one overwrite."""
-    spark.table(staging).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+    staged = spark.table(staging)
+    writer = staged.write.mode("overwrite").option("overwriteSchema", "true")
+    if _needs_column_mapping(staged.columns):
+        writer = writer.option("delta.columnMapping.mode", "name")
+    writer.saveAsTable(table)
     spark.sql(f"DROP TABLE IF EXISTS {staging}")
 
 
@@ -175,8 +207,11 @@ def _apply_column_comments(spark: SparkSession, table: str, csv_dir: Path) -> No
         # Escape backslashes before quotes — a trailing ``\'`` in the metadata
         # would otherwise escape the escape and close the SQL string literal.
         comment_escaped = comment.replace("\\", "\\\\").replace("'", "\\'")
+        # A backtick inside a quoted identifier is written twice; one of its own
+        # closed the identifier early. The name comes from upstream's CSV header.
+        column = shortname.replace("`", "``")
         with contextlib.suppress(Exception):
-            spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{shortname}` COMMENT '{comment_escaped}'")
+            spark.sql(f"ALTER TABLE {table} ALTER COLUMN `{column}` COMMENT '{comment_escaped}'")
 
 
 def _ingest_metadata(
@@ -219,12 +254,16 @@ def _ingest_collection(
     catalog: str,
     schema: str,
     *,
+    historical: bool = False,
     chunked: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> Tally:
     """Ingest a single collection's CSVs into Delta tables.
 
-    Returns how many tables were written, skipped for lack of input, and failed.
+    The historical groups are only ingested when *historical* is set: Bronze
+    keeps them after a backfill, and they change once a year.
+
+    Returns how many tables were written, skipped, and failed.
     """
     metadata_types = load_metadata_types(csv_dir)
     groups = group_csv_files(csv_dir, key)
@@ -238,6 +277,14 @@ def _ingest_collection(
     for group_key, files in sorted(groups.items()):
         tbl_name = f"{key}{_table_suffix(group_key)}"
         table = f"{catalog}.{schema}.`{tbl_name}`"
+
+        if "historical" in group_key and not historical:
+            # The daily pass used to rebuild these every day once a backfill
+            # had left them in Bronze — SMN's alone is ~20 GB of 10-minute
+            # values, read in one piece because only --historical chunks it.
+            print(f"  --  {tbl_name:25s}   skipped (historical; ingested by --historical)", flush=True)
+            tally.skipped += 1
+            continue
 
         try:
             if chunked and key in LARGE_COLLECTIONS and len(files) > chunk_size:
@@ -284,6 +331,11 @@ def _ingest_collection(
 
 RADAR_COLLECTIONS = ("radar_precip", "radar_hail")
 
+# The product prefix of a radar filename, matched in either case and reported in
+# upper case: MeteoSwiss names the files ``cpc2630112000_00060.001.h5``, so an
+# uppercase-only pattern matched nothing and every product came back empty.
+RADAR_PRODUCT_PATTERN = "^[A-Za-z]+"
+
 
 def _ingest_radar(
     spark: SparkSession,
@@ -318,7 +370,7 @@ def _ingest_radar(
                 # CombiPrecip reanalysis (CPCH) shares CPC's filename, so it stays "CPC"
                 # here — distinguish reanalysis via modification_time, which trails the
                 # product time embedded in the filename by ~8 days.
-                "regexp_extract(element_at(split(path, '/'), -1), '^[A-Z]+', 0) as product",
+                f"upper(regexp_extract(element_at(split(path, '/'), -1), '{RADAR_PRODUCT_PATTERN}', 0)) as product",
                 "modificationTime as modification_time",
                 "length as size_bytes",
             )
@@ -333,7 +385,9 @@ def _ingest_radar(
 
         view = f"_{key}_new"
         new_df.createOrReplaceTempView(view)
-        # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too).
+        # WHEN MATCHED: pick up reanalysis overwrites (local mtime bumped, row should too),
+        # and rows whose product an earlier version left empty — it matched only
+        # uppercase names, and MeteoSwiss's are lowercase.
         # The interpolated names are not user-controlled SQL: `table` is built from
         # `cat`/`sch`, which both passed _validate_identifier (alphanumerics, underscore,
         # hyphen; backtick-quoted), and from `key`, which the caller constrains to
@@ -341,8 +395,9 @@ def _ingest_radar(
         # suppression on the MERGE below.
         merge_sql = (
             f"MERGE INTO {table} t USING {view} s ON t.path = s.path "  # nosec B608
-            "WHEN MATCHED AND s.modification_time > t.modification_time THEN UPDATE SET "
-            "  modification_time = s.modification_time, size_bytes = s.size_bytes "
+            "WHEN MATCHED AND (s.modification_time > t.modification_time "
+            "  OR t.product IS DISTINCT FROM s.product) THEN UPDATE SET "
+            "  product = s.product, modification_time = s.modification_time, size_bytes = s.size_bytes "
             "WHEN NOT MATCHED THEN INSERT *"
         )
         spark.sql(merge_sql)
@@ -382,9 +437,20 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
     return Tally(written=1)
 
 
-def main() -> None:
-    from pyspark.sql import SparkSession
+def _chunk_size(value: str) -> int:
+    """``--chunk-size``, refused below 1 before Spark starts or a table is touched.
 
+    Zero stopped ``range()`` part-way through a run, and a negative size skipped
+    the chunk loop and went straight to publishing a staging table it had never
+    written.
+    """
+    size = int(value)
+    if size < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {size}")
+    return size
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest MeteoSwiss CSVs → Delta tables via Polars + Spark.")
     parser.add_argument("--catalog", default="main")
     parser.add_argument("--schema", default="meteoswiss")
@@ -392,7 +458,7 @@ def main() -> None:
     parser.add_argument(
         "--historical",
         action="store_true",
-        help="Enable chunked writes for large collections (SMN, etc.)",
+        help="Also ingest the historical time slice, with chunked writes for large collections (SMN, etc.)",
     )
     parser.add_argument(
         "--radar",
@@ -404,7 +470,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--chunk-size",
-        type=int,
+        type=_chunk_size,
         default=DEFAULT_CHUNK_SIZE,
         help=f"Station files per chunk for large historical collections (default: {DEFAULT_CHUNK_SIZE})",
     )
@@ -413,6 +479,10 @@ def main() -> None:
     cat = _validate_identifier(args.catalog, "catalog")
     sch = _validate_identifier(args.schema, "schema")
     vol = _validate_identifier(args.volume, "volume")
+
+    # Imported once the arguments are known to be good, so a bad one is
+    # refused without pyspark being importable at all.
+    from pyspark.sql import SparkSession
 
     spark = SparkSession.builder.appName("foehn-ingest").getOrCreate()
     spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
@@ -454,6 +524,7 @@ def main() -> None:
             csv_dir,
             cat,
             sch,
+            historical=args.historical,
             chunked=args.historical,
             chunk_size=args.chunk_size,
         )

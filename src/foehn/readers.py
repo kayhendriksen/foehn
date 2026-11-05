@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import io
 import re
+import threading
 import zipfile
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import polars as pl
@@ -80,6 +81,8 @@ class Filters:
     sort: str | None = None
     limit: int | None = None
     workers: int = DEFAULT_WORKERS
+    max_bytes: int | None = None
+    """Refuse the query once its data files have downloaded more than this. None: no ceiling."""
 
     @classmethod
     def build(
@@ -97,6 +100,7 @@ class Filters:
         sort: str | None = None,
         limit: int | None = None,
         workers: int = DEFAULT_WORKERS,
+        max_bytes: int | None = None,
     ) -> Filters:
         """Normalise the public keyword arguments into one value.
 
@@ -121,6 +125,7 @@ class Filters:
             sort=sort,
             limit=limit,
             workers=workers,
+            max_bytes=max_bytes,
         )
         filters.validate()
         return filters
@@ -137,10 +142,21 @@ class Filters:
             raise ValueError("limit must be zero or greater.")
         if self.workers < 1:
             raise ValueError("workers must be greater than zero.")
+        if self.max_bytes is not None and self.max_bytes < 1:
+            raise ValueError("max_bytes must be greater than zero, or None for no ceiling.")
         start = _parse_date_bound(self.date_from, "date_from")
         end = _parse_date_bound(self.date_to, "date_to")
-        if start is not None and end is not None and start > end:
-            raise ValueError("date_from must be before or equal to date_to.")
+        if start is not None and end is not None and self.date_to is not None:
+            # A bare date_to is the whole of that day — apply_time_filters bounds
+            # it at the next midnight — so a date_from later that day is inside
+            # it. Compared against midnight, the valid query was refused.
+            if _BARE_DATE_RE.match(self.date_to):
+                end += timedelta(days=1)
+                out_of_order = start >= end
+            else:
+                out_of_order = start > end
+            if out_of_order:
+                raise ValueError("date_from must be before or equal to date_to.")
 
     @property
     def has_calendar_filter(self) -> bool:
@@ -291,6 +307,48 @@ def apply_time_filters(df: pl.DataFrame, filters: Filters) -> pl.DataFrame:
     return df
 
 
+class _Budget:
+    """What one query may still download, shared by every worker fetching for it.
+
+    MeteoSwiss's files are per station and slice, and the calendar filters only
+    trim rows once a file has been parsed, so a query's network and memory cost
+    is set by how many files it selects rather than by the rows it keeps. The
+    STAC listing states no file sizes, so the ceiling cannot be checked up
+    front: it is spent as files arrive, and every fetch asks first, so the files
+    still queued behind the one that crossed it are never requested.
+    """
+
+    def __init__(self, dataset: str, limit: int | None) -> None:
+        self._dataset = dataset
+        self._limit = limit
+        self._spent = 0
+        self._lock = threading.Lock()
+
+    def check(self) -> None:
+        """Refuse before another fetch once the budget is gone."""
+        if self._limit is not None and self._spent > self._limit:
+            raise self._exceeded()
+
+    def spend(self, body: bytes) -> bytes:
+        """Count *body* against the budget and hand it back, or refuse if it crossed it."""
+        if self._limit is None:
+            return body
+        with self._lock:
+            self._spent += len(body)
+            crossed = self._spent > self._limit
+        if crossed:
+            raise self._exceeded()
+        return body
+
+    def _exceeded(self) -> ValueError:
+        limit = self._limit or 0
+        return ValueError(
+            f"Loading {self._dataset!r} stopped after downloading more than {limit / 1e6:,.1f} MB "
+            f"(max_bytes={limit}). year, month and date_from/date_to only trim rows once each file is "
+            "downloaded; to download less, narrow the files with station=, frequency= or time_slice=."
+        )
+
+
 def _fetch_frames(fetch_one: Callable[[str], pl.DataFrame], targets: list[str], workers: int) -> list[pl.DataFrame]:
     """Parse each target concurrently.
 
@@ -341,8 +399,11 @@ def _read_csv_hrefs(
             wanted_columns.add(filters.drop_null)
         wanted_columns |= source_columns_for(dataset)
 
+    budget = _Budget(dataset, filters.max_bytes)
+
     def _fetch(href: str) -> pl.DataFrame:
-        body = fetcher.get(href, timeout=60).body
+        budget.check()
+        body = budget.spend(fetcher.get(href, timeout=60).body)
         frame = parse_csv_bytes(utf8_meteoswiss_csv(body), metadata_types, wanted_columns=wanted_columns)
         frame = derive_timestamp(frame, dataset)
         if "reference_timestamp" in frame.columns:
@@ -421,9 +482,12 @@ def read_forecast(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Dat
         narrowed = [asset for asset in run if forecast_parameter_from_filename(asset.name) in wanted]
         run = narrowed or run
     points = _forecast_points(dataset, filters.stations, fetcher) if filters.stations is not None else None
+    budget = _Budget(dataset, filters.max_bytes)
 
     def _fetch(href: str) -> pl.DataFrame:
-        frame = parse_csv_bytes(utf8_meteoswiss_csv(fetcher.get(href, timeout=60).body), metadata_types)
+        budget.check()
+        body = budget.spend(fetcher.get(href, timeout=60).body)
+        frame = parse_csv_bytes(utf8_meteoswiss_csv(body), metadata_types)
         if points is not None:
             frame = frame.join(points, on=list(points.columns), how="semi")
         return apply_time_filters(derive_timestamp(frame, dataset), filters)
@@ -447,8 +511,11 @@ def read_preamble(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Dat
         stations = sorted(filters.stations) if filters.stations else None
         raise ValueError(f"No climate-scenario CSVs found for {dataset!r} with station={stations}.")
 
+    budget = _Budget(dataset, filters.max_bytes)
+
     def _fetch(href: str) -> pl.DataFrame:
-        return parse_climate_scenarios_csv(fetcher.get(href, timeout=120).body, asset_filename(href))
+        budget.check()
+        return parse_climate_scenarios_csv(budget.spend(fetcher.get(href, timeout=120).body), asset_filename(href))
 
     return pl.concat(_fetch_frames(_fetch, csv_hrefs, filters.workers), how="diagonal_relaxed")
 
@@ -466,7 +533,9 @@ def read_archive(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Data
         raise ValueError(f"No .zip asset found for {dataset!r}.")
     zip_href = archives[0].href
 
-    archive = fetcher.get(zip_href, timeout=300).body
+    # One file, so the budget can only refuse it after the fact — but before it
+    # is decompressed and parsed, which is where the memory goes.
+    archive = _Budget(dataset, filters.max_bytes).spend(fetcher.get(zip_href, timeout=300).body)
 
     frames: list[pl.DataFrame] = []
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:

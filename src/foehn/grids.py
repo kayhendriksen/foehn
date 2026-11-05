@@ -54,11 +54,13 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import IO, TYPE_CHECKING, Literal, Protocol, cast
@@ -73,6 +75,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import xarray as xr
+    from xarray import Dataset as XrDataset  # for scopes where a parameter named ``xr`` hides the module
 
 
 # --- Optional dependencies -------------------------------------------------
@@ -117,13 +120,17 @@ def _require_dask() -> None:
     it — rechunking is a caller's request, not a property of a kind — so it is
     checked inside :func:`write_zarr`, where the rechunk happens.
     """
-    import importlib.util
-
-    if importlib.util.find_spec("dask") is None:
+    if not _dask_available():
         raise ImportError(
             "to_zarr(rechunk=...) requires dask, which is not part of the "
             "'grids' extra. Install it with:\n\n  pip install dask\n"
         )
+
+
+def _dask_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("dask") is not None
 
 
 def require_radar() -> None:
@@ -162,6 +169,17 @@ _reusable: dict[tuple, list[Path]] = {}
 
 _made: list[Path] = []
 """Snapshot directories to remove on the way out."""
+
+_pinned: set[Path] = set()
+"""Snapshots an ordinary read was handed. Kept until exit: see _clean_snapshots."""
+
+_users: dict[Path, int] = {}
+"""How many open :func:`transient_snapshots` scopes are reading through each snapshot."""
+
+_registry_lock = threading.Lock()
+"""Guards the four registries above: the MCP server reads grids from many threads."""
+
+_scope = threading.local()
 
 
 def _hold_id_of(snapshot: Path) -> str:
@@ -239,8 +257,12 @@ def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
     _reap_stale_snapshots(out_dir)
 
     key = _inode_key(out_dir, files)
-    if key is not None and (existing := _reusable.get(key)) and all(link.exists() for link in existing):
-        return existing
+    if key is not None:
+        with _registry_lock:
+            existing = _reusable.get(key)
+        if existing and all(link.exists() for link in existing):
+            _claim(existing[0].parent)
+            return existing
 
     snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{_HOLD_ID}-{uuid.uuid4().hex}"
     snapshot.mkdir(mode=0o700)
@@ -250,10 +272,69 @@ def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
     except BaseException:
         shutil.rmtree(snapshot, ignore_errors=True)
         raise
-    _made.append(snapshot)
-    if key is not None:
-        _reusable[key] = linked
+    with _registry_lock:
+        _made.append(snapshot)
+        if key is not None:
+            _reusable[key] = linked
+    _claim(snapshot)
     return linked
+
+
+def _claim(snapshot: Path) -> None:
+    """Record who reads through *snapshot*: the innermost transient scope, or a pinned read."""
+    stack = getattr(_scope, "stack", None)
+    with _registry_lock:
+        if stack:
+            stack[-1].append(snapshot)
+            _users[snapshot] = _users.get(snapshot, 0) + 1
+        else:
+            _pinned.add(snapshot)
+
+
+@contextlib.contextmanager
+def transient_snapshots() -> Generator[None]:
+    """Remove the read snapshots taken inside this block once it ends.
+
+    For a caller that closes every Dataset it opens before leaving the block —
+    the MCP server's ``describe_grid``. Snapshots are otherwise kept until the
+    process exits (see :func:`_clean_snapshots`), so a long-running server kept
+    one per call, each pinning the generation of the files it linked long after
+    upstream had replaced them. A snapshot also handed to a read outside any
+    scope stays pinned, since that Dataset may still be reading through it.
+    """
+    stack = getattr(_scope, "stack", None)
+    if stack is None:
+        stack = _scope.stack = []
+    taken: list[Path] = []
+    stack.append(taken)
+    try:
+        yield
+    finally:
+        stack.pop()
+        for snapshot in taken:
+            _release(snapshot)
+
+
+def _release(snapshot: Path) -> None:
+    """Give back one scope's use of *snapshot*, removing it when nothing else reads through it.
+
+    Under the directory's refresh lock: a read decides to reuse a snapshot under
+    that lock, so it cannot claim this one in the middle of its removal.
+    """
+    with coherence.refresh_lock(snapshot.parent):
+        with _registry_lock:
+            remaining = _users.get(snapshot, 0) - 1
+            if remaining > 0:
+                _users[snapshot] = remaining
+                return
+            _users.pop(snapshot, None)
+            if snapshot in _pinned:
+                return
+            if snapshot in _made:
+                _made.remove(snapshot)
+            for key in [key for key, links in _reusable.items() if links and links[0].parent == snapshot]:
+                del _reusable[key]
+        shutil.rmtree(snapshot, ignore_errors=True)
 
 
 def _link_or_copy(source: Path, destination: Path) -> Path:
@@ -282,6 +363,8 @@ def _clean_snapshots() -> None:
         shutil.rmtree(snapshot, ignore_errors=True)
     _made.clear()
     _reusable.clear()
+    _pinned.clear()
+    _users.clear()
     for out_dir, hold in _holds.items():
         with contextlib.suppress(Exception):
             hold.close()
@@ -595,6 +678,9 @@ def _write_zarr(
     if rechunk:
         _require_dask()
         ds = ds.chunk(rechunk)
+    # Created here, at the first write, rather than by the caller up front: a
+    # refused request must not leave an empty directory behind.
+    store.parent.mkdir(parents=True, exist_ok=True)
     with warnings.catch_warnings():
         # xarray writes consolidated metadata by default. zarr-python 3 warns that
         # this is outside the Zarr v3 spec, but we keep it on purpose: it's purely
@@ -637,19 +723,36 @@ def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Da
     """
     if variables is None:
         return ds
-    return ds[[variables] if isinstance(variables, str) else list(variables)]
+    selected = ds[[variables] if isinstance(variables, str) else list(variables)]
+    # A selection is a new Dataset, and xarray does not hand it the source's
+    # closer: closing it, or leaving a ``with`` block, kept the file open.
+    selected.set_close(ds.close)
+    return selected
 
 
 # --- xarray-backed opens ---------------------------------------------------
+
+
+# Above this, combining files without dask is worth a warning: every value is
+# read into memory as the Dataset is built, before the caller touches any.
+_IN_MEMORY_COMBINE_WARN_BYTES = 1 << 30
+
+
+def _close_each(datasets: list) -> None:
+    for opened in datasets:
+        with contextlib.suppress(Exception):
+            opened.close()
 
 
 def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kwargs: dict | None = None) -> xr.Dataset:
     """Open one or many grid files (NetCDF or GRIB2) into a single Dataset.
 
     Multiple files are opened individually and merged with ``combine_by_coords``
-    rather than ``open_mfdataset``: the latter needs a dask chunk manager, which
-    is not in the 'grids' extra. Per-file opens keep the backend's own
-    lazy reads, so combining stays dask-free.
+    rather than ``open_mfdataset``, which needs dask. Combining is only lazy
+    with dask, though: without it, concatenation reads every value of every
+    file into memory before anything is returned — four 67 MB files cost
+    382 MB on open. With dask installed each file is opened as dask arrays and
+    the combined Dataset stays lazy; without it, a combine over 1 GiB warns.
 
     ``combine_attrs="drop_conflicts"`` keeps global attributes shared by every
     file (title, institution, …) but drops those that legitimately differ
@@ -662,29 +765,46 @@ def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kw
     label their time axis "years since 1991-01-01", which is not CF-compliant.
     """
 
-    def _do(*, decode_times: bool) -> xr.Dataset:
+    def _do(*, decode_times: bool) -> XrDataset:
         kwargs: dict = {"engine": engine, "decode_times": decode_times}
         if backend_kwargs:
             kwargs["backend_kwargs"] = backend_kwargs
         if len(files) == 1:
             return xr.open_dataset(files[0], **kwargs)
+        lazy = _dask_available()
+        if lazy:
+            kwargs["chunks"] = {}
         # Opened one at a time so a failure can close what is already open. The
         # comprehension this replaces leaked a handle per file whenever the
         # combine raised, which on a large set exhausts the descriptor limit and
-        # reports the exhaustion instead of the original fault. On success the
-        # handles stay open: the combined Dataset reads from them lazily.
+        # reports the exhaustion instead of the original fault.
         datasets: list = []
         try:
             for source in files:
                 # Not a comprehension: the except below has to close whatever
                 # was opened before the failure, which needs the partial list.
                 datasets.append(xr.open_dataset(source, **kwargs))  # noqa: PERF401
-            return xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+            if not lazy and (size := sum(ds.nbytes for ds in datasets)) > _IN_MEMORY_COMBINE_WARN_BYTES:
+                warnings.warn(
+                    f"Combining these {len(datasets)} files reads about {size / 1e9:.1f} GB into memory: "
+                    "xarray combines files lazily only with dask, which the 'grids' extra does not "
+                    "install. Install dask (pip install dask) or narrow match=.",
+                    stacklevel=2,
+                )
+            combined = xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
         except BaseException:
-            for opened in datasets:
-                with contextlib.suppress(Exception):
-                    opened.close()
+            _close_each(datasets)
             raise
+        if lazy:
+            # Read from the per-file opens as it is used. The combined Dataset
+            # is new and carries no closer of its own, so closing it released
+            # nothing they held.
+            combined.set_close(partial(_close_each, datasets))
+        else:
+            # The combine has read every value already. Kept open until the
+            # caller closed the result, the files only held their locks.
+            _close_each(datasets)
+        return combined
 
     try:
         return _do(decode_times=True)
@@ -1095,39 +1215,50 @@ def cube_grib2(
     """
     xr = _require_xarray()
 
-    with icon.quiet_cfgrib():
-        datasets = [xr.open_dataset(f, engine="cfgrib", backend_kwargs={"indexpath": ""}) for f in sorted(files)]
-    # Promote whichever independent axes actually differ across the matched files.
-    varying = [
-        coord
-        for coord in ("number", "time", "step")
-        if len({ds[coord].values.tobytes() for ds in datasets if coord in ds.coords}) > 1
-    ]
-    if not varying:
-        raise ValueError(
-            f"The match selected files that don't differ in number/time/step for {dataset!r} — "
-            "nothing to assemble into a cube (open it as a single field instead)."
-        )
-    # Only where the axis is still a scalar: a control file carries ``number=0``,
-    # but a perturbed file holds every member and already has ``number`` as a
-    # dimension, which expanding again refused outright.
-    prepared = [
-        ds.drop_vars("valid_time", errors="ignore").expand_dims([coord for coord in varying if coord not in ds.dims])
-        for ds in datasets
-    ]
-    cube = xr.combine_by_coords(prepared, combine_attrs="drop_conflicts")
-    if "time" in cube.coords and "step" in cube.coords:
-        cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])
+    # Closed on every exit, the way _open_grid closes its per-file opens: a cube
+    # is up to 1000 files, and leaving each one open until garbage collection
+    # can run a process out of descriptors before the write is reached.
+    datasets: list = []
+    try:
+        with icon.quiet_cfgrib():
+            for source in sorted(files):
+                # Not a comprehension: the finally below needs the partial list.
+                datasets.append(xr.open_dataset(source, engine="cfgrib", backend_kwargs={"indexpath": ""}))  # noqa: PERF401
+        # Promote whichever independent axes actually differ across the matched files.
+        varying = [
+            coord
+            for coord in ("number", "time", "step")
+            if len({ds[coord].values.tobytes() for ds in datasets if coord in ds.coords}) > 1
+        ]
+        if not varying:
+            raise ValueError(
+                f"The match selected files that don't differ in number/time/step for {dataset!r} — "
+                "nothing to assemble into a cube (open it as a single field instead)."
+            )
+        # Only where the axis is still a scalar: a control file carries ``number=0``,
+        # but a perturbed file holds every member and already has ``number`` as a
+        # dimension, which expanding again refused outright.
+        prepared = [
+            ds.drop_vars("valid_time", errors="ignore").expand_dims(
+                [coord for coord in varying if coord not in ds.dims]
+            )
+            for ds in datasets
+        ]
+        cube = xr.combine_by_coords(prepared, combine_attrs="drop_conflicts")
+        if "time" in cube.coords and "step" in cube.coords:
+            cube = cube.assign_coords(valid_time=cube["time"] + cube["step"])
 
-    cube = select_variables(cube, variables)
-    cube = icon.attach_lonlat(
-        cube,
-        dataset,
-        workspace,
-        fetcher=fetcher,
-        what="the cube is on the bare unstructured grid.",
-    )
-    _write_zarr(cube, store, mode)
+        cube = select_variables(cube, variables)
+        cube = icon.attach_lonlat(
+            cube,
+            dataset,
+            workspace,
+            fetcher=fetcher,
+            what="the cube is on the bare unstructured grid.",
+        )
+        _write_zarr(cube, store, mode)
+    finally:
+        _close_each(datasets)
 
 
 __all__ = [
@@ -1145,5 +1276,6 @@ __all__ = [
     "require_netcdf",
     "require_radar",
     "select_variables",
+    "transient_snapshots",
     "write_zarr",
 ]

@@ -70,6 +70,13 @@ df = foehn.load("smn", station="BER", frequency="d", sort="desc")
 | `sort` | `str` | Sort by timestamp: "asc" or "desc" |
 | `limit` | `int` | Maximum rows; zero returns an empty frame, negative values are invalid |
 | `workers` | `int` | Concurrent fetches; must be positive |
+| `max_bytes` | `int` | Refuse the query once its files have downloaded more than this many bytes; `None` (default) sets no ceiling |
+
+`year`, `month` and `date_from`/`date_to` trim rows after each file is
+downloaded, so they keep the result small without making the query cheaper:
+MeteoSwiss publishes one file per station and time slice, and `station`,
+`frequency` and `time_slice` decide how many are fetched. Pass `max_bytes` when a
+query must stay bounded — the MCP server holds every `load_data` call to 1 GB.
 
 ### Climate scenario collections
 
@@ -187,3 +194,26 @@ refresh changed assets, while retaining a complete cache as the offline fallback
 See the [gridded data documentation](grids.md) for
 `open_dataset`, `to_zarr`, `match`, the GRIB2/radar single-file requirement, and
 the Swiss-grid coordinate notes.
+
+## Logging and diagnostics
+
+foehn logs through the standard `logging` module under the `foehn` logger and
+attaches no handler of its own. Warnings reach stderr through Python's default
+handling; progress messages stay hidden until you configure logging:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)  # download progress, conversion results
+logging.getLogger("foehn").setLevel(logging.DEBUG)
+```
+
+When reporting a bug, include the environment report — foehn's version, Python,
+the platform, the data directory and every dependency's version:
+
+```python
+foehn.show_versions()
+```
+
+`foehn version` prints the same from the command line. Every public function is
+documented in the [API reference](reference/api.md).

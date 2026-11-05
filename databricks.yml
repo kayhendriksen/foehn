@@ -1,10 +1,12 @@
 # Declarative Automation Bundle — foehn
 #
-# Defines two jobs:
-#   foehn_daily      — downloads recent data daily at 13:30 UTC, then ingests to Delta
-#   foehn_historical — full historical backfill, paused by default (run manually or on Jan 1)
+# Defines four jobs (docs/databricks.md lists their schedules):
+#   foehn_daily        — downloads recent data daily at 13:30 UTC, then ingests to Delta
+#   foehn_radar_precip — precipitation radar every 5 minutes, all year
+#   foehn_radar_hail   — hail radar every 5 minutes, April–September
+#   foehn_historical   — full historical backfill, paused by default (run manually or on Jan 1)
 #
-# Deploy:
+# Deploy (builds the wheel first — see `artifacts` below; needs uv):
 #   databricks bundle validate
 #   databricks bundle deploy -t dev
 #   databricks bundle deploy -t prod
@@ -15,6 +17,18 @@
 
 bundle:
   name: foehn
+
+# Built on every deploy, from this checkout, so the jobs run the code being
+# deployed. Without it the deploy uploaded whatever dist/foehn-*.whl already
+# matched — the last wheel anyone built here, or two versions at once. Its own
+# directory, cleared first: the glob below can then only match this build, and
+# the dist/ that releases are built into is left alone. Needs uv on the machine
+# running `databricks bundle deploy`.
+artifacts:
+  foehn:
+    type: whl
+    path: .
+    build: uv build --wheel --clear --out-dir dist/bundle
 
 # Workspace host is NOT set here — Databricks does not allow variable
 # interpolation in auth fields. Authenticate via DATABRICKS_HOST env var,
@@ -101,7 +115,7 @@ resources:
               - "--data-dir"
               - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
           libraries:
-            - whl: ./dist/foehn-*.whl
+            - whl: ./dist/bundle/foehn-*.whl
 
         - task_key: ingest
           description: "CSV → Polars (streaming) → Spark → Delta tables in ${var.catalog}.${var.schema}"
@@ -118,7 +132,7 @@ resources:
               - "--volume"
               - "${var.volume}"
           libraries:
-            - whl: ./dist/foehn-*.whl
+            - whl: ./dist/bundle/foehn-*.whl
 
     # ── Radar precipitation: 5-min year-round (D1) ────────────────────────────
     foehn_radar_precip:
@@ -142,7 +156,7 @@ resources:
           spec:
             environment_version: "2"
             dependencies:
-              - ./dist/foehn-*.whl
+              - ./dist/bundle/foehn-*.whl
 
       tasks:
         - task_key: download
@@ -198,7 +212,7 @@ resources:
           spec:
             environment_version: "2"
             dependencies:
-              - ./dist/foehn-*.whl
+              - ./dist/bundle/foehn-*.whl
 
       tasks:
         - task_key: download
@@ -265,7 +279,7 @@ resources:
               - "--data-dir"
               - "/Volumes/${var.catalog}/${var.schema}/${var.volume}"
           libraries:
-            - whl: ./dist/foehn-*.whl
+            - whl: ./dist/bundle/foehn-*.whl
 
         - task_key: ingest_historical
           description: "CSV → Polars (streaming + chunked) → Spark → Delta tables"
@@ -283,4 +297,4 @@ resources:
               - "--volume"
               - "${var.volume}"
           libraries:
-            - whl: ./dist/foehn-*.whl
+            - whl: ./dist/bundle/foehn-*.whl

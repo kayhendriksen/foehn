@@ -176,8 +176,27 @@ def _published_directory_mode(path: Path) -> int:
         return _umask_applied(directory=True, near=path.parent)
 
 
+def _fsync_file(path: Path) -> None:
+    # Opened for writing: Windows will not flush a handle that cannot write.
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a rename into *path* durable, where the platform lets a directory be synced."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass  # some filesystems refuse to sync a directory; the file itself is synced
+    finally:
+        os.close(descriptor)
+
+
 @contextlib.contextmanager
-def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Generator[Path]:
+def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None, durable: bool = False) -> Generator[Path]:
     """Yield a sibling path to write to, then move it onto *path*.
 
     The move happens when the block completes; the temp file is removed when it
@@ -191,6 +210,12 @@ def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Gene
     ``mode`` forces the published permissions instead of preserving an existing
     target's or deriving them from the umask. Use it for content whose
     sensitivity is a property of the content, not of the caller's environment.
+
+    ``durable`` syncs the bytes to disk before the rename and the directory after
+    it. The rename alone orders nothing on most filesystems: after a power loss
+    the new name can point at a file whose bytes never arrived. Worth it for the
+    Run state, which skip rules trust; not for data files, which are re-fetchable
+    and of which a bulk download writes thousands.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     _reap_stale_stages(path)
@@ -198,10 +223,14 @@ def staged(path: Path, *, suffix: str = ".tmp", mode: int | None = None) -> Gene
     try:
         yield tmp
         tmp.chmod(_published_file_mode(path) if mode is None else mode)
+        if durable:
+            _fsync_file(tmp)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    if durable:
+        _fsync_directory(path.parent)
 
 
 @contextlib.contextmanager
@@ -258,15 +287,15 @@ def staged_directory(path: Path) -> Generator[Path]:
         raise
 
 
-def write_bytes(path: Path, data: bytes | memoryview, *, mode: int | None = None) -> None:
+def write_bytes(path: Path, data: bytes | memoryview, *, mode: int | None = None, durable: bool = False) -> None:
     """Write bytes to *path* so readers never see a torn write."""
-    with staged(path, mode=mode) as tmp:
+    with staged(path, mode=mode, durable=durable) as tmp:
         tmp.write_bytes(data)
 
 
-def write_text(path: Path, text: str, *, mode: int | None = None) -> None:
+def write_text(path: Path, text: str, *, mode: int | None = None, durable: bool = False) -> None:
     """Write UTF-8 text to *path* so readers never see a torn write."""
-    write_bytes(path, text.encode("utf-8"), mode=mode)
+    write_bytes(path, text.encode("utf-8"), mode=mode, durable=durable)
 
 
 __all__ = ["PRIVATE_FILE_MODE", "staged", "staged_directory", "write_bytes", "write_text"]

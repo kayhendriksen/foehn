@@ -81,6 +81,7 @@ def write_odim_composite(
     obj="COMP",
     long_name=None,
     values=None,
+    unit=None,
 ):
     """Write a tiny ODIM-H5 Cartesian COMP composite (offline radar fixture).
 
@@ -107,5 +108,7 @@ def write_odim_composite(
         d1.create_dataset("data", data=data)
         dwhat = d1.create_group("what")
         dwhat.attrs.update({"gain": 1.0, "offset": 0.0, "nodata": nodata, "undetect": undetect, "quantity": quantity})
+        if unit is not None:
+            dwhat.attrs["unit"] = unit
         if long_name is not None:
             f.create_group("how").create_group("MeteoSwiss").attrs["long_name"] = long_name

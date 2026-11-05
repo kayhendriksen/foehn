@@ -1,5 +1,7 @@
 """Tests for collections constants and routing sets."""
 
+import pytest
+
 from foehn.api import list_datasets
 from foehn.collections import (
     CATEGORIES,
@@ -204,9 +206,17 @@ def test_forecast_run_from_filename_parses_full_url():
     assert forecast_run_from_filename(href) == "202607191200"
 
 
+def test_forecast_run_from_filename_reads_grib2_forecasts_and_analyses():
+    assert forecast_run_from_filename("icon-ch1-eps-202610290900-12-t_2m-ctrl.grib2") == "202610290900"
+    assert forecast_run_from_filename("icon-ch2-eps-202610291800-0-alb_dif-perturb.grib2") == "202610291800"
+    assert forecast_run_from_filename("kenda-ch1-202610301400-0-cape_ml-ctrl.grib2") == "202610301400"
+
+
 def test_forecast_run_from_filename_rejects_non_forecast_names():
     assert forecast_run_from_filename("ogd-smn_ber_d_recent.csv") is None
     assert forecast_run_from_filename("ogd-local-forecasting_meta_point.csv") is None
+    assert forecast_run_from_filename("cpc2629010009_00060.001.h5") is None
+    assert forecast_run_from_filename("horizontal_constants_icon-ch1-eps.grib2") is None
 
 
 def test_forecast_runs_sort_lexicographically():
@@ -295,3 +305,23 @@ def test_copying_a_nested_catalogue_list_hands_back_a_plain_list():
     assert type(clone) is list
     clone.append("mine")  # the copy is theirs to change
     assert COLLECTION_META["smn"]["time_slices"] == ["historical", "recent", "now"]
+
+
+# --- typo suggestions ---
+
+
+@pytest.mark.parametrize(
+    ("typo", "expected"),
+    [("smm", "smn"), ("SMN", "smn"), ("climate_normal", "climate_normals"), ("nope", None), (None, None)],
+)
+def test_suggest_dataset(typo, expected):
+    from foehn.collections import suggest_dataset
+
+    assert suggest_dataset(typo) == expected
+
+
+def test_an_unknown_dataset_error_suggests_the_closest_one():
+    import foehn
+
+    with pytest.raises(ValueError, match=r"Unknown dataset: 'smm'\. .* Did you mean 'smn'\?"):
+        foehn.load("smm")

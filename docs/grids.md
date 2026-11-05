@@ -21,10 +21,11 @@ zarr for writing:
 pip install "foehn[grids]"
 ```
 
-Core foehn stays at two dependencies; nothing above is imported until you call a
-grid function. One caveat: **eccodes** (pulled in for GRIB2) ships a system C
-library whose wheel can fail to build on some platforms — if so, that breaks the
-whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
+Core foehn depends only on requests, Polars and urllib3; nothing above is
+imported until you call a grid function. One caveat: GRIB2 needs the ecCodes C
+library, which arrives as the `eccodeslib` wheel on Linux (x86-64, aarch64) and
+macOS, and inside the `eccodes` wheel on Windows. On a platform with neither,
+that breaks the whole `grids` install, not just GRIB2. `rechunk=` additionally needs `dask`
 (`pip install dask`), deliberately **not** bundled in the extra.
 
 ---
@@ -79,6 +80,11 @@ ds = foehn.open_dataset("climate_scenarios_grid", match="_pr_", variables="pr")
 > timestamp refreshes it. If that metadata check is temporarily offline, an
 > existing complete local file remains usable. There is no byte-range read of
 > the remote file. Use `match=` to avoid pulling parameters you don't need.
+>
+> A match that spans several files stays lazy only when
+> [dask](https://www.dask.org) is installed (`pip install dask`; it is not part
+> of the `grids` extra). Without it, xarray reads every file's values into
+> memory while combining them, and foehn warns when that is over 1 GB.
 
 Once open, it's an ordinary xarray Dataset — slice it with `.sel()`/`.isel()`,
 reduce, plot, etc. (these grids use the Swiss LV95 projection, so spatial

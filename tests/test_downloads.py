@@ -126,6 +126,54 @@ def test_csv_download_skips_unchanged_asset(tmp_path):
     assert out.read_text() == "existing"  # untouched
 
 
+def test_forced_csv_download_replaces_a_file_its_etag_still_matches(tmp_path):
+    """``--full-refresh`` must repair a damaged cache, not get a 304 over it."""
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(url)])
+    _serve(fake, b"station_abbr;value\nTST;1.0\n", etag='"v1"')
+    save_etags(Workspace(tmp_path), {url: '"v1"'})
+    out = tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("corrupted")
+
+    result = registry.download("smn", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.downloaded == 1
+    assert result.skipped == 0
+    assert out.read_text() == "station_abbr;value\nTST;1.0\n"
+    assert load_etags(Workspace(tmp_path)) == {url: '"v1"'}
+
+
+def test_a_failed_forced_csv_download_forgets_the_etag(tmp_path):
+    """The file on disk is no longer vouched for, so the next run fetches it outright."""
+    url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(url)])
+    _serve(fake, etag='"v1"')
+    save_etags(Workspace(tmp_path), {url: '"v1"'})
+    out = tmp_path / "bronze" / "smn" / "ogd-smn_tst_d_recent.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("corrupted")
+    fake.fail(url)
+
+    result = registry.download("smn", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.failed == 1
+    assert url not in load_etags(Workspace(tmp_path))
+
+
+def test_forced_binary_download_replaces_an_existing_file(tmp_path):
+    href = "https://data.geo.admin.ch/forecast.grib2"
+    fake = _fake([_stac_item(href)], body=b"GRIBdata")
+    out_dir = tmp_path / "bronze" / "forecast_icon_ch1"
+    out_dir.mkdir(parents=True)
+    (out_dir / "forecast.grib2").write_bytes(b"existing")
+
+    result = registry.download("forecast_icon_ch1", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert result.downloaded == 1
+    assert (out_dir / "forecast.grib2").read_bytes() == b"GRIBdata"
+
+
 def test_csv_download_ignores_stored_etag_when_file_is_gone(tmp_path):
     """Otherwise a 304 would report 'skipped' over a file that no longer exists."""
     url = "https://data.geo.admin.ch/ogd-smn_tst_d_recent.csv"
@@ -314,7 +362,164 @@ def test_csv_download_resilient_to_single_failure(tmp_path):
     assert bad not in etags
 
 
+# --- what Bronze keeps ---
+
+_SMN = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn"
+
+
+def _bronze(tmp_path, dataset, *names):
+    bronze = Workspace(tmp_path).bronze(dataset)
+    bronze.mkdir(parents=True)
+    for name in names:
+        (bronze / name).write_text("a;b\n1;2\n")
+    return bronze
+
+
+def _files(bronze):
+    return sorted(path.name for path in bronze.iterdir() if not path.name.startswith("."))
+
+
+def test_a_station_gone_upstream_leaves_no_rolling_files_behind(tmp_path):
+    """Nothing ever deleted from Bronze, so a station MeteoSwiss dropped kept its recent file.
+
+    It fed every later ``*_recent`` table — into the next year, with last year's
+    rows. Only the rolling slices go: a historical or unsliced file is still a
+    valid record of what was measured.
+    """
+    bronze = _bronze(
+        tmp_path,
+        "smn",
+        "ogd-smn_old_d_recent.csv",
+        "ogd-smn_old_t_now.csv",
+        "ogd-smn_old_d_historical.csv",
+        "ogd-smn_old_m.csv",
+        "ogd-smn_meta_stations.csv",
+        "ogd-smn_tst_h_now.csv",  # still listed, in a slice this run did not ask for
+    )
+    tst = f"{_SMN}/tst"
+    item = {
+        "id": "tst",
+        "assets": {"a": {"href": f"{tst}/ogd-smn_tst_d_recent.csv"}, "b": {"href": f"{tst}/ogd-smn_tst_h_now.csv"}},
+        "properties": {"updated": "2026-01-01T00:00:00Z"},
+    }
+
+    registry.download("smn", Workspace(tmp_path), fetcher=_fake([item]))
+
+    assert _files(bronze) == [
+        "ogd-smn_meta_stations.csv",
+        "ogd-smn_old_d_historical.csv",
+        "ogd-smn_old_m.csv",
+        "ogd-smn_tst_d_recent.csv",
+        "ogd-smn_tst_h_now.csv",
+    ]
+
+
+def test_an_incremental_run_with_nothing_new_still_prunes(tmp_path):
+    """The listing is always walked in full; ``since`` narrows what is fetched, not what is known."""
+    bronze = _bronze(tmp_path, "smn", "ogd-smn_old_d_recent.csv", "ogd-smn_tst_d_recent.csv")
+    fake = _fake([_stac_item(f"{_SMN}/tst/ogd-smn_tst_d_recent.csv", updated="2026-01-01T00:00:00Z")])
+
+    result = registry.download("smn", Workspace(tmp_path), since="2026-02-01T00:00:00Z", fetcher=fake)
+
+    assert result.downloaded == 0
+    assert _files(bronze) == ["ogd-smn_tst_d_recent.csv"]
+
+
+def test_a_run_with_failures_deletes_nothing(tmp_path):
+    bronze = _bronze(tmp_path, "smn", "ogd-smn_old_d_recent.csv")
+    bad = f"{_SMN}/tst/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(bad)])
+    fake.fail(bad, FetchError("boom"))
+
+    registry.download("smn", Workspace(tmp_path), fetcher=fake)
+
+    assert _files(bronze) == ["ogd-smn_old_d_recent.csv"]
+
+
+def test_an_empty_listing_deletes_nothing(tmp_path):
+    """A collection that lists nothing is a broken listing, not a collection to empty Bronze for."""
+    bronze = _bronze(tmp_path, "smn", "ogd-smn_old_d_recent.csv")
+
+    registry.download("smn", Workspace(tmp_path), fetcher=_fake([]))
+
+    assert _files(bronze) == ["ogd-smn_old_d_recent.csv"]
+
+
+def _forecast_listing(*names):
+    assets = {name: {"href": f"https://data.geo.admin.ch/x/{name}"} for name in names}
+    return [{"id": "20260721", "assets": assets, "properties": {"updated": "2026-07-21T08:00:00Z"}}]
+
+
+def test_forecast_runs_older_than_the_newest_complete_one_are_removed(tmp_path):
+    """Each run is ~1 GB and only the newest complete one is ever converted or ingested."""
+    older = [f"vnut12.lssw.202607200600.{param}.csv" for param in ("aaa", "bbb")]
+    newest = [f"vnut12.lssw.202607210600.{param}.csv" for param in ("aaa", "bbb")]
+    bronze = _bronze(tmp_path, "forecast_local", *older)
+
+    registry.download("forecast_local", Workspace(tmp_path), fetcher=_fake(_forecast_listing(*newest)))
+
+    assert _files(bronze) == sorted(newest)
+
+
+def test_a_partial_newer_run_is_kept_beside_the_complete_one(tmp_path):
+    """The complete run is what conversion uses; the partial one is what the next run finishes."""
+    complete = [f"vnut12.lssw.202607210000.{param}.csv" for param in ("aaa", "bbb")]
+    partial = ["vnut12.lssw.202607210600.aaa.csv"]
+    bronze = _bronze(tmp_path, "forecast_local", "vnut12.lssw.202607200000.aaa.csv", *partial)
+
+    registry.download("forecast_local", Workspace(tmp_path), fetcher=_fake(_forecast_listing(*complete, *partial)))
+
+    assert _files(bronze) == sorted([*complete, *partial])
+
+
+def test_a_forecast_listing_with_no_runs_prunes_nothing(tmp_path):
+    bronze = _bronze(tmp_path, "forecast_local", "vnut12.lssw.202607200600.aaa.csv")
+
+    registry.download("forecast_local", Workspace(tmp_path), fetcher=_fake(_forecast_listing("readme.csv")))
+
+    assert "vnut12.lssw.202607200600.aaa.csv" in _files(bronze)
+
+
+def test_grid_files_are_never_pruned(tmp_path):
+    """Radar Bronze *is* the archive — upstream keeps two weeks, and the radar Delta table indexes these paths."""
+    bronze = _bronze(tmp_path, "radar_precip", "cpc2600100000_00060.001.h5")
+    name = "cpc2630112000_00060.001.h5"
+    fake = _fake([_stac_item(f"https://data.geo.admin.ch/x/{name}")], body=b"h5")
+
+    registry.download("radar_precip", Workspace(tmp_path), fetcher=fake)
+
+    assert _files(bronze) == sorted(["cpc2600100000_00060.001.h5", name])
+
+
 # --- download_metadata ---
+
+
+def test_metadata_is_fetched_conditionally_like_the_data(tmp_path):
+    """Every run used to download the metadata files in full, with no ETag sent."""
+    meta = f"{_SMN}/ogd-smn_meta_stations.csv"
+    data = f"{_SMN}/tst/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(data)], collection={"assets": {"stations": {"href": meta}}})
+    _serve(fake, etag='"v1"')
+
+    registry.download("smn", Workspace(tmp_path), fetcher=fake)
+    second = registry.download("smn", Workspace(tmp_path), fetcher=fake)
+
+    assert second.downloaded == 0
+    assert second.skipped == 2
+    # Kept by the data pass's prune too, which only knew the item assets.
+    assert load_etags(Workspace(tmp_path))[meta] == '"v1"'
+
+
+def test_a_forced_download_fetches_the_metadata_again(tmp_path):
+    meta = f"{_SMN}/ogd-smn_meta_stations.csv"
+    data = f"{_SMN}/tst/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(data)], collection={"assets": {"stations": {"href": meta}}})
+    _serve(fake, etag='"v1"')
+    registry.download("smn", Workspace(tmp_path), fetcher=fake)
+
+    forced = registry.download("smn", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert forced.downloaded == 2
 
 
 def test_download_metadata_saves_csv(tmp_path):
@@ -348,6 +553,27 @@ def test_normals_zip_extracts_files(tmp_path):
 
     assert (tmp_path / "bronze" / "climate_normals" / "normwerte.zip").exists()
     assert (tmp_path / "bronze" / "climate_normals" / "sample.txt").exists()
+
+
+def test_a_zip_download_holds_the_dataset_lock_while_it_publishes(tmp_path):
+    """A conversion holds that lock while it reads, and publication replaces the directory it reads."""
+    from foehn import coherence
+    from foehn._locking import is_held
+
+    out_dir = tmp_path / "bronze" / "climate_normals"
+    held = []
+    fake = _fake()
+
+    def stream(url, path):
+        held.append(is_held(coherence._lock_path(out_dir)))
+        path.write_bytes(make_zip({"sample.txt": b"data"}))
+
+    fake.stream_hook = stream
+
+    download_normals_zip("climate_normals", Workspace(tmp_path), fetcher=fake)
+
+    assert held == [True]
+    assert (out_dir / "sample.txt").exists()
 
 
 def test_normals_zip_skips_a_completed_materialization(tmp_path):
@@ -436,13 +662,73 @@ def test_binary_download_skips_existing_file(tmp_path):
     assert (out_dir / "forecast.grib2").read_bytes() == b"existing"
 
 
-def test_binary_download_reads_only_the_newest_page(tmp_path):
-    """These collections hold thousands of ephemeral items; walking them all is pure cost."""
-    fake = _fake([_stac_item("https://data.geo.admin.ch/forecast.grib2")], body=b"GRIBdata")
+def _one_item_per_file(*names):
+    """GRIB2 forecasts are one STAC item per file, listed oldest first like the API."""
+    return [
+        {
+            "id": name.split(".")[0],
+            "assets": {"data": {"href": f"https://data.geo.admin.ch/{name}"}},
+            "properties": {"updated": "2026-01-01T00:00:00Z"},
+        }
+        for name in names
+    ]
 
-    registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
 
-    assert [max_items for *_, max_items in fake.listings] == [100]
+def test_grib2_download_fetches_the_control_member_of_the_newest_run(tmp_path):
+    """Stopping at the first page of the oldest-first listing fetched the oldest run, at lead 0."""
+    fake = _fake(
+        _one_item_per_file(
+            "icon-ch1-eps-202610281200-0-t_2m-ctrl.grib2",
+            "icon-ch1-eps-202610281200-0-t_2m-perturb.grib2",
+            "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2",
+            "icon-ch1-eps-202610290900-0-t_2m-perturb.grib2",
+            "icon-ch1-eps-202610290900-1-t_2m-ctrl.grib2",
+        ),
+        body=b"GRIBdata",
+    )
+
+    result = registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
+
+    assert sorted(result.filenames) == [
+        "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2",
+        "icon-ch1-eps-202610290900-1-t_2m-ctrl.grib2",
+    ]
+
+
+def test_grib2_download_passes_over_a_run_that_is_still_publishing(tmp_path):
+    """A run is published lead by lead over more than an hour, and max() took the stub."""
+    fake = _fake(
+        _one_item_per_file(
+            *(
+                f"icon-ch1-eps-{run}-{lead}-t_2m-ctrl.grib2"
+                for run in ("202610310900", "202610311200")
+                for lead in (0, 1, 2)
+            ),
+            "icon-ch1-eps-202610311500-0-t_2m-ctrl.grib2",  # the newest run, one lead in
+        ),
+        body=b"GRIBdata",
+    )
+
+    result = registry.download("forecast_icon_ch1", Workspace(tmp_path), fetcher=fake)
+
+    assert sorted(result.filenames) == [f"icon-ch1-eps-202610311200-{lead}-t_2m-ctrl.grib2" for lead in (0, 1, 2)]
+
+
+@pytest.mark.parametrize(
+    ("dataset", "name"),
+    [
+        ("forecast_icon_ch1", "icon-ch1-eps-202610290900-0-t_2m-ctrl.grib2"),
+        ("radar_precip", "cpc2630112000_00060.001.h5"),
+    ],
+)
+def test_ephemeral_downloads_walk_the_whole_listing_uncached(tmp_path, dataset, name):
+    """A truncated listing reaches only the oldest items; a cached one can hide the newest."""
+    fake = _fake(_one_item_per_file(name), body=b"data")
+
+    registry.download(dataset, Workspace(tmp_path), fetcher=fake)
+
+    assert fake.listings
+    assert {(cache, max_items) for _, cache, _, max_items in fake.listings} == {(False, None)}
 
 
 # --- the static listing path (registry: NETCDF_GRID) ---
@@ -638,6 +924,52 @@ def test_a_complete_grid_download_leaves_nothing_marked(tmp_path):
 
     assert not coherence.blocked(out_dir, names)
     assert not (out_dir / coherence.MARKER).exists()
+
+
+def test_one_failed_file_costs_only_itself_on_the_next_run(tmp_path):
+    """Marking the whole set made one 404 cost every file of it on the next run.
+
+    For the 5-minute radar job that was a whole day of composites.
+    """
+    collection = "ch.meteoschweiz.ogd-radar-hail"
+    hrefs = [f"https://data.geo.admin.ch/{collection}/x/bzc26304{hour:02d}00vl.801.h5" for hour in range(5)]
+
+    def listing(restated=None):
+        assets = {f"a{i}": {"href": href} for i, href in enumerate(hrefs)}
+        if restated:
+            assets["a0"]["updated"] = restated
+        return [{"id": "2026-10-31", "assets": assets, "properties": {"updated": "2026-01-01T00:00:00Z"}}]
+
+    fake = _fake(listing(), body=b"h5")
+    workspace = Workspace(tmp_path)
+    registry.download("radar_hail", workspace, fetcher=fake)
+
+    fake.any_items = listing(restated="2100-01-01T00:00:00Z")  # upstream restates one file...
+    fake.fail(hrefs[0])  # ...and fetching it fails once
+    assert registry.download("radar_hail", workspace, fetcher=fake).failed == 1
+
+    fake.errors.clear()
+    fake.streams.clear()
+    registry.download("radar_hail", workspace, fetcher=fake)
+
+    assert fake.streams == [hrefs[0]]
+
+
+def test_download_takes_a_single_time_slice_as_load_does(tmp_path):
+    """A bare string was iterated character by character, so "historical" matched no slice at all."""
+    base = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/ber/"
+    names = ["ogd-smn_ber_d_historical.csv", "ogd-smn_ber_d_recent.csv", "ogd-smn_ber_m.csv"]
+    fake = _fake([stac_item("ber", *(base + name for name in names))])
+
+    result = registry.download("smn", Workspace(tmp_path), time_slice="historical", fetcher=fake)
+
+    assert sorted(result.filenames) == ["ogd-smn_ber_d_historical.csv", "ogd-smn_ber_m.csv"]
+
+
+def test_download_refuses_an_unknown_time_slice(tmp_path):
+    """A typo selected no slice, and the unsliced files alone came back as the answer."""
+    with pytest.raises(ValueError, match="Invalid time_slice"):
+        registry.download("smn", Workspace(tmp_path), time_slice=["histroical"], fetcher=_fake([]))
 
 
 def test_a_retry_does_not_clear_a_cache_it_never_repaired(tmp_path):

@@ -36,6 +36,7 @@ from foehn.collections import (
     DatasetKind,
     forecast_run_from_filename,
     kind,
+    newest_complete_run,
 )
 
 logger = logging.getLogger(__name__)
@@ -496,17 +497,18 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
 
 
 def _newest_forecast_run(csv_files: list[Path]) -> list[Path]:
-    """Keep the newest Forecast run's files out of everything Bronze holds.
+    """Keep the newest complete Forecast run's files out of everything Bronze holds.
 
-    The download fetches only the newest run but never prunes the older ones, so
-    Bronze accumulates runs. Their files share points and times, and the group is
-    joined on those — two runs would collide on every parameter column. The
-    newest run is also what ``foehn.load`` returns.
+    Bronze can hold more than one run, and their files share points and times:
+    the group is joined on those, so two runs would collide on every parameter
+    column. *Complete*, not newest outright: a file that fails to download is
+    counted rather than fatal, so the newest run on disk can be partial, and
+    joined as it stands it became a table missing those parameters. The newest
+    complete run is also what the download fetches and ``foehn.load`` returns.
     """
-    runs = {run for path in csv_files if (run := forecast_run_from_filename(path.name)) is not None}
-    if not runs:
+    newest = newest_complete_run(forecast_run_from_filename(path.name) for path in csv_files)
+    if newest is None:
         return []
-    newest = max(runs)
     return [path for path in csv_files if forecast_run_from_filename(path.name) == newest]
 
 

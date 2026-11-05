@@ -87,6 +87,17 @@ def test_workers_must_be_positive():
         Filters.build(workers=0)
 
 
+def test_the_byte_budget_is_off_unless_asked_for():
+    assert Filters.build().max_bytes is None
+    assert Filters.build(max_bytes=1024).max_bytes == 1024
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_byte_budget_must_be_positive(value):
+    with pytest.raises(ValueError, match="max_bytes"):
+        Filters.build(max_bytes=value)
+
+
 @pytest.mark.parametrize("label", ["date_from", "date_to"])
 def test_date_bounds_must_be_iso(label):
     with pytest.raises(ValueError, match=label):
@@ -149,6 +160,19 @@ def test_preamble_reader_narrows_items_to_the_requested_stations():
 
     assert fake.gets == ["https://data.geo.admin.ch/x/CH2025_ABE_pr_GWL1.5.csv"]
     assert df["station_abbr"].unique().to_list() == ["ABE"]
+
+
+def test_preamble_reader_stops_at_its_byte_budget():
+    body = CLIMATE_SCENARIOS_CSV.encode()
+    fake = _fetcher(
+        [stac_item(s, f"https://data.geo.admin.ch/x/CH2025_{s}_pr_GWL1.5.csv") for s in ("ABE", "BER", "ZUR")],
+        body=body,
+    )
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        read_preamble("climate_scenarios", Filters.build(max_bytes=len(body), workers=1), fetcher=fake)
+
+    assert len(fake.gets) == 2
 
 
 def test_preamble_reader_names_the_station_when_nothing_matches():

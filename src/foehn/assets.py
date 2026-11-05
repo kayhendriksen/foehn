@@ -15,15 +15,19 @@ agree on which forecast you get.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from foehn._urls import asset_filename
+from foehn._urls import asset_filename, is_plain_filename
 from foehn.collections import (
     forecast_run_from_filename,
     granularity_from_filename,
+    newest_complete_run,
     time_slice_from_filename,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,10 @@ def assets_of(
     that substring, ``excludes`` drops names holding it (``_meta_``, mostly).
     All three match the query-stripped name, which is the bug this replaces:
     ``href.endswith(".csv")`` silently drops an asset served with a token.
+
+    An asset whose name is not a plain file name is left out and logged: every
+    path that writes an asset joins its name onto a directory, and every path
+    reaches its assets through here.
     """
     found: list[Asset] = []
     for item in items:
@@ -92,6 +100,9 @@ def assets_of(
         item_updated = item.get("properties", {}).get("updated", "")
         for key, info in item.get("assets", {}).items():
             asset = Asset.from_stac(key, info, item_id=item_id, item_updated=item_updated)
+            if not is_plain_filename(asset.name):
+                logger.warning("  Ignoring asset %r of %r: %r is not a plain file name", key, item_id, asset.name)
+                continue
             if suffixes is not None and not asset.name.endswith(suffixes):
                 continue
             if contains is not None and contains not in asset.name:
@@ -134,12 +145,12 @@ def select(
     slice at all — a file with no slice segment is unsliced data that every
     query includes, not data that matches nothing.
 
-    ``latest_run`` keeps only the newest forecast run. A forecast item is one
-    *day* holding that day's runs, so picking the newest item is not the same
-    thing and picks an empty one: the newest day is created at ~04:00 UTC and
-    filled as its runs publish. Runs are zero-padded ``YYYYMMDDHHMM``, so the
-    newest is ``max()`` without parsing a datetime. One run is ~32 files at
-    ~30 MB; the retained window is ~40 runs.
+    ``latest_run`` keeps only the newest *complete* forecast run — see
+    :func:`~foehn.collections.newest_complete_run`; the newest run outright is
+    often still publishing. A forecast item is one *day* holding that day's
+    runs, so picking the newest item is not the same thing and picks an empty
+    one: the newest day is created at ~04:00 UTC and filled as its runs publish.
+    One run is ~32 files at ~30 MB; the retained window is ~40 runs.
     """
     found = list(assets)
 
@@ -151,19 +162,15 @@ def select(
         wanted = set(granularities)
         found = [a for a in found if a.granularity in wanted]
 
-    if latest_run:
-        runs = {a.forecast_run for a in found if a.forecast_run is not None}
-        if runs:
-            newest = max(runs)
-            found = [a for a in found if a.forecast_run == newest]
+    if latest_run and (newest := newest_complete_run(a.forecast_run for a in found)) is not None:
+        found = [a for a in found if a.forecast_run == newest]
 
     return found
 
 
 def latest_run_of(assets: Iterable[Asset]) -> str | None:
-    """The newest forecast run present, for callers that want to log it."""
-    runs = {a.forecast_run for a in assets if a.forecast_run is not None}
-    return max(runs) if runs else None
+    """The run ``select(latest_run=True)`` keeps, for callers that want to log it."""
+    return newest_complete_run(a.forecast_run for a in assets)
 
 
 def hrefs(assets: Iterable[Asset]) -> list[str]:

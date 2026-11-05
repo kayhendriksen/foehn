@@ -99,7 +99,10 @@ format — this is what each foehn reader relies on:
             ODIM reader extracts these to build the scaled, LV95-georeferenced grid.
 """
 
+import difflib
 import re
+from collections import Counter
+from collections.abc import Iterable
 
 from foehn.catalog import COLLECTION_META as COLLECTION_META
 from foehn.catalog import COLLECTIONS as COLLECTIONS
@@ -135,7 +138,23 @@ def collection_id(dataset: str) -> str:
     try:
         return COLLECTIONS[dataset]
     except KeyError:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets.") from None
+        message = f"Unknown dataset: {dataset!r}. Use list_datasets() to see available datasets."
+        suggestion = suggest_dataset(dataset)
+        if suggestion is not None:
+            message += f" Did you mean {suggestion!r}?"
+        raise ValueError(message) from None
+
+
+def suggest_dataset(name: object) -> str | None:
+    """The known **Dataset** closest to a mistyped *name*, or None if nothing is close.
+
+    Shared by every front end, so ``foehn.load("smm")``, ``foehn load smm`` and
+    the MCP tools all answer a typo with the same suggestion.
+    """
+    if not isinstance(name, str):
+        return None
+    matches = difflib.get_close_matches(name.lower(), COLLECTIONS, n=1, cutoff=0.6)
+    return matches[0] if matches else None
 
 
 def kind(dataset: str) -> DatasetKind:
@@ -168,6 +187,11 @@ TIME_SLICE_LABELS: dict[str, str] = {
 }
 
 TIME_SLICES = frozenset(TIME_SLICE_LABELS)
+
+# The slices upstream rebuilds in place, whose file is a window rather than a
+# record: once MeteoSwiss stops listing one, the copy left in Bronze is not data
+# anyone should still read. "historical" is a record and is kept.
+ROLLING_TIME_SLICES = frozenset({"now", "recent"})
 
 DEFAULT_TIME_SLICE = "recent"
 """What a caller who names no time slice gets.
@@ -270,16 +294,44 @@ def granularity_from_filename(filename: str) -> str | None:
 # column inside the file (the end of each forecast step's aggregation interval).
 _FORECAST_RUN_RE = re.compile(r"^vnut\d+\.lssw\.(\d{12})\.(.+)\.csv$")
 
+# GRIB2 forecast and analysis files carry the run the same way, after the model
+# name and before the lead time in hours:
+# ``icon-ch1-eps-<YYYYMMDDHHMM>-<lead>-<param>-<member>.grib2``.
+_GRIB2_RUN_RE = re.compile(r"^[a-z][a-z0-9-]*?-(\d{12})-\d+-[^/]+\.grib2?$")
+
 
 def forecast_run_from_filename(filename: str) -> str | None:
-    """Return the run timestamp of a forecast CSV asset, or None if unrecognised.
+    """Return the run timestamp of a forecast CSV or GRIB2 asset, or None if unrecognised.
 
-    e.g. ``vnut12.lssw.202607210600.dkl010h0.csv`` → ``"202607210600"``. The
+    e.g. ``vnut12.lssw.202607210600.dkl010h0.csv`` and
+    ``icon-ch1-eps-202607210600-0-t_2m-ctrl.grib2`` → ``"202607210600"``. The
     zero-padded ``YYYYMMDDHHMM`` form sorts lexicographically, so callers can
     pick the newest run by ``max()`` without parsing it into a datetime.
     """
-    match = _FORECAST_RUN_RE.match(filename.rsplit("/", 1)[-1])
+    name = filename.rsplit("/", 1)[-1]
+    match = _FORECAST_RUN_RE.match(name) or _GRIB2_RUN_RE.match(name)
     return match.group(1) if match else None
+
+
+def newest_complete_run(runs: Iterable[str | None]) -> str | None:
+    """The newest **Forecast run** that is fully published, from one run per file.
+
+    A run is published file by file, so the newest one is often a stub: an hour
+    into publication, ICON-CH1's newest run held 1,800 of its 3,400 control
+    files, and ``max()`` handed that over as the forecast. Runs differ in size on
+    purpose as well — the 03 UTC ICON-CH1 run reaches 45 h where the others stop
+    at 33 h — so complete cannot mean "as large as the largest". It means at
+    least the size most listed runs share, with a tie going to the larger size:
+    one full run beside a partial newer one keeps the full one. If upstream drops
+    a file from every run for good, the smaller runs become typical once they
+    outnumber the older ones in the listing.
+    """
+    sizes = Counter(run for run in runs if run is not None)
+    if not sizes:
+        return None
+    frequency = Counter(sizes.values())
+    typical = max(frequency, key=lambda size: (frequency[size], size))
+    return max(run for run, size in sizes.items() if size >= typical)
 
 
 def forecast_parameter_from_filename(filename: str) -> str | None:

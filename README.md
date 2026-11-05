@@ -22,6 +22,12 @@
   <a href="https://pypi.org/project/foehn/">
     <img src="https://img.shields.io/pypi/dm/foehn.svg" alt="Monthly Downloads">
   </a>
+  <a href="https://github.com/kayhendriksen/foehn/actions/workflows/ci.yml">
+    <img src="https://github.com/kayhendriksen/foehn/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI">
+  </a>
+  <a href="https://kayhendriksen.github.io/foehn/">
+    <img src="https://img.shields.io/badge/docs-kayhendriksen.github.io%2Ffoehn-blue" alt="Documentation">
+  </a>
 </p>
 
 ---
@@ -64,14 +70,20 @@ Recent data (Jan 1 to yesterday) is downloaded and converted to Parquet under `.
 
 **From PyPI:**
 ```bash
-pip install foehn
+pip install foehn       # or: uv add foehn
+```
+
+**As a standalone CLI** (in its own isolated environment):
+```bash
+uv tool install foehn   # or: pipx install foehn
+uvx foehn list          # run once without installing
 ```
 
 **From source:**
 ```bash
 git clone https://github.com/kayhendriksen/foehn
 cd foehn
-pip install -e .
+uv sync                 # see CONTRIBUTING.md
 ```
 
 **With extras:**
@@ -102,9 +114,11 @@ Load data directly into Polars DataFrames, explore metadata, download to disk, a
 ```bash
 foehn download smn pollen
 foehn load smn --station BER --frequency d
+foehn load smn --station BER --frequency d --output-format csv > ber.csv
+foehn metadata stations smn --output-format json | jq '.[].name'
 ```
 
-The CLI mirrors the Python API with subcommands for downloading, converting, loading, and inspecting metadata. See the [full CLI documentation](docs/cli.md).
+The CLI mirrors the Python API with subcommands for downloading, converting, loading, and inspecting metadata. Tables are printed for people and CSV/JSON for pipelines, with progress and errors kept on stderr. See the [full CLI documentation](docs/cli.md).
 
 ---
 
@@ -142,6 +156,8 @@ Give any MCP-compatible LLM live access to MeteoSwiss data. See the [full MCP se
 
 ## Documentation
 
+The full documentation, including the API reference, is at **[kayhendriksen.github.io/foehn](https://kayhendriksen.github.io/foehn/)**.
+
 | | |
 |---|---|
 | [Collections](docs/collections.md) | All 20+ MeteoSwiss datasets, categories, and time slice conventions |
@@ -150,6 +166,8 @@ Give any MCP-compatible LLM live access to MeteoSwiss data. See the [full MCP se
 | [CLI](docs/cli.md) | All subcommands, flags, and environment variables |
 | [MCP Server](docs/mcp-server.md) | Setup, configuration, and available tools |
 | [Databricks Pipeline](docs/databricks.md) | Declarative Automation Bundle deployment |
+| [Changelog](CHANGELOG.md) | What changed in every release |
+| [Contributing](CONTRIBUTING.md) | Development setup, tests, conventions and releases |
 
 ---
 
@@ -160,6 +178,12 @@ Give any MCP-compatible LLM live access to MeteoSwiss data. See the [full MCP se
 | STAC API | https://data.geo.admin.ch/api/stac/v1 |
 | Documentation | https://opendatadocs.meteoswiss.ch |
 | MeteoSwiss OGD | https://github.com/MeteoSwiss/opendata |
+
+---
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and conventions, and include the output of `foehn version` in bug reports. Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 

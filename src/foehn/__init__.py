@@ -1,4 +1,4 @@
-"""foehn — Download MeteoSwiss Open Government Data and convert to Parquet."""
+"""foehn — MeteoSwiss Open Government Data as DataFrames, Parquet, xarray and Zarr."""
 
 __version__ = "0.5.0"
 
@@ -34,6 +34,7 @@ from foehn.api import (
     to_zarr,
 )
 from foehn.transfer import DownloadResult
+from foehn.versions import show_versions
 
 __all__ = [
     "DownloadResult",
@@ -47,6 +48,7 @@ __all__ = [
     "open_dataset",
     "parameters",
     "points",
+    "show_versions",
     "stations",
     "to_parquet",
     "to_zarr",

@@ -10,6 +10,8 @@ GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
@@ -31,6 +33,7 @@ from foehn.collections import (
 )
 from foehn.docstrings import renders
 from foehn.metadata import TABLES
+from foehn.workspace import DATA_DIR_ENV, user_cache_root
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,14 @@ _INSPECTABLE_GRIDS = sorted(registry.grid_datasets())
 # ``load_data`` named twelve loadable datasets when the registry had thirteen.
 _CATEGORY_CODES = ", ".join(sorted(CATEGORIES))
 
+# The most data one load_data or describe_data call may download. This layer's
+# own, like the row cap: the calendar filters trim rows only after each file has
+# been downloaded, so without a ceiling one call — frequency="t" over every
+# station's history, say — fetched gigabytes into the server's memory. Sized to
+# clear a single station's full 10-minute history; a query past it is refused
+# with the filters that would narrow it, rather than run until the host fails.
+_LOAD_BUDGET_BYTES = 1_000_000_000
+
 # What every tool docstring below is filled from. ``load_data`` and
 # ``describe_data`` used to name the granularity and time-slice tokens as prose,
 # directly under the comment above saying they would not.
@@ -83,6 +94,7 @@ _VOCABULARY = {
     "granularities": options(GRANULARITY_LABELS),
     "time_slices": options(TIME_SLICE_LABELS),
     "default_time_slice": DEFAULT_TIME_SLICE,
+    "load_budget": f"{_LOAD_BUDGET_BYTES / 1e6:,.0f} MB",
 }
 
 
@@ -99,9 +111,11 @@ mcp = MCPServer(
         "3. get_parameters(dataset) — understand what each column measures\n"
         "4. describe_data(dataset, ...) — check row count and date range before loading\n"
         "5. load_data(dataset, ...) — fetch the data with filters\n\n"
-        "Key tip: For historical data, always use time filters (year, month,\n"
-        "date_from/date_to) to avoid hitting the row limit. Use drop_null to\n"
-        "filter sparse datasets. Use sort='desc' to get newest data first.\n\n"
+        "Key tip: station, frequency and time_slice decide how much is downloaded;\n"
+        "year, month and date_from/date_to only trim rows afterwards. Narrow the\n"
+        "first three before loading historical data — a call that downloads too\n"
+        "much is refused. Use drop_null to filter sparse datasets. Use sort='desc'\n"
+        "to get newest data first.\n\n"
         "Gridded datasets (NetCDF climate grids, GRIB2 forecasts, radar) are not\n"
         "tabular — inspect them with describe_grid(dataset), not load_data();\n"
         "GRIB2 and radar need a single-file match=.\n\n"
@@ -217,6 +231,18 @@ class GridSummary(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def _grid_data_dir() -> Path | None:
+    """Where describe_grid caches what it downloads.
+
+    ``$FOEHN_DATA_DIR`` when it is set — None leaves that to the Workspace, which
+    reads it — and otherwise the user's cache directory. Not the working
+    directory, the library's default: a client starts this server wherever it
+    likes, often ``/``, and the downloads then failed or landed somewhere the
+    user would never look.
+    """
+    return None if os.environ.get(DATA_DIR_ENV) else user_cache_root()
+
+
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 
@@ -262,9 +288,12 @@ def load_data(
     named below. Binary/grid datasets (GRIB2, NetCDF, radar) are not supported —
     inspect those with describe_grid().
 
-    **Tip:** For historical data, always combine time filters (year, month,
-    date_from/date_to) to avoid hitting the row limit. Use describe_data()
-    first if you're unsure about the data shape.
+    **Download budget:** a call may download at most $load_budget. station,
+    frequency and time_slice decide which files are downloaded; year, month and
+    date_from/date_to only trim rows once each file is in, so they do not make a
+    call cheaper. Narrow station/frequency/time_slice for historical data — a
+    call over the budget is refused. Use describe_data() first if you're unsure
+    about the data shape.
 
     Args:
         dataset: Dataset name (e.g. "smn" for SwissMetNet).
@@ -279,8 +308,8 @@ def load_data(
         time_slice: Time period. Options: $time_slices.
             Defaults to "$default_time_slice".
         year: Filter to specific year(s) (e.g. [2025] or [2020, 2021, 2022]).
-            Applied after loading, so use with time_slice="historical" to get
-            past years without hitting the row limit.
+            Applied after downloading, so it trims rows, not the download. Use
+            with time_slice="historical" to reach past years.
         month: Filter to specific month(s) (1-12). E.g. [6, 7, 8] for summer.
             Can combine with year — year=[2025], month=[7] gives July 2025 only.
         date_from: Start date (inclusive), ISO format "YYYY-MM-DD" (e.g. "2025-06-01").
@@ -317,6 +346,7 @@ def load_data(
         drop_null=drop_null,
         sort=sort,
         limit=limit,
+        max_bytes=_LOAD_BUDGET_BYTES,
     )
     return df.to_dicts()
 
@@ -346,9 +376,10 @@ def describe_data(
 
     **Cost note:** this still fetches the matching CSVs in full (they are not
     pre-bucketed by row count) and summarises them in memory — it returns no
-    rows, but it is *not* cheaper than load_data() in network/parse terms. Always
-    narrow with the time filters (year, month, date_from/date_to) for historical
-    slices, exactly as you would for load_data().
+    rows, but it is *not* cheaper than load_data() in network/parse terms, and
+    it is held to the same $load_budget download budget. Narrow station,
+    frequency and time_slice for historical slices, exactly as you would for
+    load_data().
 
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
@@ -371,6 +402,7 @@ def describe_data(
         date_from=date_from,
         date_to=date_to,
         drop_null=drop_null,
+        max_bytes=_LOAD_BUDGET_BYTES,
     )
 
     stations = sorted(df["station_abbr"].unique().to_list()) if "station_abbr" in df.columns else []
@@ -434,8 +466,9 @@ def describe_grid(
     is ~30 GB over 3,698 files, satellite_derived_grid ~9 GB. Pass `match` unless
     you mean it. climate_scenarios_grid is ~900 MB unfiltered, and a single
     GRIB2/radar file is only a few MB. Above 1,000 files the call is refused
-    rather than started. Requires the optional 'grids' dependencies
-    (pip install foehn[grids]).
+    rather than started. Several NetCDF files are combined in memory unless the
+    server has dask installed, so a wide match costs RAM as well as disk.
+    Requires the optional 'grids' dependencies (pip install foehn[grids]).
 
     Args:
         dataset: Grid dataset name (e.g. "surface_derived_grid", "forecast_icon_ch1",
@@ -452,24 +485,28 @@ def describe_grid(
         raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
     # open_dataset enforces the single-file match= requirement for GRIB2/radar.
 
-    ds = foehn.open_dataset(dataset, match=match, variables=variables)
-    try:
-        dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
-        coordinates = sorted(str(c) for c in ds.coords)
-        data_variables = [
-            GridVariable(
-                name=str(name),
-                dims=[str(d) for d in da.dims],
-                shape=[int(s) for s in da.shape],
-                dtype=str(da.dtype),
-                long_name=da.attrs.get("long_name"),
-                units=da.attrs.get("units"),
-            )
-            for name, da in ds.data_vars.items()
-        ]
-        attributes = {str(k): str(v) for k, v in ds.attrs.items()}
-    finally:
-        ds.close()
+    # The Dataset is closed before this returns and nothing derived from it
+    # survives, so its read snapshot can go with it. Kept until exit, as an
+    # ordinary read's must be, a server that runs for days kept one per call.
+    with registry.transient_snapshots():
+        ds = foehn.open_dataset(dataset, match=match, variables=variables, data_dir=_grid_data_dir())
+        try:
+            dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
+            coordinates = sorted(str(c) for c in ds.coords)
+            data_variables = [
+                GridVariable(
+                    name=str(name),
+                    dims=[str(d) for d in da.dims],
+                    shape=[int(s) for s in da.shape],
+                    dtype=str(da.dtype),
+                    long_name=da.attrs.get("long_name"),
+                    units=da.attrs.get("units"),
+                )
+                for name, da in ds.data_vars.items()
+            ]
+            attributes = {str(k): str(v) for k, v in ds.attrs.items()}
+        finally:
+            ds.close()
 
     return GridSummary(
         dataset=dataset,
@@ -568,6 +605,7 @@ def usage_guide() -> str:
     grid_list = "\n".join(
         f"  - `{ds}` — {DATASETS[ds].description} ({DATASETS[ds].format})" for ds in _INSPECTABLE_GRIDS
     )
+    load_budget = _VOCABULARY["load_budget"]
     return f"""\
 # foehn — MeteoSwiss Data Access Guide
 
@@ -636,8 +674,14 @@ load_data() and describe_data() support these filters (all combinable):
 
 ## Limits and performance
 
-load_data() returns at most 500 rows per call. To manage large datasets:
-- **Always use time filters** (year, month, date_from/date_to)
+load_data() returns at most 500 rows per call, and load_data() and
+describe_data() may each download at most {load_budget}; a call
+past that is refused with the filters that would narrow it. MeteoSwiss publishes
+one file per station and time slice, so:
+- **station, frequency and time_slice decide the download** — narrow them first,
+  especially for frequency "t" or "h" with time_slice "historical"
+- **year, month and date_from/date_to trim rows** once the files are in; they keep
+  the result small but do not make the call cheaper
 - **Use columns** to reduce output size
 - **Use drop_null** on sparse datasets to skip empty rows
 - **Use sort="desc"** with limit to get the most recent data first

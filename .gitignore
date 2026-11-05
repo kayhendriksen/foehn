@@ -42,3 +42,4 @@ requirements-audit.txt
 
 # Placeholder workspaces some tests build; nothing here is source.
 unused/
+site/

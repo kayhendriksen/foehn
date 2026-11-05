@@ -29,6 +29,24 @@ def _attr(group: h5py.Group | h5py.Dataset, key: str, default: object = None) ->
     return val.decode() if isinstance(val, bytes) else val
 
 
+# How far a computed grid origin may sit from a whole number of cells and still
+# be taken for one: a hundredth of a cell, 10 m on the 1 km composites.
+_SNAP_TOLERANCE = 0.01
+
+
+def _snap(origin: float, step: float) -> float:
+    """*origin* moved onto the nearest multiple of *step*, when it is that close to one.
+
+    The corner arrives as float32 degrees, and transformed back to LV95 it lands
+    metres off the whole-kilometre corner of MeteoSwiss's grid — 0.2 m east and
+    3 m north of 2'255'000 / 1'480'000 on the hail composites. Close enough to
+    look right, far enough that the cell centres did not align with the NetCDF
+    Swiss grids. A corner genuinely off the lattice is left where it was computed.
+    """
+    snapped = round(origin / step) * step
+    return snapped if abs(snapped - origin) <= _SNAP_TOLERANCE * step else origin
+
+
 def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> xr.Dataset:
     """Read a MeteoSwiss ODIM-H5 Cartesian radar composite into an xarray Dataset.
 
@@ -61,6 +79,8 @@ def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> 
         nodata = float(_attr(dwhat, "nodata", np.nan))
         undetect = float(_attr(dwhat, "undetect", np.nan))
         quantity = str(_attr(dwhat, "quantity", "data"))
+        # Not ODIM, but MeteoSwiss states it (``mm`` for CombiPrecip and MESHS).
+        unit = _attr(dwhat, "unit", "")
         raw = node["data"][:].astype("float64")
 
         where = f["where"]
@@ -89,12 +109,15 @@ def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> 
     # is the northernmost row (y decreases with row index).
     transformer = pyproj.Transformer.from_crs("EPSG:4326", pyproj.CRS.from_proj4(projdef), always_xy=True)
     x0, y0 = transformer.transform(ul_lon, ul_lat)
+    x0, y0 = _snap(x0, xscale), _snap(y0, yscale)
     x = x0 + (np.arange(xsize) + 0.5) * xscale
     y = y0 - (np.arange(ysize) + 0.5) * yscale
 
     var_attrs = {"quantity": quantity}
     if long_name:
         var_attrs["long_name"] = long_name
+    if unit:
+        var_attrs["units"] = str(unit)
     da = xr.DataArray(values, dims=("y", "x"), coords={"y": y, "x": x}, name=quantity.lower(), attrs=var_attrs)
     ds = da.to_dataset()
     ds.coords["x"].attrs.update({"units": "m", "long_name": "Swiss LV95 easting (CHX)"})

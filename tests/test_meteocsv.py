@@ -126,6 +126,23 @@ def test_group_csv_files_keeps_only_the_newest_forecast_run(tmp_path):
     assert [path.name for path in groups[()]] == list(names[1:])
 
 
+def test_a_partly_downloaded_newest_run_is_not_the_one_converted(tmp_path):
+    """A failed file is counted, not fatal, so Bronze can hold part of the newest run.
+
+    Picked by ``max()``, that partial run became the table — missing the columns
+    of every parameter that failed — while the download and ``foehn.load`` both
+    use the newest *complete* run.
+    """
+    d = tmp_path / "forecast_local"
+    d.mkdir()
+    complete = [f"vnut12.lssw.202607210000.{param}.csv" for param in ("dkl010h0", "tre200h0", "rre150h0")]
+    for name in [*complete, "vnut12.lssw.202607210600.dkl010h0.csv"]:
+        (d / name).write_text("a;b\n1;2\n")
+
+    groups = group_csv_files(d, "forecast_local")
+    assert [path.name for path in groups[()]] == sorted(complete)
+
+
 # --- load_metadata_types ---
 
 

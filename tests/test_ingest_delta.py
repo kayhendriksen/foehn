@@ -1,7 +1,8 @@
 """Tests for the Polars-based Delta ingestion script."""
 
+import re
 import shutil
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import polars as pl
 import pytest
@@ -10,10 +11,12 @@ from conftest import FIXTURES_DIR
 from foehn import registry
 from scripts.ingest_delta import (
     INGESTED_DATASETS,
+    RADAR_PRODUCT_PATTERN,
     _apply_column_comments,
     _ingest_climate_normals,
     _ingest_collection,
     _ingest_metadata,
+    _ingest_radar,
     _scan_and_collect,
     _table_suffix,
     _validate_identifier,
@@ -161,8 +164,14 @@ def test_scan_and_collect_joins_forecast_files_per_point_and_time(tmp_path):
 
 
 def test_scan_and_collect_eager_fallback_also_joins_forecast_files(tmp_path, monkeypatch):
-    def boom(*args, **kwargs):
-        raise pl.exceptions.ComputeError("streaming collect failed")
+    collect = pl.LazyFrame.collect
+
+    # Only the streaming collect fails: eager DataFrame methods run through
+    # LazyFrame.collect on newer Polars, so failing every call broke the fallback too.
+    def boom(self, *args, **kwargs):
+        if kwargs.get("engine") == "streaming":
+            raise pl.exceptions.ComputeError("streaming collect failed")
+        return collect(self, *args, **kwargs)
 
     monkeypatch.setattr(pl.LazyFrame, "collect", boom)
 
@@ -201,6 +210,30 @@ def test_write_to_delta(mock_spark):
     writer = mock_spark.createDataFrame.return_value.write
     writer.mode.assert_called_with("overwrite")
     writer.mode.return_value.option.assert_called_with("overwriteSchema", "true")
+
+
+def test_write_to_delta_maps_columns_by_name_when_a_name_needs_it(mock_spark):
+    """Delta refuses a space in a column name unless the table maps its columns by name.
+
+    The climate normals publish ``Altitude [m asl]``, so that table could never be
+    written — and since a failed table fails the run, the daily ingest exited 1
+    over it. Renaming the columns would part Delta from the Parquet and load
+    paths; mapping keeps the names they share.
+    """
+    _require_arrow()
+    _write_to_delta(mock_spark, pl.DataFrame({"Station": ["Bern"], "Altitude [m asl]": [553]}), "`c`.`s`.`t`")
+
+    writer = mock_spark.createDataFrame.return_value.write
+    assert call("delta.columnMapping.mode", "name") in writer.option.call_args_list
+
+
+def test_write_to_delta_leaves_an_ordinary_table_unmapped(mock_spark):
+    """Mapping raises a table's reader protocol, so it is not applied where nothing needs it."""
+    _require_arrow()
+    _write_to_delta(mock_spark, pl.DataFrame({"tre200d0": [1.5]}), "`c`.`s`.`t`")
+
+    writer = mock_spark.createDataFrame.return_value.write
+    assert all(c.args[0] != "delta.columnMapping.mode" for c in writer.option.call_args_list)
 
 
 def test_write_to_delta_append_mode(mock_spark):
@@ -261,6 +294,23 @@ def test_apply_column_comments_escapes_backslashes_and_quotes(tmp_path):
     assert any("COMMENT 'it\\'s 5\\\\ [°C]'" in s for s in sql_calls)
 
 
+def test_apply_column_comments_escapes_a_backtick_in_the_column_name(tmp_path):
+    """The column name sits inside backticks; one of its own closed the identifier."""
+    (tmp_path / "x_meta_parameters.csv").write_text(
+        "parameter_shortname;parameter_description_en;parameter_unit\nweird`col;A description;mm\n",
+        encoding="utf-8",
+    )
+    spark = MagicMock()
+    field = MagicMock()
+    field.name = "weird`col"
+    spark.table.return_value.schema.fields = [field]
+
+    _apply_column_comments(spark, "`cat`.`sch`.`tbl`", tmp_path)
+
+    sql_calls = [c.args[0] for c in spark.sql.call_args_list]
+    assert any("ALTER COLUMN `weird``col` COMMENT" in s for s in sql_calls)
+
+
 # ── _ingest_collection ───────────────────────────────────────────────────────
 
 
@@ -296,10 +346,116 @@ def test_ingest_collection_chunked(smn_bronze_dir, mock_spark):
     assert (ok, skip, failed) == (2, 0, 0)
     # 2 files × chunk_size=1 (overwrite + append) + 1 meta write = 3
     assert mock_spark.createDataFrame.call_count == 3
-    # Both chunks went to the staging table, which then replaced the table once.
-    mock_spark.table.assert_any_call("`main`.`meteoswiss`.`smn_d_recent__foehn_staging`")
+    # Both chunks went to this run's staging table, which then replaced the table once.
+    read_back = [call.args[0] for call in mock_spark.table.call_args_list]
+    assert any(_STAGING_RE.fullmatch(name) for name in read_back)
     published = mock_spark.table.return_value.write.mode.return_value.option.return_value.saveAsTable
     published.assert_called_once_with("`main`.`meteoswiss`.`smn_d_recent`")
+
+
+_STAGING_RE = re.compile(r"`main`\.`meteoswiss`\.`smn_d_recent__foehn_staging_[0-9a-f]{12}`")
+
+
+class _TableStore:
+    """Just enough of a SparkSession to keep tables, so overlapping runs can be observed."""
+
+    def __init__(self):
+        self.tables: dict[str, pl.DataFrame] = {}
+
+    def createDataFrame(self, arrow):  # noqa: N802 - Spark's name
+        return _Frame(self, pl.from_arrow(arrow))
+
+    def table(self, name):
+        return _Frame(self, self.tables[name])
+
+    def sql(self, statement):
+        if statement.startswith("DROP TABLE IF EXISTS "):
+            self.tables.pop(statement.removeprefix("DROP TABLE IF EXISTS "), None)
+
+
+class _Frame:
+    def __init__(self, store, frame):
+        self.store, self.frame, self._mode = store, frame, "error"
+
+    @property
+    def columns(self):
+        return self.frame.columns
+
+    @property
+    def write(self):
+        return self
+
+    def mode(self, mode):
+        self._mode = mode
+        return self
+
+    def option(self, *_):
+        return self
+
+    def saveAsTable(self, name):  # noqa: N802 - Spark's name
+        existing = self.store.tables.get(name)
+        appending = self._mode == "append" and existing is not None
+        self.store.tables[name] = pl.concat([existing, self.frame]) if appending else self.frame
+
+
+def test_overlapping_chunked_ingests_each_publish_a_complete_table(smn_bronze_dir):
+    """Two runs shared one staging table, and each overwrote, appended to and dropped the other's chunks.
+
+    The second run happens entirely between the first run's two chunks here, which
+    is the interleaving that published a table made of one chunk.
+    """
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    store = _TableStore()
+    state = {"scans": 0, "inner": False}
+
+    def scan(key, files, metadata_types):
+        state["scans"] += 1
+        if state["scans"] == 2:  # the outer run's second chunk: run a whole other ingest first
+            state["inner"] = True
+            inner = _ingest_collection(
+                store, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", chunked=True, chunk_size=1
+            )
+            state["inner"] = False
+            assert tuple(inner)[2] == 0
+        return pl.DataFrame({"run": ["inner" if state["inner"] else "outer"], "chunk": [state["scans"]]})
+
+    with patch("scripts.ingest_delta._scan_and_collect", side_effect=scan):
+        outer = _ingest_collection(
+            store, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", chunked=True, chunk_size=1
+        )
+
+    assert tuple(outer)[2] == 0
+    published = store.tables["`main`.`meteoswiss`.`smn_d_recent`"]
+    assert published["run"].to_list() == ["outer", "outer"]
+    assert not [name for name in store.tables if "__foehn_staging" in name]
+
+
+def _written_tables(spark):
+    return {c.args[0] for c in spark.createDataFrame.return_value.write.saveAsTable.call_args_list}
+
+
+def test_daily_ingest_leaves_the_historical_tables_alone(smn_bronze_dir, mock_spark):
+    """A backfill's historical CSVs stay in Bronze; the daily pass used to rebuild them every day."""
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    shutil.copy(FIXTURES_DIR / "smn_sample.csv", smn_bronze_dir / "smn" / "ogd-smn_ber_d_historical.csv")
+
+    ok, skip, failed = _ingest_collection(mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`")
+
+    assert (ok, skip, failed) == (2, 1, 0)
+    assert "`main`.`meteoswiss`.`smn_d_historical`" not in _written_tables(mock_spark)
+    assert "`main`.`meteoswiss`.`smn_d_recent`" in _written_tables(mock_spark)
+
+
+def test_historical_ingest_writes_the_historical_tables(smn_bronze_dir, mock_spark):
+    pytest.importorskip("pyarrow")  # tables reach Spark through Polars' to_arrow()
+    shutil.copy(FIXTURES_DIR / "smn_sample.csv", smn_bronze_dir / "smn" / "ogd-smn_ber_d_historical.csv")
+
+    ok, skip, failed = _ingest_collection(
+        mock_spark, "smn", smn_bronze_dir / "smn", "`main`", "`meteoswiss`", historical=True
+    )
+
+    assert (ok, skip, failed) == (3, 0, 0)
+    assert "`main`.`meteoswiss`.`smn_d_historical`" in _written_tables(mock_spark)
 
 
 def test_ingest_collection_empty(tmp_path, mock_spark):
@@ -388,6 +544,34 @@ def test_ingest_climate_normals_empty_dir(tmp_path, mock_spark):
     assert failed == 0
 
 
+# ── _ingest_radar ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("name", "product"),
+    [("cpc2630112000_00060.001.h5", "CPC"), ("rzc263011200rl.001.h5", "RZC"), ("mzc263021145pl.850.h5", "MZC")],
+)
+def test_radar_product_reads_meteoswiss_lowercase_names(name, product):
+    """MeteoSwiss names radar files in lower case; an uppercase-only pattern left every product empty."""
+    found = re.match(RADAR_PRODUCT_PATTERN, name)
+    assert found is not None
+    assert found.group(0).upper() == product
+
+
+def test_radar_merge_backfills_products_an_earlier_run_left_empty(tmp_path, mock_spark):
+    h5_dir = tmp_path / "radar_precip"
+    h5_dir.mkdir()
+    (h5_dir / "cpc2630112000_00060.001.h5").write_bytes(b"x")
+
+    _ingest_radar(mock_spark, tmp_path, "`main`", "`meteoswiss`", ("radar_precip",))
+
+    select = mock_spark.read.format.return_value.option.return_value.load.return_value.selectExpr
+    assert any(arg.startswith("upper(regexp_extract(") for arg in select.call_args.args)
+    merge = next(c.args[0] for c in mock_spark.sql.call_args_list if c.args[0].startswith("MERGE"))
+    assert "t.product IS DISTINCT FROM s.product" in merge
+    assert "product = s.product" in merge
+
+
 # ── INGESTED_COLLECTIONS ─────────────────────────────────────────────────────
 
 
@@ -427,7 +611,21 @@ def test_a_failed_later_chunk_leaves_the_published_table_alone(smn_bronze_dir, m
     assert failed == 1  # the data group; the meta table was written before it
     assert written == ["`main`.`meteoswiss`.`smn_meta_parameters`"]
     mock_spark.table.return_value.write.mode.return_value.option.return_value.saveAsTable.assert_not_called()
-    mock_spark.sql.assert_any_call("DROP TABLE IF EXISTS `main`.`meteoswiss`.`smn_d_recent__foehn_staging`")
+    dropped = [call.args[0].removeprefix("DROP TABLE IF EXISTS ") for call in mock_spark.sql.call_args_list]
+    assert any(_STAGING_RE.fullmatch(name) for name in dropped)
+
+
+@pytest.mark.parametrize("size", ["0", "-1"])
+def test_a_chunk_size_below_one_is_refused_before_spark(size, capsys):
+    """Zero stopped range() mid-run; a negative size published a staging table it never wrote."""
+    with (
+        patch("sys.argv", ["ingest_delta.py", "--historical", "--chunk-size", size]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+
+    assert exited.value.code == 2
+    assert "must be at least 1" in capsys.readouterr().err
 
 
 def test_a_write_failure_is_reported_with_its_reason(smn_bronze_dir, mock_spark, capsys):
@@ -450,7 +648,7 @@ def test_an_unreadable_normals_file_fails_the_table_instead_of_shrinking_it(clim
 
 def test_main_exits_non_zero_when_a_table_fails(smn_bronze_dir, capsys):
     """The scheduled job reported success over stale tables: failures were "skipped"."""
-    pytest.importorskip("pyspark")  # main() imports SparkSession before anything else
+    pytest.importorskip("pyspark")  # main() imports SparkSession once its arguments parse
     from foehn.workspace import Workspace
 
     workspace = Workspace(smn_bronze_dir / "volume")

@@ -70,7 +70,7 @@ def download(
     dataset: str,
     *,
     data_dir: Path | str | None = None,
-    time_slice: list[str] | None = None,
+    time_slice: str | list[str] | None = None,
     since: str | None = None,
     workers: int = DEFAULT_WORKERS,
     force: bool = False,
@@ -80,9 +80,11 @@ def download(
     Args:
         dataset: Dataset name (e.g. "smn"). Use list_datasets() to see options.
         data_dir: Root data directory. Defaults to ./data/meteoswiss.
-        time_slice: Time slices to download. Options: $time_slices.
-            Defaults to ["$default_time_slice"]. Ignored for binary/grid datasets
-            (GRIB2/NetCDF), which fetch the latest assets.
+        time_slice: Time slice(s) to download. Options: $time_slices.
+            Defaults to ["$default_time_slice"]. Can be a single string or list.
+            Ignored for binary/grid datasets: NetCDF and radar fetch what the
+            collection holds, and GRIB2 forecasts fetch the control member of the
+            newest complete run (~8 GB for ICON-CH1).
         since: ISO timestamp for incremental updates — only assets updated after
             it are fetched. This function does not track state itself: pass the
             previous run's timestamp, or use the ``foehn download`` CLI, which
@@ -90,31 +92,29 @@ def download(
             advances a dataset's when that dataset fully succeeds. Must carry a
             timezone; it is compared as an instant, not as text.
         workers: Concurrent HTTP downloads (default $default_workers).
-        force: Re-download even when local files look up to date. Currently
-            only affects ZIP-shipped datasets (e.g. climate_scenarios_indoor),
-            which otherwise skip when already extracted; other formats refresh
-            via ``since``/ETags.
+        force: Re-download every selected file even when the local copy looks
+            up to date: no freshness check, and no stored ETag sent, so a
+            damaged file in the cache is replaced. ``since`` still narrows which
+            files are selected.
 
     Returns:
         DownloadResult summarising the download. Use ``result.downloaded > 0``
         to gate expensive downstream processing and ``result.failed`` to detect
         partial failures.
     """
-    workspace = Workspace.resolve(data_dir)
-    workspace.bronze().mkdir(parents=True, exist_ok=True)
-    fetcher = default_fetcher()
-
     # Each kind knows its own download path, including the grid kinds, which have
     # no Parquet stage but still fetch their raw assets so the Python API mirrors
-    # the CLI's --grids behaviour (and open_dataset/to_zarr).
+    # the CLI's --grids behaviour (and open_dataset/to_zarr). The registry checks
+    # the dataset and time slices first, and the paths below it create the
+    # directories they write to — so a refused call leaves nothing behind.
     return registry.download(
         dataset,
-        workspace,
+        Workspace.resolve(data_dir),
         time_slice=time_slice,
         since=since,
         workers=workers,
         force=force,
-        fetcher=fetcher,
+        fetcher=default_fetcher(),
     )
 
 
@@ -131,13 +131,15 @@ def to_parquet(
 
     Raises:
         RuntimeError: If one or more groups fail to convert. Each failure is
-            also printed to stdout. Mirrors the CLI's exit-1 semantics so
-            Python callers can't accidentally treat partial output as success.
+            also logged as a warning on the ``foehn`` logger, naming the group
+            and the cause. Mirrors the CLI's exit-1 semantics so Python callers
+            can't accidentally treat partial output as success.
     """
     failures = registry.convert(dataset, Workspace.resolve(data_dir))
     if failures:
         raise RuntimeError(
-            f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. See stdout for details."
+            f"to_parquet({dataset!r}) failed: {failures} group(s) did not convert. "
+            "Each failure is logged as a warning by the 'foehn' logger."
         )
 
 
@@ -228,6 +230,7 @@ def load(
     sort: str | None = None,
     limit: int | None = None,
     workers: int = DEFAULT_WORKERS,
+    max_bytes: int | None = None,
 ) -> pl.DataFrame:
     """Load a dataset and return it as an in-memory Polars DataFrame.
 
@@ -259,9 +262,19 @@ def load(
             ``year``, or ``date_from/date_to``.
         workers: Concurrent CSV downloads (default $default_workers). The CSV fetches are
             parallelised via a ThreadPoolExecutor; metadata fetch stays serial.
+        max_bytes: Refuse the query with a ValueError once its data files have
+            downloaded more than this many bytes. None (the default) sets no
+            ceiling. Because ``year``, ``month`` and ``date_from``/``date_to`` trim
+            rows only after each file is downloaded, this is the way to bound
+            what a query costs; ``station``, ``frequency`` and ``time_slice``
+            decide how much it downloads.
 
     Returns:
         A Polars DataFrame containing all matching CSV data.
+
+    Raises:
+        ValueError: If the dataset or a filter is invalid, nothing matches, or
+            the download exceeds ``max_bytes``.
 
     Example::
 
@@ -299,6 +312,7 @@ def load(
         sort=sort,
         limit=limit,
         workers=workers,
+        max_bytes=max_bytes,
     )
     # Whether this dataset can answer that query — known, tabular, granularity,
     # calendar filters, vocabulary — is every one of them a fact on its row, so
@@ -325,7 +339,10 @@ def open_dataset(
     file(s) are fetched in full to ``data_dir/bronze/<dataset>/`` on first use,
     then opened and read from that local copy. It is not cloud-lazy — there is no
     byte-range/partial read of the remote file, so the first call pays the full
-    file size up front. Subsequent calls reuse the cache.
+    file size up front. Subsequent calls reuse the cache. A ``match`` spanning
+    several NetCDF files stays lazy only with dask installed (it is not part of
+    the 'grids' extra): without it, combining the files reads their values into
+    memory on open, and foehn warns when that is over 1 GB.
 
     GRIB2 and radar (HDF5) collections **require** ``match``, and it must resolve
     to a *single* file:
@@ -480,11 +497,11 @@ def to_zarr(
     # Where the default store lands, and how ``match`` is spelled into its name,
     # are the workspace's layout rather than facts stated here.
     store_path = Path(store) if store is not None else workspace.zarr(dataset, match)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Which method writes it — cube or single — is the kind's row, not a branch
     # here. So is whether the dataset has a Zarr path at all, which is what makes
-    # this the unknown-dataset guard too.
+    # this the unknown-dataset guard too; the store's directory is only created
+    # once something is written to it.
     registry.write_zarr(
         dataset,
         store_path,

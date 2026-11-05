@@ -2,7 +2,7 @@
 
 The versions live in .pre-commit-config.yaml (tools that also run as local
 hooks), requirements-ci.txt (tools only CI runs), requirements-publish.txt (the
-hash-locked packaging toolchain) and the pyproject dev extra (ty) — four files
+hash-locked packaging toolchain) and the pyproject dev group (ty) — four files
 Dependabot bumps. The workflows read them back with
 scripts/tool_version.sh instead of repeating them. These tests guard that
 contract from the repo side, where a break shows up before it reaches CI.
@@ -23,7 +23,7 @@ PUBLISH = ROOT / "requirements-publish.txt"
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 
 HOOK_TOOLS = ["ruff-pre-commit", "zizmor-pre-commit"]
-CI_TOOLS = ["bandit", "build", "cyclonedx-bom", "pip-audit", "twine"]
+CI_TOOLS = ["bandit", "build", "cyclonedx-bom", "hatchling", "pip-audit", "twine"]
 
 
 def _tool_version(name: str) -> str:
@@ -77,14 +77,16 @@ def test_the_publish_toolchain_is_locked_by_hash():
         else:
             pins.append(line)
 
-    assert {"build", "twine"} <= {pin.split("==", 1)[0] for pin in pins}
+    # hatchling too: publish.yml builds with --no-isolation, so the backend that
+    # writes the wheel is installed from here rather than resolved on the spot.
+    assert {"build", "hatchling", "twine"} <= {pin.split("==", 1)[0] for pin in pins}
     unhashed = [pin.split()[0] for pin in pins if "--hash=sha256:" not in pin]
     assert not unhashed, f"requirements-publish.txt pins {unhashed} without a hash"
 
 
 def test_each_packaging_tool_is_pinned_in_one_requirements_file():
-    """build and twine moved to the hash-locked file; a copy left behind would drift."""
-    for name in ("build", "twine"):
+    """The packaging tools live in the hash-locked file; a copy left behind would drift."""
+    for name in ("build", "hatchling", "twine"):
         assert not re.search(rf"^{name}==", REQUIREMENTS.read_text(), re.MULTILINE)
         assert re.search(rf"^{name}==", PUBLISH.read_text(), re.MULTILINE)
 
@@ -160,7 +162,7 @@ def test_the_two_sources_do_not_overlap():
 def test_ty_is_pinned_exactly():
     """A floor would let a pre-1.0 bump land on an unrelated PR."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    dev = pyproject["dependency-groups"]["dev"]
     ty = next(d for d in dev if d.startswith("ty"))
 
     assert ty.startswith("ty=="), f"expected an exact pin, got {ty!r}"
