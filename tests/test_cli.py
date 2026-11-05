@@ -262,6 +262,35 @@ def test_a_network_failure_is_reported_without_a_traceback(capsys):
     assert "foehn: error: ConnectionError fetching" in capsys.readouterr().err
 
 
+def test_a_filesystem_error_is_one_line_not_a_traceback(capsys):
+    """A data directory that cannot be written is a fact about the machine, not a bug in foehn."""
+    with (
+        patch("foehn.api.load", side_effect=PermissionError(13, "Permission denied", "/data/meteoswiss")),
+        patch("sys.argv", ["foehn", "load", "smn"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        main()
+
+    err = capsys.readouterr().err
+    assert exc.value.code == 1
+    assert "foehn: error: [Errno 13] Permission denied: '/data/meteoswiss'" in err
+    assert "Traceback" not in err
+
+
+def test_a_broken_pipe_is_still_not_reported_as_an_error(capsys):
+    """BrokenPipeError is an OSError too, and must keep its own quiet exit."""
+    with (
+        patch("foehn.cli.metadata", side_effect=BrokenPipeError),
+        patch("foehn.cli._silence_stdout"),
+        patch("sys.argv", ["foehn", "metadata", "stations", "smn"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        main()
+
+    assert exc.value.code == 141
+    assert "error" not in capsys.readouterr().err
+
+
 def test_mcp_without_its_extra_names_the_install_command(capsys, monkeypatch):
     import sys
 

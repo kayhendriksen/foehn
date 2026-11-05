@@ -834,16 +834,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     except CliError as exc:
         console.error(str(exc), hint=exc.hint)
         sys.exit(EXIT_FAILURE)
-    except (ValueError, FetchError, ImportError) as exc:
-        # The messages foehn raises for these name the fix already; a traceback
-        # under them only buries it.
-        console.error(str(exc))
-        sys.exit(EXIT_FAILURE)
     except BrokenPipeError:
         # The reader of stdout went away (``foehn metadata inventory smn | head``).
         # Not an error worth a traceback: stop quietly, as a C tool killed by
-        # SIGPIPE would, with the status that signal gives.
+        # SIGPIPE would, with the status that signal gives. Caught before the
+        # OSError below, which it is a kind of.
         _silence_stdout()
         sys.exit(EXIT_BROKEN_PIPE)
+    except (ValueError, FetchError, ImportError, OSError) as exc:
+        # The messages foehn raises for these name the fix already; a traceback
+        # under them only buries it. An OSError — a data directory that cannot
+        # be written, a full disk — names the path and the reason, which is all
+        # a traceback would have added.
+        console.error(str(exc))
+        sys.exit(EXIT_FAILURE)
     except KeyboardInterrupt:
         sys.exit(EXIT_INTERRUPTED)

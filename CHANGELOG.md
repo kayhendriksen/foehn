@@ -27,6 +27,25 @@ changes**. The same notes are published with each
   error naming `station`, `frequency` and `time_slice` as the filters that
   narrow the download. The tool descriptions and the `foehn://guide` resource
   no longer present the time filters as the way to keep a call cheap.
+- **`foehn download` deletes what Bronze no longer needs.** After a clean run, a
+  `recent` or `now` CSV that the collection no longer lists is deleted — a
+  station MeteoSwiss dropped kept feeding every later `*_recent` table, into the
+  next year — and so are `forecast_local` runs older than the one just
+  downloaded, each about 1 GB, which only ever accumulated. Historical and
+  unsliced files are kept, and grid datasets are never pruned: for radar, Bronze
+  is the archive the Delta table indexes. A workspace that has downloaded
+  `forecast_local` for a while loses its older runs on the first run after
+  upgrading.
+- **The `databricks` extra requires PySpark 4.0 and delta-spark 4.0.** The Delta
+  ingest hands Spark a `pyarrow.Table`, which `createDataFrame` accepts only
+  from PySpark 4.0; the extra allowed 3.5, where the ingest could not work.
+  Databricks Runtime 17.3, which the bundle deploys on, is Spark 4.0.
+- **The MCP server caches grid files in the user cache directory**
+  (`~/Library/Caches/foehn`, `~/.cache/foehn`, `%LOCALAPPDATA%\foehn\Cache`)
+  rather than under whatever directory the client started it in, which was
+  often `/`, where `describe_grid` could not write at all. `FOEHN_DATA_DIR`
+  still decides when it is set. Files cached in the old place are downloaded
+  again once.
 
 ### New features
 
@@ -64,6 +83,52 @@ changes**. The same notes are published with each
   (`uv build --wheel --clear --out-dir dist/bundle`). docs/databricks.md said
   the bundle creates two jobs; it creates four, and the page now lists each
   one's schedule, including the two radar jobs that run every five minutes.
+- **A partly downloaded forecast run became the `forecast_local` table.**
+  Conversion took the newest run in Bronze outright; a file that fails is
+  counted rather than fatal, so that run could be partial, and the table lost
+  those parameters. It now takes the newest complete run, as the download and
+  `foehn.load` do — and so does the Delta ingest, which shares the grouping.
+- **A Parquet table kept a source that was no longer in Bronze.** Every source
+  left was older than the table, so by mtime it was current. Each table now
+  records the files it was built from and is rebuilt when they change. Tables
+  written by earlier versions are judged by mtime as before, so upgrading does
+  not reconvert everything.
+- **Asset names from the STAC listing were joined onto Bronze unchecked.** On
+  Windows a backslash is a separator, so an href ending `..\..\evil.csv` named a
+  file outside the data directory. A name that is not a plain file name — or
+  that starts with a dot, where foehn keeps its own markers — is now ignored
+  and logged. Malformed assets with no href are left out the same way rather
+  than failing and holding back the cursor on every run.
+- **Redirects were not checked against the host allowlist.** Only the first
+  URL of a request was; a redirect could lead anywhere, including off HTTPS.
+  Each hop is now checked, and one that leaves the allowlist fails the request.
+- **A long-running MCP server grew without bound.** Expired STAC listings stayed
+  in memory — the forecast listing is keyed on window bounds that move, so
+  most were never replaced — and each `describe_grid` call left a read snapshot
+  until the process exited, pinning old file generations on disk. Expired
+  listings are now dropped, the cache holds at most 1,024, and `describe_grid`
+  removes its snapshot when it returns.
+- **The incremental cursor trusted this machine's clock to the second.** It is
+  compared with the API's own timestamps, so a clock running ahead skipped
+  Items restated just after their listing page was read — a historical slice
+  until the next full refresh. The cursor now starts 15 minutes early, which
+  costs only conditional requests that come back unchanged.
+- **The run state could be lost to a power cut.** The ETag store and cursor are
+  now synced to disk before they replace the previous version.
+- **Metadata files were downloaded in full on every run.** They are now fetched
+  with the stored ETag like the data files, and kept when unchanged.
+- **A filesystem error printed a traceback** (`foehn load` into a directory
+  that cannot be written, a full disk). It is now one `error:` line naming the
+  path, like every other failure.
+- **The Delta ingest's column comments broke on a backtick** in a column name,
+  which closed the quoted identifier early.
+- **The `climate_normals` Delta table could never be written.** Its columns
+  `Altitude [m asl]`, `CH coordinates` and `Reference period` hold characters
+  Delta refuses in a column name unless the table maps its columns by name, so
+  the table failed on every ingest — and since a failed table fails the run,
+  the ingest exited 1 over it. A table whose names need it is now written with
+  Delta column mapping, which keeps the names the Parquet path publishes; every
+  other table is written as before. Found by the new test against a real Spark.
 - **`foehn mcp` could corrupt its own protocol stream.** The CLI's log handler
   wrote to stdout, which is the JSON-RPC channel under the stdio transport; a
   `describe_grid` call that downloaded a file wrote a progress line into it.
@@ -89,6 +154,9 @@ changes**. The same notes are published with each
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `CITATION.cff`, issue forms, a pull
   request template and `.editorconfig`.
 - This changelog, assembled from every GitHub release.
+- **The Delta ingest is tested against a real Spark.** A CI job runs it with
+  Java, local Spark and Delta; every earlier test mocked the session, so its
+  SQL and its Arrow handoff had only ever run on a Databricks cluster.
 
 ## 0.5.0 (2026-10-25)
 

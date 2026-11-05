@@ -130,7 +130,11 @@ _Avoid_: data dir (that is the argument, not the concept), root, storage
 
 **Bronze**:
 The local cache of raw downloaded files, at `<workspace>/bronze/<dataset>/`. What
-`download()` writes and what the grid readers read from.
+`download()` writes and what the grid readers read from. A clean download of a
+CSV kind prunes it with the kind's **Pruner**: rolling-slice files the listing no
+longer holds, and **Forecast runs** older than the one just selected. Grid kinds
+are never pruned: their Bronze is the `open_dataset` cache, and radar's is an
+archive upstream does not keep.
 _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 
 **Fetcher**:
