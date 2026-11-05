@@ -1,0 +1,47 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Coverage-guided fuzzing (Atheris, via ClusterFuzzLite) of the code that parses
+# what MeteoSwiss publishes: CSVs, filenames and URLs, ZIP archives, run state.
+# The targets live in fuzz/; .clusterfuzzlite/ builds them. Code-change mode
+# fuzzes for a few minutes on each PR that touches them, starting from the
+# corpus the weekly batch run (cflite_batch.yml) has built up.
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - ".clusterfuzzlite/**"
+      - ".github/workflows/cflite_pr.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz (code change)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Read the batch run's corpus and coverage, kept as workflow artifacts.
+      actions: read
+    steps:
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: address
+          mode: code-change
+          fuzz-seconds: 300
+          github-token: ${{ secrets.GITHUB_TOKEN }}

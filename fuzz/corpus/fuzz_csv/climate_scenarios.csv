@@ -1,0 +1,5 @@
+TITLE;Climate scenario
+VARIABLE;Daily precipitation ("mm")
+DATE;CLMCOM-CCLM4-ECEARTH;SMHI-RCA-IPSL
+0001-01-01;1.5;0.0
+0001-01-02;;2.25

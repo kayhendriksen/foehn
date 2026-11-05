@@ -174,3 +174,13 @@ def test_points_parse_with_their_declared_types_whatever_the_rows_look_like():
     with patch("foehn.api.default_fetcher", return_value=fake):
         assert [p.point_id for p in get_points("forecast_local")] == [301100, 78]
         assert [p.point_id for p in get_points("forecast_local", query="3011")] == [301100]
+
+
+def test_a_compressed_metadata_table_is_refused():
+    import zlib
+
+    body = zlib.compress(b"parameter_shortname;parameter_description_en\ntre200d0;Air temperature\n", 1)
+    fake = _fake("https://data.geo.admin.ch/x/ogd-smn_meta_parameters.csv", body=body)
+
+    with pytest.raises(ValueError, match="compressed data"):
+        fetch_table("smn", "parameters", fetcher=fake)
