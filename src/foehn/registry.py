@@ -40,6 +40,8 @@ from foehn.convert import (
 from foehn.downloads import (
     download_indoor_zip,
     download_normals_zip,
+    prune_superseded_runs,
+    prune_unlisted_rolling,
     stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
@@ -110,6 +112,7 @@ _download_csv = stac_download(
     etags=True,
     time_sliced=True,
     with_metadata=True,
+    prune=prune_unlisted_rolling,
 )
 
 _download_forecast_csv = stac_download(
@@ -121,6 +124,7 @@ _download_forecast_csv = stac_download(
     # Forecast filenames carry no time slice; the newest run bounds them instead.
     latest_run=True,
     with_metadata=True,
+    prune=prune_superseded_runs,
 )
 
 _download_netcdf = stac_download(

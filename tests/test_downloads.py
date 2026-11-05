@@ -362,7 +362,164 @@ def test_csv_download_resilient_to_single_failure(tmp_path):
     assert bad not in etags
 
 
+# --- what Bronze keeps ---
+
+_SMN = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn"
+
+
+def _bronze(tmp_path, dataset, *names):
+    bronze = Workspace(tmp_path).bronze(dataset)
+    bronze.mkdir(parents=True)
+    for name in names:
+        (bronze / name).write_text("a;b\n1;2\n")
+    return bronze
+
+
+def _files(bronze):
+    return sorted(path.name for path in bronze.iterdir() if not path.name.startswith("."))
+
+
+def test_a_station_gone_upstream_leaves_no_rolling_files_behind(tmp_path):
+    """Nothing ever deleted from Bronze, so a station MeteoSwiss dropped kept its recent file.
+
+    It fed every later ``*_recent`` table — into the next year, with last year's
+    rows. Only the rolling slices go: a historical or unsliced file is still a
+    valid record of what was measured.
+    """
+    bronze = _bronze(
+        tmp_path,
+        "smn",
+        "ogd-smn_old_d_recent.csv",
+        "ogd-smn_old_t_now.csv",
+        "ogd-smn_old_d_historical.csv",
+        "ogd-smn_old_m.csv",
+        "ogd-smn_meta_stations.csv",
+        "ogd-smn_tst_h_now.csv",  # still listed, in a slice this run did not ask for
+    )
+    tst = f"{_SMN}/tst"
+    item = {
+        "id": "tst",
+        "assets": {"a": {"href": f"{tst}/ogd-smn_tst_d_recent.csv"}, "b": {"href": f"{tst}/ogd-smn_tst_h_now.csv"}},
+        "properties": {"updated": "2026-01-01T00:00:00Z"},
+    }
+
+    registry.download("smn", Workspace(tmp_path), fetcher=_fake([item]))
+
+    assert _files(bronze) == [
+        "ogd-smn_meta_stations.csv",
+        "ogd-smn_old_d_historical.csv",
+        "ogd-smn_old_m.csv",
+        "ogd-smn_tst_d_recent.csv",
+        "ogd-smn_tst_h_now.csv",
+    ]
+
+
+def test_an_incremental_run_with_nothing_new_still_prunes(tmp_path):
+    """The listing is always walked in full; ``since`` narrows what is fetched, not what is known."""
+    bronze = _bronze(tmp_path, "smn", "ogd-smn_old_d_recent.csv", "ogd-smn_tst_d_recent.csv")
+    fake = _fake([_stac_item(f"{_SMN}/tst/ogd-smn_tst_d_recent.csv", updated="2026-01-01T00:00:00Z")])
+
+    result = registry.download("smn", Workspace(tmp_path), since="2026-02-01T00:00:00Z", fetcher=fake)
+
+    assert result.downloaded == 0
+    assert _files(bronze) == ["ogd-smn_tst_d_recent.csv"]
+
+
+def test_a_run_with_failures_deletes_nothing(tmp_path):
+    bronze = _bronze(tmp_path, "smn", "ogd-smn_old_d_recent.csv")
+    bad = f"{_SMN}/tst/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(bad)])
+    fake.fail(bad, FetchError("boom"))
+
+    registry.download("smn", Workspace(tmp_path), fetcher=fake)
+
+    assert _files(bronze) == ["ogd-smn_old_d_recent.csv"]
+
+
+def test_an_empty_listing_deletes_nothing(tmp_path):
+    """A collection that lists nothing is a broken listing, not a collection to empty Bronze for."""
+    bronze = _bronze(tmp_path, "smn", "ogd-smn_old_d_recent.csv")
+
+    registry.download("smn", Workspace(tmp_path), fetcher=_fake([]))
+
+    assert _files(bronze) == ["ogd-smn_old_d_recent.csv"]
+
+
+def _forecast_listing(*names):
+    assets = {name: {"href": f"https://data.geo.admin.ch/x/{name}"} for name in names}
+    return [{"id": "20260721", "assets": assets, "properties": {"updated": "2026-07-21T08:00:00Z"}}]
+
+
+def test_forecast_runs_older_than_the_newest_complete_one_are_removed(tmp_path):
+    """Each run is ~1 GB and only the newest complete one is ever converted or ingested."""
+    older = [f"vnut12.lssw.202607200600.{param}.csv" for param in ("aaa", "bbb")]
+    newest = [f"vnut12.lssw.202607210600.{param}.csv" for param in ("aaa", "bbb")]
+    bronze = _bronze(tmp_path, "forecast_local", *older)
+
+    registry.download("forecast_local", Workspace(tmp_path), fetcher=_fake(_forecast_listing(*newest)))
+
+    assert _files(bronze) == sorted(newest)
+
+
+def test_a_partial_newer_run_is_kept_beside_the_complete_one(tmp_path):
+    """The complete run is what conversion uses; the partial one is what the next run finishes."""
+    complete = [f"vnut12.lssw.202607210000.{param}.csv" for param in ("aaa", "bbb")]
+    partial = ["vnut12.lssw.202607210600.aaa.csv"]
+    bronze = _bronze(tmp_path, "forecast_local", "vnut12.lssw.202607200000.aaa.csv", *partial)
+
+    registry.download("forecast_local", Workspace(tmp_path), fetcher=_fake(_forecast_listing(*complete, *partial)))
+
+    assert _files(bronze) == sorted([*complete, *partial])
+
+
+def test_a_forecast_listing_with_no_runs_prunes_nothing(tmp_path):
+    bronze = _bronze(tmp_path, "forecast_local", "vnut12.lssw.202607200600.aaa.csv")
+
+    registry.download("forecast_local", Workspace(tmp_path), fetcher=_fake(_forecast_listing("readme.csv")))
+
+    assert "vnut12.lssw.202607200600.aaa.csv" in _files(bronze)
+
+
+def test_grid_files_are_never_pruned(tmp_path):
+    """Radar Bronze *is* the archive — upstream keeps two weeks, and the radar Delta table indexes these paths."""
+    bronze = _bronze(tmp_path, "radar_precip", "cpc2600100000_00060.001.h5")
+    name = "cpc2630112000_00060.001.h5"
+    fake = _fake([_stac_item(f"https://data.geo.admin.ch/x/{name}")], body=b"h5")
+
+    registry.download("radar_precip", Workspace(tmp_path), fetcher=fake)
+
+    assert _files(bronze) == sorted(["cpc2600100000_00060.001.h5", name])
+
+
 # --- download_metadata ---
+
+
+def test_metadata_is_fetched_conditionally_like_the_data(tmp_path):
+    """Every run used to download the metadata files in full, with no ETag sent."""
+    meta = f"{_SMN}/ogd-smn_meta_stations.csv"
+    data = f"{_SMN}/tst/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(data)], collection={"assets": {"stations": {"href": meta}}})
+    _serve(fake, etag='"v1"')
+
+    registry.download("smn", Workspace(tmp_path), fetcher=fake)
+    second = registry.download("smn", Workspace(tmp_path), fetcher=fake)
+
+    assert second.downloaded == 0
+    assert second.skipped == 2
+    # Kept by the data pass's prune too, which only knew the item assets.
+    assert load_etags(Workspace(tmp_path))[meta] == '"v1"'
+
+
+def test_a_forced_download_fetches_the_metadata_again(tmp_path):
+    meta = f"{_SMN}/ogd-smn_meta_stations.csv"
+    data = f"{_SMN}/tst/ogd-smn_tst_d_recent.csv"
+    fake = _fake([_stac_item(data)], collection={"assets": {"stations": {"href": meta}}})
+    _serve(fake, etag='"v1"')
+    registry.download("smn", Workspace(tmp_path), fetcher=fake)
+
+    forced = registry.download("smn", Workspace(tmp_path), force=True, fetcher=fake)
+
+    assert forced.downloaded == 2
 
 
 def test_download_metadata_saves_csv(tmp_path):
