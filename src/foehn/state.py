@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from foehn._locking import exclusive_lock
@@ -30,6 +30,17 @@ from foehn.atomicwrite import PRIVATE_FILE_MODE, write_text
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
+
+CURSOR_SKEW_MARGIN = timedelta(minutes=15)
+"""How far before the listing a run's cursor is placed.
+
+The cursor is this machine's clock, and the next run compares it with the API's
+``updated`` timestamps. With this clock ahead of the API's, an Item restated just
+after its page was read carried an ``updated`` before the cursor and was filtered
+out from then on — for a historical slice, until the next full refresh. Placing
+the cursor early re-lists what changed in the margin, which costs only
+conditional requests that come back unchanged.
+"""
 
 
 def _read_mapping(path: Path, label: str) -> dict[str, str]:
@@ -55,7 +66,7 @@ def load_etags(workspace: Workspace) -> dict[str, str]:
 def _save_etags_unlocked(workspace: Workspace, etags: dict[str, str]) -> None:
     path = workspace.etags
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_text(path, json.dumps(etags, indent=2), mode=PRIVATE_FILE_MODE)
+    write_text(path, json.dumps(etags, indent=2), mode=PRIVATE_FILE_MODE, durable=True)
 
 
 def save_etags(workspace: Workspace, etags: dict[str, str]) -> None:
@@ -176,7 +187,7 @@ def advance_cursor(workspace: Workspace, dataset: str, time_slices: list[str], w
         for time_slice in time_slices:
             key = _cursor_key(dataset, time_slice)
             current[key] = _later(current.get(key), watermark)
-        write_text(path, json.dumps(current, indent=2, sort_keys=True), mode=PRIVATE_FILE_MODE)
+        write_text(path, json.dumps(current, indent=2, sort_keys=True), mode=PRIVATE_FILE_MODE, durable=True)
 
 
 def load_last_run(workspace: Workspace) -> str | None:
@@ -195,21 +206,22 @@ def load_last_run(workspace: Workspace) -> str | None:
 
 
 def run_watermark() -> str:
-    """Timestamp captured before Collection listings begin."""
-    return datetime.now(UTC).isoformat()
+    """Timestamp captured before Collection listings begin, less :data:`CURSOR_SKEW_MARGIN`."""
+    return (datetime.now(UTC) - CURSOR_SKEW_MARGIN).isoformat()
 
 
 def save_last_run(workspace: Workspace, timestamp: str | None = None) -> None:
     """Advance the pre-scoping ``timestamp``, keeping the scoped cursors beside it."""
     path = workspace.last_run
     path.parent.mkdir(parents=True, exist_ok=True)
-    value = timestamp or run_watermark()
+    # The v0.4.0 meaning, unchanged: this cursor gates nothing any more.
+    value = timestamp or datetime.now(UTC).isoformat()
     if parse_instant(value) is None:
         raise ValueError("Run watermark must include a timezone.")
     with exclusive_lock(workspace.state_lock):
         current = _read_mapping(path, "last-run cursor")
         current["timestamp"] = _later(current.get("timestamp"), value)
-        write_text(path, json.dumps(current, indent=2, sort_keys=True), mode=PRIVATE_FILE_MODE)
+        write_text(path, json.dumps(current, indent=2, sort_keys=True), mode=PRIVATE_FILE_MODE, durable=True)
 
 
 __all__ = [

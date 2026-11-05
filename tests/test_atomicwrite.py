@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from foehn.atomicwrite import staged, staged_directory, write_bytes, write_text
+from foehn.workspace import Workspace
 
 
 def test_bytes_land_at_the_target(tmp_path):
@@ -398,3 +399,71 @@ def test_write_bytes_accepts_an_explicit_mode(tmp_path):
     write_bytes(target, b"secret", mode=PRIVATE_FILE_MODE)
 
     assert stat.S_IMODE(target.stat().st_mode) == PRIVATE_FILE_MODE
+
+
+def test_a_durable_write_reaches_the_disk_before_it_replaces_the_target(tmp_path, monkeypatch):
+    """Renamed without a sync, a crash could publish an empty file under the new name.
+
+    For the ETag store that is a skip rule's worst case: an empty store reads as
+    absent — fine — but a torn one beside a fresh mtime is what this module exists
+    to rule out, and the rename alone orders nothing on most filesystems.
+    """
+    import os
+
+    from foehn import atomicwrite
+
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(atomicwrite.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    target = tmp_path / "state.json"
+
+    atomicwrite.write_text(target, "{}", durable=True)
+
+    assert target.read_text() == "{}"
+    assert len(synced) == (1 if os.name == "nt" else 2)  # the file, then its directory
+
+
+def test_an_ordinary_write_does_not_pay_for_a_sync(tmp_path, monkeypatch):
+    """Data files are re-fetchable; syncing each of a bulk download's thousands would cost minutes."""
+    from foehn import atomicwrite
+
+    synced = []
+    monkeypatch.setattr(atomicwrite.os, "fsync", synced.append)
+
+    atomicwrite.write_bytes(tmp_path / "data.csv", b"a;b\n")
+
+    assert synced == []
+
+
+def test_the_run_state_is_written_durably(tmp_path, monkeypatch):
+    from foehn import atomicwrite
+    from foehn.state import advance_cursor, save_etags
+
+    calls = []
+    real = atomicwrite.write_text
+    monkeypatch.setattr(atomicwrite, "write_text", lambda *a, **kw: calls.append(kw) or real(*a, **kw))
+    monkeypatch.setattr("foehn.state.write_text", atomicwrite.write_text)
+
+    save_etags(Workspace(tmp_path), {"https://data.geo.admin.ch/x.csv": '"v1"'})
+    advance_cursor(Workspace(tmp_path), "smn", ["recent"], "2026-11-05T00:00:00+00:00")
+
+    assert [kw.get("durable") for kw in calls] == [True, True]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directories are not synced on Windows")
+def test_a_filesystem_that_will_not_sync_a_directory_still_gets_the_file(tmp_path, monkeypatch):
+    from foehn import atomicwrite
+
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("Invalid argument")
+        real_fsync(fd)
+
+    monkeypatch.setattr(atomicwrite.os, "fsync", fsync)
+    target = tmp_path / "state.json"
+
+    atomicwrite.write_text(target, "{}", durable=True)
+
+    assert target.read_text() == "{}"
