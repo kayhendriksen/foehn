@@ -65,6 +65,13 @@ it on demand — this is also what MCP Registry clients run:
 | `get_points` | Find local-forecast points by name, station or postal code |
 | `get_inventory` | Check data availability per station |
 
+`load_data` returns at most 500 rows, and `load_data` and `describe_data` may
+each download at most 1 GB. MeteoSwiss publishes one file per station and time
+slice, and the `year`, `month` and date filters trim rows only after a file is
+downloaded, so a call's cost is set by `station`, `frequency` and `time_slice`.
+A call over the budget is refused with an error naming them, so the model can
+narrow it and try again, and the server never runs out of memory.
+
 `describe_grid` is the gridded counterpart to `describe_data`, covering every
 gridded collection — NetCDF, GRIB2 forecasts, and HDF5/ODIM radar (GRIB2 and
 radar need a single-file `match`). It caches the source file locally and refreshes
@@ -72,3 +79,21 @@ it when STAC reports a newer asset (download-then-lazy); it needs the `grids` ex
 "foehn[grids]"`). It returns structure only — grid *values* aren't streamed into
 the LLM context, and writing Zarr stores isn't exposed over MCP (use the Python
 API or `foehn to-zarr` CLI).
+
+The files `describe_grid` downloads are cached in your user cache directory —
+`~/Library/Caches/foehn` on macOS, `$XDG_CACHE_HOME/foehn` (else `~/.cache/foehn`)
+on Linux, `%LOCALAPPDATA%\foehn\Cache` on Windows — not in the directory the
+client happens to start the server in. Set `FOEHN_DATA_DIR` in the server's
+`env` to put them somewhere else:
+
+```json
+{
+  "mcpServers": {
+    "foehn": {
+      "command": "foehn",
+      "args": ["mcp"],
+      "env": {"FOEHN_DATA_DIR": "/path/to/foehn-data"}
+    }
+  }
+}
+```

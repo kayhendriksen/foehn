@@ -188,6 +188,11 @@ TIME_SLICE_LABELS: dict[str, str] = {
 
 TIME_SLICES = frozenset(TIME_SLICE_LABELS)
 
+# The slices upstream rebuilds in place, whose file is a window rather than a
+# record: once MeteoSwiss stops listing one, the copy left in Bronze is not data
+# anyone should still read. "historical" is a record and is kept.
+ROLLING_TIME_SLICES = frozenset({"now", "recent"})
+
 DEFAULT_TIME_SLICE = "recent"
 """What a caller who names no time slice gets.
 

@@ -189,12 +189,6 @@ def _product_range_hint(assets: list[Asset], match: str) -> str:
 # next attempt would otherwise measure the mixed cache it inherited, find nothing
 # changed since *it* started, and hand it back as complete — and an attempt that
 # cannot reach the listing at all has no Asset metadata to judge coherence with.
-# A refresh that fails part-way can leave a set where some files are the new
-# generation and the rest the old one. That fact has to outlive the process: the
-# next attempt would otherwise measure the mixed cache it inherited, find nothing
-# changed since *it* started, and hand it back as complete — and an attempt that
-# cannot reach the listing at all has no Asset metadata to judge coherence with.
-#
 def _raise_if_incoherent(dataset: str, out_dir: Path, names: list[str]) -> None:
     """Refuse to *hand back* files a previous run recorded as mixed.
 

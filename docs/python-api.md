@@ -70,6 +70,13 @@ df = foehn.load("smn", station="BER", frequency="d", sort="desc")
 | `sort` | `str` | Sort by timestamp: "asc" or "desc" |
 | `limit` | `int` | Maximum rows; zero returns an empty frame, negative values are invalid |
 | `workers` | `int` | Concurrent fetches; must be positive |
+| `max_bytes` | `int` | Refuse the query once its files have downloaded more than this many bytes; `None` (default) sets no ceiling |
+
+`year`, `month` and `date_from`/`date_to` trim rows after each file is
+downloaded, so they keep the result small without making the query cheaper:
+MeteoSwiss publishes one file per station and time slice, and `station`,
+`frequency` and `time_slice` decide how many are fetched. Pass `max_bytes` when a
+query must stay bounded — the MCP server holds every `load_data` call to 1 GB.
 
 ### Climate scenario collections
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,23 @@ DATA_DIR_ENV = "FOEHN_DATA_DIR"
 
 DEFAULT_ROOT = ("data", "meteoswiss")
 """Relative to the current working directory, when nothing else says otherwise."""
+
+
+def user_cache_root() -> Path:
+    """The per-user cache directory, for a process that has no working directory of its own.
+
+    An MCP server is started wherever its client likes — often ``/``, where
+    nothing can be written — so the working-directory default sent its grid
+    downloads somewhere unwritable or unexpected. Follows each platform's
+    convention, as ``platformdirs`` would, without depending on it.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        return (Path(base) if base else Path.home() / "AppData" / "Local") / "foehn" / "Cache"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "foehn"
+    base = os.environ.get("XDG_CACHE_HOME")
+    return (Path(base) if base else Path.home() / ".cache") / "foehn"
 
 
 def _slug(match: str) -> str:
@@ -103,4 +121,4 @@ class Workspace:
         return self.root / ".foehn-state.lock"
 
 
-__all__ = ["DATA_DIR_ENV", "DEFAULT_ROOT", "Workspace"]
+__all__ = ["DATA_DIR_ENV", "DEFAULT_ROOT", "Workspace", "user_cache_root"]

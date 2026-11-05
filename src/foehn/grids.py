@@ -54,10 +54,11 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -169,6 +170,17 @@ _reusable: dict[tuple, list[Path]] = {}
 _made: list[Path] = []
 """Snapshot directories to remove on the way out."""
 
+_pinned: set[Path] = set()
+"""Snapshots an ordinary read was handed. Kept until exit: see _clean_snapshots."""
+
+_users: dict[Path, int] = {}
+"""How many open :func:`transient_snapshots` scopes are reading through each snapshot."""
+
+_registry_lock = threading.Lock()
+"""Guards the four registries above: the MCP server reads grids from many threads."""
+
+_scope = threading.local()
+
 
 def _hold_id_of(snapshot: Path) -> str:
     return snapshot.name[len(_SNAPSHOT_PREFIX) :].split("-", 1)[0]
@@ -245,8 +257,12 @@ def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
     _reap_stale_snapshots(out_dir)
 
     key = _inode_key(out_dir, files)
-    if key is not None and (existing := _reusable.get(key)) and all(link.exists() for link in existing):
-        return existing
+    if key is not None:
+        with _registry_lock:
+            existing = _reusable.get(key)
+        if existing and all(link.exists() for link in existing):
+            _claim(existing[0].parent)
+            return existing
 
     snapshot = out_dir / f"{_SNAPSHOT_PREFIX}{_HOLD_ID}-{uuid.uuid4().hex}"
     snapshot.mkdir(mode=0o700)
@@ -256,10 +272,69 @@ def _snapshot(files: list[Path], out_dir: Path) -> list[Path]:
     except BaseException:
         shutil.rmtree(snapshot, ignore_errors=True)
         raise
-    _made.append(snapshot)
-    if key is not None:
-        _reusable[key] = linked
+    with _registry_lock:
+        _made.append(snapshot)
+        if key is not None:
+            _reusable[key] = linked
+    _claim(snapshot)
     return linked
+
+
+def _claim(snapshot: Path) -> None:
+    """Record who reads through *snapshot*: the innermost transient scope, or a pinned read."""
+    stack = getattr(_scope, "stack", None)
+    with _registry_lock:
+        if stack:
+            stack[-1].append(snapshot)
+            _users[snapshot] = _users.get(snapshot, 0) + 1
+        else:
+            _pinned.add(snapshot)
+
+
+@contextlib.contextmanager
+def transient_snapshots() -> Generator[None]:
+    """Remove the read snapshots taken inside this block once it ends.
+
+    For a caller that closes every Dataset it opens before leaving the block —
+    the MCP server's ``describe_grid``. Snapshots are otherwise kept until the
+    process exits (see :func:`_clean_snapshots`), so a long-running server kept
+    one per call, each pinning the generation of the files it linked long after
+    upstream had replaced them. A snapshot also handed to a read outside any
+    scope stays pinned, since that Dataset may still be reading through it.
+    """
+    stack = getattr(_scope, "stack", None)
+    if stack is None:
+        stack = _scope.stack = []
+    taken: list[Path] = []
+    stack.append(taken)
+    try:
+        yield
+    finally:
+        stack.pop()
+        for snapshot in taken:
+            _release(snapshot)
+
+
+def _release(snapshot: Path) -> None:
+    """Give back one scope's use of *snapshot*, removing it when nothing else reads through it.
+
+    Under the directory's refresh lock: a read decides to reuse a snapshot under
+    that lock, so it cannot claim this one in the middle of its removal.
+    """
+    with coherence.refresh_lock(snapshot.parent):
+        with _registry_lock:
+            remaining = _users.get(snapshot, 0) - 1
+            if remaining > 0:
+                _users[snapshot] = remaining
+                return
+            _users.pop(snapshot, None)
+            if snapshot in _pinned:
+                return
+            if snapshot in _made:
+                _made.remove(snapshot)
+            for key in [key for key, links in _reusable.items() if links and links[0].parent == snapshot]:
+                del _reusable[key]
+        shutil.rmtree(snapshot, ignore_errors=True)
 
 
 def _link_or_copy(source: Path, destination: Path) -> Path:
@@ -288,6 +363,8 @@ def _clean_snapshots() -> None:
         shutil.rmtree(snapshot, ignore_errors=True)
     _made.clear()
     _reusable.clear()
+    _pinned.clear()
+    _users.clear()
     for out_dir, hold in _holds.items():
         with contextlib.suppress(Exception):
             hold.close()
@@ -1199,5 +1276,6 @@ __all__ = [
     "require_netcdf",
     "require_radar",
     "select_variables",
+    "transient_snapshots",
     "write_zarr",
 ]

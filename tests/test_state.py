@@ -4,7 +4,7 @@ Both reads are total: a corrupt file is treated as absent, because a lost cursor
 costs one redundant download and a raised exception costs the whole run.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -14,6 +14,7 @@ from foehn.state import (
     load_cursor,
     load_etags,
     load_last_run,
+    run_watermark,
     save_etags,
     save_last_run,
 )
@@ -219,3 +220,21 @@ def test_a_valid_stored_cursor_is_kept_over_a_corrupt_one(tmp_path):
 def test_the_legacy_timestamp_needs_a_timezone_too(tmp_path):
     with pytest.raises(ValueError, match="timezone"):
         save_last_run(Workspace(tmp_path), "2026-10-25T10:00:00")
+
+
+def test_the_run_watermark_leaves_room_for_clock_skew():
+    """The cursor is this machine's clock, compared later with the API's ``updated``.
+
+    With this clock ahead of the API's, an Item restated just after its page was
+    read carried an ``updated`` before the cursor, and the next run filtered it
+    out — for a historical slice, until the next full refresh. Starting the
+    cursor early costs only conditional requests that come back unchanged.
+    """
+    from foehn.state import CURSOR_SKEW_MARGIN
+
+    before = datetime.now(UTC)
+    watermark = datetime.fromisoformat(run_watermark())
+    after = datetime.now(UTC)
+
+    assert timedelta(minutes=5) <= CURSOR_SKEW_MARGIN
+    assert before - CURSOR_SKEW_MARGIN <= watermark <= after - CURSOR_SKEW_MARGIN

@@ -262,6 +262,35 @@ def test_a_network_failure_is_reported_without_a_traceback(capsys):
     assert "foehn: error: ConnectionError fetching" in capsys.readouterr().err
 
 
+def test_a_filesystem_error_is_one_line_not_a_traceback(capsys):
+    """A data directory that cannot be written is a fact about the machine, not a bug in foehn."""
+    with (
+        patch("foehn.api.load", side_effect=PermissionError(13, "Permission denied", "/data/meteoswiss")),
+        patch("sys.argv", ["foehn", "load", "smn"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        main()
+
+    err = capsys.readouterr().err
+    assert exc.value.code == 1
+    assert "foehn: error: [Errno 13] Permission denied: '/data/meteoswiss'" in err
+    assert "Traceback" not in err
+
+
+def test_a_broken_pipe_is_still_not_reported_as_an_error(capsys):
+    """BrokenPipeError is an OSError too, and must keep its own quiet exit."""
+    with (
+        patch("foehn.cli.metadata", side_effect=BrokenPipeError),
+        patch("foehn.cli._silence_stdout"),
+        patch("sys.argv", ["foehn", "metadata", "stations", "smn"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        main()
+
+    assert exc.value.code == 141
+    assert "error" not in capsys.readouterr().err
+
+
 def test_mcp_without_its_extra_names_the_install_command(capsys, monkeypatch):
     import sys
 
@@ -355,6 +384,53 @@ def test_cursor_held_back_on_download_failure(tmp_path, capsys):
     mocks["advance_cursor"].assert_not_called()
     err = capsys.readouterr().err
     assert "not advancing the _last_run.json cursor" in err
+
+
+def test_a_dataset_that_fails_outright_does_not_stop_the_rest(tmp_path, capsys):
+    """A listing that still failed after its retries used to end the whole run.
+
+    Every Dataset after it went undownloaded, and on Databricks the ingest task —
+    which depends on this one — then skipped the whole day.
+    """
+    from foehn.fetch import FetchError
+    from foehn.transfer import DownloadResult
+
+    def download(dataset, *_args, **_kwargs):
+        if dataset == "smn_precip":
+            raise FetchError("ConnectionError fetching https://data.geo.admin.ch/x: boom")
+        return DownloadResult(total_assets=1, downloaded=1)
+
+    with (
+        patch("foehn.registry.download", side_effect=download) as downloaded,
+        patch("foehn.registry.convert", return_value=0) as converted,
+        patch("foehn.cli.advance_cursor") as advanced,
+    ):
+        code, out, err = _main(["download", "smn", "smn_precip", "pollen", "--data-dir", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert out == ""
+    assert [c.args[0] for c in downloaded.call_args_list] == ["smn", "smn_precip", "pollen"]
+    # Nothing new arrived for the failed Dataset, so there is nothing to convert.
+    assert [c.args[0] for c in converted.call_args_list] == ["smn", "pollen"]
+    assert [c.args[1] for c in advanced.call_args_list] == ["smn", "pollen"]
+    assert "smn_precip: ConnectionError fetching" in err
+    assert "not advancing the _last_run.json cursor for smn_precip" in err
+
+
+def test_an_interrupt_still_stops_the_whole_download(tmp_path, capsys):
+    """Isolating each Dataset must not swallow Ctrl-C along with the failures."""
+
+    def download(dataset, *_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    with (
+        patch("foehn.registry.download", side_effect=download) as downloaded,
+        patch("foehn.registry.convert", return_value=0),
+    ):
+        code, _, _ = _main(["download", "smn", "pollen", "--data-dir", str(tmp_path)], capsys)
+
+    assert code == 130
+    assert [c.args[0] for c in downloaded.call_args_list] == ["smn"]
 
 
 def test_each_clean_dataset_advances_its_own_cursor(tmp_path):

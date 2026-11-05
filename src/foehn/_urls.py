@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlparse
 
 STAC_DOMAINS = frozenset({"data.geo.admin.ch"})
@@ -38,3 +39,18 @@ def _clean_href(href: str) -> str:
 def asset_filename(href: str) -> str:
     """Return just the filename of an asset href, ignoring any query string."""
     return _clean_href(href).rsplit("/", 1)[-1]
+
+
+def is_plain_filename(name: str) -> bool:
+    r"""Whether *name* is one ordinary file name, safe to join onto a directory on any OS.
+
+    An asset's name is the last segment of an href upstream chose, and it is
+    joined straight onto Bronze. A backslash is a separator on Windows, so
+    ``..\..\evil.csv`` — a single URL segment — named a file three directories
+    up there; ``C:evil.csv`` is drive-relative. A leading dot is refused too: it
+    could name one of foehn's own markers beside the data, and MeteoSwiss
+    publishes no hidden files.
+    """
+    if not name or name.startswith(".") or "\0" in name:
+        return False
+    return PurePosixPath(name).name == name and PureWindowsPath(name).name == name

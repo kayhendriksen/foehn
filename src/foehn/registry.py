@@ -40,6 +40,8 @@ from foehn.convert import (
 from foehn.downloads import (
     download_indoor_zip,
     download_normals_zip,
+    prune_superseded_runs,
+    prune_unlisted_rolling,
     stac_download,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
@@ -55,6 +57,10 @@ from foehn.grids import (
     require_netcdf,
     require_radar,
 )
+
+# Re-exported for the front ends, which reach the grid path through this module
+# only: a caller that closes what it opens can give its read snapshots back.
+from foehn.grids import transient_snapshots as transient_snapshots
 from foehn.transfer import DownloadResult, already_current, csv_to_disk
 
 if TYPE_CHECKING:
@@ -110,6 +116,7 @@ _download_csv = stac_download(
     etags=True,
     time_sliced=True,
     with_metadata=True,
+    prune=prune_unlisted_rolling,
 )
 
 _download_forecast_csv = stac_download(
@@ -121,6 +128,7 @@ _download_forecast_csv = stac_download(
     # Forecast filenames carry no time slice; the newest run bounds them instead.
     latest_run=True,
     with_metadata=True,
+    prune=prune_superseded_runs,
 )
 
 _download_netcdf = stac_download(

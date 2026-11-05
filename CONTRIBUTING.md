@@ -47,6 +47,7 @@ uv run pytest                          # the full offline suite, in about ten se
 uv run pytest tests/test_cli.py -q     # one module
 uv run pytest --cov=foehn              # with the coverage floor CI enforces
 uv run pytest -m live                  # opt-in tests against the live MeteoSwiss API
+uv sync --extra databricks && uv run pytest tests/test_ingest_delta_spark.py   # real Spark; needs Java 17 or 21
 ```
 
 The default run never touches the network: the STAC API and CDNs are replaced by
@@ -118,7 +119,8 @@ success, 1 for a failure, 2 for a usage error.
   anything a user would notice, under *Breaking changes*, *New features* or
   *Bug fixes*.
 - CI must be green: lint, typecheck, the test matrix (Python 3.11–3.15), the
-  packaging smoke test, the docs build and the security scans.
+  Delta ingest against a real Spark, the packaging smoke test, the docs build
+  and the security scans.
 
 ## Releasing
 

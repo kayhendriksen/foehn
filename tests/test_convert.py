@@ -84,6 +84,45 @@ def test_convert_to_parquet_skips_up_to_date(smn_workspace, tmp_path):
     assert out.stat().st_mtime == mtime_before
 
 
+def _two_station_bronze(tmp_path) -> Workspace:
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("smn")
+    bronze.mkdir(parents=True)
+    for station in ("AAA", "BBB"):
+        (bronze / f"ogd-smn_{station.lower()}_d_recent.csv").write_text(
+            f"station_abbr;reference_timestamp;tre200d0\n{station};01.01.2026 00:00;1.5\n"
+        )
+    return workspace
+
+
+def test_a_source_removed_from_bronze_is_removed_from_its_table(tmp_path):
+    """Every remaining source was older than the output, so the mtime rule kept the stale table.
+
+    Downloads now delete rolling files a station no longer publishes; the table
+    built from them has to lose that station too, not wait for a newer file.
+    """
+    workspace = _two_station_bronze(tmp_path)
+    convert_to_parquet("smn", workspace)
+    (workspace.bronze("smn") / "ogd-smn_bbb_d_recent.csv").unlink()
+
+    assert convert_to_parquet("smn", workspace) == 0
+
+    table = pl.read_parquet(workspace.parquet("smn") / "smn_d_recent.parquet")
+    assert table["station_abbr"].to_list() == ["AAA"]
+
+
+def test_an_output_written_before_sources_were_recorded_is_judged_by_mtime(tmp_path):
+    """A workspace from an older foehn is not reconverted wholesale on upgrade."""
+    workspace = _two_station_bronze(tmp_path)
+    out = workspace.parquet("smn") / "smn_d_recent.parquet"
+    out.parent.mkdir(parents=True)
+    pl.DataFrame({"legacy": [1]}).write_parquet(out)
+
+    assert convert_to_parquet("smn", workspace) == 0
+
+    assert pl.read_parquet(out).columns == ["legacy"]
+
+
 def test_convert_to_parquet_failed_write_leaves_no_output(smn_workspace, tmp_path, monkeypatch):
     """A sink that dies part-way must leave nothing at the final path.
 
@@ -142,9 +181,9 @@ def test_conversion_holds_the_lock_downloads_publish_under(smn_workspace, monkey
     held = []
     write = convert._write_parquet_atomic
 
-    def recording(frame, path, compression="zstd"):
+    def recording(frame, path, compression="zstd", *, sources):
         held.append(is_held(coherence._lock_path(smn_workspace.bronze("smn"))))
-        write(frame, path, compression)
+        write(frame, path, compression, sources=sources)
 
     monkeypatch.setattr(convert, "_write_parquet_atomic", recording)
 
@@ -564,3 +603,26 @@ def test_a_forecast_parameter_that_drifts_to_float_is_widened(tmp_path):
     df = _read_forecast_parquet(workspace)
     assert df["rre150h0"].dtype == pl.Float64
     assert df.height == 10_002
+
+
+def test_an_output_whose_footer_cannot_be_read_is_rebuilt(tmp_path):
+    """Truncated by something outside foehn, it has a fresh mtime and nothing else going for it."""
+    workspace = _two_station_bronze(tmp_path)
+    out = workspace.parquet("smn") / "smn_d_recent.parquet"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"PAR1 not really")
+
+    assert convert_to_parquet("smn", workspace) == 0
+
+    assert sorted(pl.read_parquet(out)["station_abbr"].to_list()) == ["AAA", "BBB"]
+
+
+def test_an_output_whose_recorded_sources_are_garbled_is_rebuilt(tmp_path):
+    workspace = _two_station_bronze(tmp_path)
+    out = workspace.parquet("smn") / "smn_d_recent.parquet"
+    out.parent.mkdir(parents=True)
+    pl.DataFrame({"legacy": [1]}).write_parquet(out, metadata={"foehn_sources": "not json"})
+
+    assert convert_to_parquet("smn", workspace) == 0
+
+    assert "station_abbr" in pl.read_parquet(out).columns

@@ -130,7 +130,11 @@ _Avoid_: data dir (that is the argument, not the concept), root, storage
 
 **Bronze**:
 The local cache of raw downloaded files, at `<workspace>/bronze/<dataset>/`. What
-`download()` writes and what the grid readers read from.
+`download()` writes and what the grid readers read from. A clean download of a
+CSV kind prunes it with the kind's **Pruner**: rolling-slice files the listing no
+longer holds, and **Forecast runs** older than the one just selected. Grid kinds
+are never pruned: their Bronze is the `open_dataset` cache, and radar's is an
+archive upstream does not keep.
 _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 
 **Fetcher**:
@@ -215,9 +219,12 @@ engine at all), format reader
 One load query, normalised: stations and granularities lowercased, scalars
 widened to tuples, an empty list read as "no filter". The public `load()`
 keywords are packed into one of these at the seam, so nothing below restates
-the eleven arguments. Invalid months, ISO dates, date ordering, sort tokens,
-negative limits and non-positive worker counts fail at every registry entry seam,
-including for directly constructed **Filters**; `limit=0` is a valid empty result.
+the arguments. Invalid months, ISO dates, date ordering, sort tokens,
+negative limits, non-positive worker counts and non-positive byte budgets fail at
+every registry entry seam, including for directly constructed **Filters**;
+`limit=0` is a valid empty result. `max_bytes` is spent as files arrive, because
+the STAC listing states no sizes; the calendar predicates trim rows only after a
+file is downloaded, so they bound the result, never the download.
 _Avoid_: query, params, options
 
 ## Relationships

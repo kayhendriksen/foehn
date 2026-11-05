@@ -110,6 +110,32 @@ jobs:
           "numpy>=1.24" "pyarrow>=14.0" "xarray>=2024.1" "netCDF4>=1.6" "pyproj>=3.0"
       - run: .venv/bin/pytest -p no:cov
 
+  test-delta:
+    # The Delta ingest against a real local Spark and Delta rather than the mocks
+    # the matrix uses: the SQL scripts/ingest_delta.py builds by hand and its
+    # Arrow handoff to Spark had never run outside a Databricks cluster. Its own
+    # job because it needs Java and the databricks extra, which the matrix does
+    # not install. The runner image ships Temurin 17, a Java Spark 4 supports;
+    # Java 23 and later cannot run Hadoop's login code at all.
+    name: test (Spark + Delta)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev --extra databricks --python 3.12
+      # The Spark module skips itself without pyspark, which would pass green
+      # here for the wrong reason. Fail on the import instead.
+      - run: uv run --no-sync python -c "import pyspark, delta"
+      - name: Run the ingest tests against Spark
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          uv run --no-sync pytest tests/test_ingest_delta_spark.py tests/test_ingest_delta.py -p no:cov -rs
+
   build:
     name: build (packaging smoke test)
     runs-on: ubuntu-latest

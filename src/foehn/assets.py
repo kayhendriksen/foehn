@@ -15,16 +15,19 @@ agree on which forecast you get.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from foehn._urls import asset_filename
+from foehn._urls import asset_filename, is_plain_filename
 from foehn.collections import (
     forecast_run_from_filename,
     granularity_from_filename,
     newest_complete_run,
     time_slice_from_filename,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,10 @@ def assets_of(
     that substring, ``excludes`` drops names holding it (``_meta_``, mostly).
     All three match the query-stripped name, which is the bug this replaces:
     ``href.endswith(".csv")`` silently drops an asset served with a token.
+
+    An asset whose name is not a plain file name is left out and logged: every
+    path that writes an asset joins its name onto a directory, and every path
+    reaches its assets through here.
     """
     found: list[Asset] = []
     for item in items:
@@ -93,6 +100,9 @@ def assets_of(
         item_updated = item.get("properties", {}).get("updated", "")
         for key, info in item.get("assets", {}).items():
             asset = Asset.from_stac(key, info, item_id=item_id, item_updated=item_updated)
+            if not is_plain_filename(asset.name):
+                logger.warning("  Ignoring asset %r of %r: %r is not a plain file name", key, item_id, asset.name)
+                continue
             if suffixes is not None and not asset.name.endswith(suffixes):
                 continue
             if contains is not None and contains not in asset.name:
