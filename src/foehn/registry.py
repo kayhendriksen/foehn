@@ -57,6 +57,10 @@ from foehn.grids import (
     require_netcdf,
     require_radar,
 )
+
+# Re-exported for the front ends, which reach the grid path through this module
+# only: a caller that closes what it opens can give its read snapshots back.
+from foehn.grids import transient_snapshots as transient_snapshots
 from foehn.transfer import DownloadResult, already_current, csv_to_disk
 
 if TYPE_CHECKING:

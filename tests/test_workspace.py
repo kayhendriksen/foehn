@@ -121,3 +121,24 @@ def test_a_match_narrows_the_store_name(tmp_path):
     assert workspace.zarr("radar_precip", "cpc2613/00") == tmp_path / "zarr" / "radar_precip__cpc2613_00.zarr"
     # A match of nothing but separators still has to name a directory.
     assert workspace.zarr("radar_precip", "//") == tmp_path / "zarr" / "radar_precip__match.zarr"
+
+
+@pytest.mark.parametrize(
+    ("platform", "env", "expected"),
+    [
+        ("darwin", {}, Path("~/Library/Caches/foehn")),
+        ("linux", {}, Path("~/.cache/foehn")),
+        ("linux", {"XDG_CACHE_HOME": "/xdg"}, Path("/xdg/foehn")),
+        ("win32", {"LOCALAPPDATA": "C:/Users/me/AppData/Local"}, Path("C:/Users/me/AppData/Local/foehn/Cache")),
+    ],
+)
+def test_the_user_cache_root_follows_each_platforms_convention(monkeypatch, platform, env, expected):
+    from foehn.workspace import user_cache_root
+
+    monkeypatch.setattr("foehn.workspace.sys.platform", platform)
+    for name in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    assert user_cache_root() == expected.expanduser()

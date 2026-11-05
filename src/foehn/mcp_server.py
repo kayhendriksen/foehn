@@ -10,6 +10,8 @@ GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
@@ -31,6 +33,7 @@ from foehn.collections import (
 )
 from foehn.docstrings import renders
 from foehn.metadata import TABLES
+from foehn.workspace import DATA_DIR_ENV, user_cache_root
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +229,18 @@ class GridSummary(BaseModel):
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _grid_data_dir() -> Path | None:
+    """Where describe_grid caches what it downloads.
+
+    ``$FOEHN_DATA_DIR`` when it is set — None leaves that to the Workspace, which
+    reads it — and otherwise the user's cache directory. Not the working
+    directory, the library's default: a client starts this server wherever it
+    likes, often ``/``, and the downloads then failed or landed somewhere the
+    user would never look.
+    """
+    return None if os.environ.get(DATA_DIR_ENV) else user_cache_root()
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────
@@ -470,24 +485,28 @@ def describe_grid(
         raise ValueError(f"Dataset {dataset!r} is CSV/tabular. Use describe_data() or load_data() instead.")
     # open_dataset enforces the single-file match= requirement for GRIB2/radar.
 
-    ds = foehn.open_dataset(dataset, match=match, variables=variables)
-    try:
-        dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
-        coordinates = sorted(str(c) for c in ds.coords)
-        data_variables = [
-            GridVariable(
-                name=str(name),
-                dims=[str(d) for d in da.dims],
-                shape=[int(s) for s in da.shape],
-                dtype=str(da.dtype),
-                long_name=da.attrs.get("long_name"),
-                units=da.attrs.get("units"),
-            )
-            for name, da in ds.data_vars.items()
-        ]
-        attributes = {str(k): str(v) for k, v in ds.attrs.items()}
-    finally:
-        ds.close()
+    # The Dataset is closed before this returns and nothing derived from it
+    # survives, so its read snapshot can go with it. Kept until exit, as an
+    # ordinary read's must be, a server that runs for days kept one per call.
+    with registry.transient_snapshots():
+        ds = foehn.open_dataset(dataset, match=match, variables=variables, data_dir=_grid_data_dir())
+        try:
+            dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
+            coordinates = sorted(str(c) for c in ds.coords)
+            data_variables = [
+                GridVariable(
+                    name=str(name),
+                    dims=[str(d) for d in da.dims],
+                    shape=[int(s) for s in da.shape],
+                    dtype=str(da.dtype),
+                    long_name=da.attrs.get("long_name"),
+                    units=da.attrs.get("units"),
+                )
+                for name, da in ds.data_vars.items()
+            ]
+            attributes = {str(k): str(v) for k, v in ds.attrs.items()}
+        finally:
+            ds.close()
 
     return GridSummary(
         dataset=dataset,

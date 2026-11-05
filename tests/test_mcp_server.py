@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import polars as pl
 import pytest
@@ -597,6 +597,49 @@ class TestDescribeData:
 
 
 class TestDescribeGrid:
+    def test_grids_are_cached_in_the_user_cache_not_the_working_directory(self, monkeypatch):
+        """A client starts the server wherever it likes — often ``/``, where nothing can be written."""
+        from foehn.workspace import DATA_DIR_ENV, user_cache_root
+
+        monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+        with (
+            patch("foehn.mcp_server.foehn.open_dataset", side_effect=ValueError("stop")) as mock_open,
+            pytest.raises(ValueError, match="stop"),
+        ):
+            describe_grid("surface_derived_grid", match="rhiresd")
+
+        assert mock_open.call_args.kwargs["data_dir"] == user_cache_root()
+
+    def test_foehn_data_dir_still_decides_where_grids_go(self, monkeypatch, tmp_path):
+        from foehn.workspace import DATA_DIR_ENV
+
+        monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
+        with (
+            patch("foehn.mcp_server.foehn.open_dataset", side_effect=ValueError("stop")) as mock_open,
+            pytest.raises(ValueError, match="stop"),
+        ):
+            describe_grid("surface_derived_grid", match="rhiresd")
+
+        # None hands the decision to the Workspace, which reads the variable.
+        assert mock_open.call_args.kwargs["data_dir"] is None
+
+    def test_describe_grid_leaves_no_snapshot_behind(self, fetcher, tmp_path, monkeypatch):
+        """A long-running server kept one read snapshot per call until it exited."""
+        for module in ("xarray", "h5py", "pyproj"):
+            pytest.importorskip(module)
+        from conftest import write_odim_composite
+
+        monkeypatch.setenv("FOEHN_DATA_DIR", str(tmp_path))
+        name = "cpc2613000000_00060.001.h5"
+        fetcher.any_items = [{"assets": {"d": {"href": f"https://data.geo.admin.ch/x/{name}"}}}]
+        bronze = tmp_path / "bronze" / "radar_precip"
+        write_odim_composite(bronze / name)
+
+        summary = describe_grid("radar_precip", match="cpc2613000000")
+
+        assert [variable.name for variable in summary.data_variables] == ["acrr"]
+        assert list(bronze.glob(".foehn-snapshot-*")) == []
+
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
             describe_grid("nonexistent")
@@ -615,7 +658,9 @@ class TestDescribeGrid:
             result = describe_grid("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl")
         assert isinstance(result, GridSummary)
         assert result.dimensions == {"values": 5}
-        mock_open.assert_called_once_with("forecast_icon_ch1", match="202605231500-0-t_2m-ctrl", variables=None)
+        mock_open.assert_called_once_with(
+            "forecast_icon_ch1", match="202605231500-0-t_2m-ctrl", variables=None, data_dir=ANY
+        )
 
     def test_radar_inspectable_via_open_dataset(self):
         """describe_grid now accepts radar (HDF5) too."""
@@ -660,7 +705,7 @@ class TestDescribeGrid:
         assert var.units == "degC"
         assert var.long_name == "daily mean temperature"
         assert result.attributes["title"] == "Test grid"
-        mock_open.assert_called_once_with("surface_derived_grid", match="rhiresd", variables=None)
+        mock_open.assert_called_once_with("surface_derived_grid", match="rhiresd", variables=None, data_dir=ANY)
 
     def test_missing_var_metadata_is_none(self):
         xr = pytest.importorskip("xarray")

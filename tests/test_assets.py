@@ -284,13 +284,15 @@ def test_extension_is_normalised(name, expected):
 
 
 def test_missing_href_does_not_blow_up():
-    """A malformed asset should be inert, not an AttributeError mid-listing."""
+    """A malformed asset should be inert, not an AttributeError mid-listing.
+
+    Inert meaning left out: with no href it names no file, and handed on it was
+    a download that failed — and held the cursor back — on every run.
+    """
     items = [{"id": "i", "properties": {}, "assets": {"broken": {}}}]
 
-    (asset,) = assets_of(items)
-
-    assert asset.href == ""
-    assert asset.name == ""
+    assert assets_of(items) == []
+    assert Asset.from_stac("broken", {}).name == ""
 
 
 def test_asset_from_stac_defaults():
@@ -300,3 +302,37 @@ def test_asset_from_stac_defaults():
     assert asset.item_id == ""
     assert asset.updated == ""
     assert asset.time_slice == "now"
+
+
+# --- What an asset may be called ---
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "..\\..\\..\\evil.csv",  # one URL segment, but three directories up on Windows
+        "C:evil.csv",  # drive-relative on Windows
+        "..",
+        ".",
+        ".foehn-incoherent.json",  # would overwrite foehn's own coherence marker
+    ],
+)
+def test_an_asset_whose_name_is_not_a_plain_file_name_is_ignored(name, caplog):
+    """The name becomes a path under Bronze, and it comes from upstream's href.
+
+    The ZIPs MeteoSwiss ships were already checked for paths that escape their
+    directory; the asset names beside them were joined on as they came.
+    """
+    item = {
+        "id": "i",
+        "assets": {"bad": {"href": f"{BASE}/{name}"}, "good": {"href": f"{BASE}/ogd-smn_ber_d_recent.csv"}},
+    }
+
+    found = assets_of([item])
+
+    assert [asset.name for asset in found] == ["ogd-smn_ber_d_recent.csv"]
+    assert "not a plain file name" in caplog.text
+
+
+def test_an_href_ending_in_a_slash_names_no_file(caplog):
+    assert assets_of([{"id": "i", "assets": {"dir": {"href": f"{BASE}/folder/"}}}]) == []

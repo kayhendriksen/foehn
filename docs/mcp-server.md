@@ -79,3 +79,21 @@ it when STAC reports a newer asset (download-then-lazy); it needs the `grids` ex
 "foehn[grids]"`). It returns structure only — grid *values* aren't streamed into
 the LLM context, and writing Zarr stores isn't exposed over MCP (use the Python
 API or `foehn to-zarr` CLI).
+
+The files `describe_grid` downloads are cached in your user cache directory —
+`~/Library/Caches/foehn` on macOS, `$XDG_CACHE_HOME/foehn` (else `~/.cache/foehn`)
+on Linux, `%LOCALAPPDATA%\foehn\Cache` on Windows — not in the directory the
+client happens to start the server in. Set `FOEHN_DATA_DIR` in the server's
+`env` to put them somewhere else:
+
+```json
+{
+  "mcpServers": {
+    "foehn": {
+      "command": "foehn",
+      "args": ["mcp"],
+      "env": {"FOEHN_DATA_DIR": "/path/to/foehn-data"}
+    }
+  }
+}
+```

@@ -20,7 +20,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -50,6 +50,11 @@ DEFAULT_WORKERS = 8
 _LISTING_TTL_FACTOR = 10.0
 _LISTING_TTL_MIN_SECONDS = 120.0
 _LISTING_TTL_MAX_SECONDS = 1800.0
+
+# How many listings the cache holds at once, oldest dropped first. Expired ones
+# are dropped as soon as anything new is stored; this bounds a burst inside one
+# TTL — the windowed forecast walk alone stores up to ~400 window listings.
+_LISTING_CACHE_MAX_ENTRIES = 1024
 
 # Sent with every request, so the operators of the STAC API and the CDNs can tell
 # foehn's traffic apart from any other ``python-requests`` client — and know
@@ -122,6 +127,28 @@ def _as_fetch_error(url: str) -> Generator[None]:
         raise FetchError(f"{type(exc).__name__} fetching {url}: {exc}") from exc
 
 
+class _AllowlistedSession(requests.Session):
+    """A session that follows a redirect only to somewhere foehn would fetch from directly.
+
+    Every URL foehn asks for is checked against the HTTPS host allowlist, but
+    ``requests`` follows redirects on its own — so only the first hop was ever
+    checked, and a redirect could take a request to any host, or off TLS. The
+    hook is the one ``requests`` consults for every hop it is about to follow.
+    """
+
+    def get_redirect_target(self, resp: requests.Response) -> str | None:
+        target = super().get_redirect_target(resp)
+        if target is not None:
+            location = urljoin(resp.url, target)
+            try:
+                validate_download_href(location)
+            except ValueError as exc:
+                # A requests exception, so the port reports it as a FetchError
+                # like any other failed request.
+                raise requests.exceptions.InvalidURL(f"Refusing redirect from {resp.url} to {location!r}") from exc
+        return target
+
+
 class HttpFetcher:
     """The production adapter: ``requests`` against the swisstopo STAC API and CDNs."""
 
@@ -142,12 +169,15 @@ class HttpFetcher:
         self._local = threading.local()
         # (collection, datetime filter) -> (stored_at, ttl, items). Keyed on the
         # filter too: a run-narrowed listing is not a substitute for the full one.
+        # Kept in storage order, so the front is always the oldest entry. Locked:
+        # the windowed forecast walk lists from sixteen threads at once.
         self._listing_cache: dict[tuple[str, str | None], tuple[float, float, list[dict]]] = {}
+        self._cache_lock = threading.Lock()
 
     # --- session management -------------------------------------------------
 
     def _build_session(self) -> requests.Session:
-        session = requests.Session()
+        session = _AllowlistedSession()
         session.headers["User-Agent"] = USER_AGENT
         retry = Retry(
             total=self._retries,
@@ -234,7 +264,8 @@ class HttpFetcher:
         cacheable = cache and max_items is None
         key = (collection_id, datetime_filter)
         if cacheable:
-            hit = self._listing_cache.get(key)
+            with self._cache_lock:
+                hit = self._listing_cache.get(key)
             if hit is not None and time.monotonic() - hit[0] < hit[1]:
                 return hit[2]
 
@@ -262,8 +293,26 @@ class HttpFetcher:
         if cacheable:
             elapsed = time.monotonic() - started
             ttl = min(max(elapsed * _LISTING_TTL_FACTOR, _LISTING_TTL_MIN_SECONDS), _LISTING_TTL_MAX_SECONDS)
-            self._listing_cache[key] = (time.monotonic(), ttl, collected)
+            self._store_listing(key, time.monotonic(), ttl, collected)
         return collected
+
+    def _store_listing(self, key: tuple[str, str | None], now: float, ttl: float, items: list[dict]) -> None:
+        """Cache *items*, dropping what has expired and, past the cap, the oldest.
+
+        Expired entries used to stay until their own key was fetched again. The
+        windowed forecast walk keys on window bounds that move with the
+        collection, so most never were, and a long-running process — the MCP
+        server — held every forecast listing it had ever walked.
+        """
+        with self._cache_lock:
+            cache = self._listing_cache
+            for stale in [k for k, (stored, held, _) in cache.items() if now - stored >= held]:
+                del cache[stale]
+            # Re-inserted rather than overwritten, so it moves to the back.
+            cache.pop(key, None)
+            cache[key] = (now, ttl, items)
+            while len(cache) > _LISTING_CACHE_MAX_ENTRIES:
+                del cache[next(iter(cache))]
 
     def collection(self, collection_id: str, *, timeout: int = 30) -> dict:
         url = validate_stac_url(f"{STAC_API_BASE}/collections/{collection_id}")
@@ -274,7 +323,8 @@ class HttpFetcher:
 
     def clear_cache(self) -> None:
         """Drop any memoised listings. Used between tests."""
-        self._listing_cache.clear()
+        with self._cache_lock:
+            self._listing_cache.clear()
 
 
 # One fetcher for the process. Built lazily so importing foehn opens no sockets,

@@ -409,3 +409,99 @@ def test_validate_stac_url_rejects_untrusted_urls():
     for bad in ("https://example.test/api/stac/v1/page2", "http://data.geo.admin.ch/api/stac/v1/page2"):
         with pytest.raises(ValueError, match="Untrusted STAC URL"):
             validate_stac_url(bad)
+
+
+# --- Redirects ---
+
+
+def _redirect(location, *, from_url=CSV_URL, status=302):
+    resp = requests.Response()
+    resp.status_code = status
+    resp.headers["Location"] = location
+    resp.url = from_url
+    return resp
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://evil.example/data.csv",
+        "http://data.geo.admin.ch/data.csv",  # a downgrade off TLS, to a trusted host
+        "//evil.example/data.csv",  # scheme-relative
+    ],
+)
+def test_a_redirect_off_the_allowlist_is_refused(location):
+    """Only the first URL was checked: requests followed any redirect after it, to any host."""
+    session = HttpFetcher()._build_session()
+
+    with pytest.raises(requests.exceptions.InvalidURL, match="redirect"):
+        session.get_redirect_target(_redirect(location))
+
+
+@pytest.mark.parametrize("location", ["https://rgw.cscs.ch/bucket/data.csv", "/other/data.csv"])
+def test_a_redirect_to_a_trusted_host_is_followed(location):
+    session = HttpFetcher()._build_session()
+
+    assert session.get_redirect_target(_redirect(location)) == location
+
+
+def test_a_refused_redirect_surfaces_as_a_fetch_error():
+    fetcher = HttpFetcher()
+    session = fetcher._build_session()
+    session.get = MagicMock(side_effect=requests.exceptions.InvalidURL("Refusing redirect to evil.example"))
+    fetcher._build_session = lambda: session
+
+    with pytest.raises(FetchError, match="redirect"):
+        fetcher.get(CSV_URL)
+
+
+# --- The listing cache stays bounded ---
+
+
+def test_an_expired_listing_is_dropped_rather_than_kept_for_good(monkeypatch):
+    """An expired entry used to stay in memory until its own key was fetched again.
+
+    The windowed forecast listing keys on window bounds that move with the
+    collection, so most never were: a long-running server kept every listing.
+    """
+    import foehn.fetch as fetch_mod
+
+    clock = [0.0]
+    monkeypatch.setattr(fetch_mod.time, "monotonic", lambda: clock[0])
+    fetcher, _ = _fetcher_with(_json_response(_page([_item()])), _json_response(_page([_item()])))
+
+    fetcher.items("ch.test.collection", cache=True, datetime_filter="2026-01-01T00:00:00Z/2026-01-01T01:00:00Z")
+    clock[0] = 10_000.0  # past any TTL
+    fetcher.items("ch.test.collection", cache=True, datetime_filter="2026-01-01T01:00:00Z/2026-01-01T02:00:00Z")
+
+    assert [key[1] for key in fetcher._listing_cache] == ["2026-01-01T01:00:00Z/2026-01-01T02:00:00Z"]
+
+
+def test_the_listing_cache_holds_a_bounded_number_of_listings(monkeypatch):
+    import foehn.fetch as fetch_mod
+
+    monkeypatch.setattr(fetch_mod, "_LISTING_CACHE_MAX_ENTRIES", 3)
+    fetcher, _ = _fetcher_with(*(_json_response(_page([_item()])) for _ in range(5)))
+
+    for hour in range(5):
+        fetcher.items("ch.test.collection", cache=True, datetime_filter=f"2026-01-01T0{hour}:00:00Z")
+
+    # The oldest go first.
+    assert [key[1] for key in fetcher._listing_cache] == [f"2026-01-01T0{hour}:00:00Z" for hour in (2, 3, 4)]
+
+
+def test_a_refreshed_listing_counts_as_new_for_eviction(monkeypatch):
+    import foehn.fetch as fetch_mod
+
+    clock = [0.0]
+    monkeypatch.setattr(fetch_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(fetch_mod, "_LISTING_CACHE_MAX_ENTRIES", 2)
+    fetcher, _ = _fetcher_with(*(_json_response(_page([_item()])) for _ in range(4)))
+
+    fetcher.items("ch.a", cache=True)
+    fetcher.items("ch.b", cache=True)
+    clock[0] = 10_000.0  # both expire; a is fetched again, so it is the newest entry now
+    fetcher.items("ch.a", cache=True)
+    fetcher.items("ch.c", cache=True)
+
+    assert [key[0] for key in fetcher._listing_cache] == ["ch.a", "ch.c"]

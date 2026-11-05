@@ -1855,3 +1855,59 @@ def test_a_store_that_cannot_be_checked_is_left_to_the_append_path(tmp_path):
 
     for store in (unreadable, timeless, tmp_path / "absent.zarr"):
         _refuse_a_duplicated_axis(xr, store)
+
+
+# --- Snapshots a caller is done with ---
+
+
+def test_a_snapshot_taken_in_a_transient_scope_is_removed_when_it_ends(tmp_path):
+    """A read that closes its Dataset itself — the MCP server's describe_grid — gives its snapshot back.
+
+    Held until exit, a long-running server kept one per call, each pinning the
+    generation of the files it linked after upstream had replaced them.
+    """
+    from foehn.grids import _clean_snapshots, _made, _snapshot, transient_snapshots
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with transient_snapshots():
+        linked = _snapshot([source], tmp_path)
+        assert linked[0].read_bytes() == b"payload"
+
+    assert not linked[0].parent.exists()
+    assert _made == []
+    assert source.exists()
+
+
+def test_a_snapshot_also_handed_to_an_ordinary_read_outlives_the_scope(tmp_path):
+    """Reuse shares one snapshot; a Dataset from outside the scope may still be reading through it."""
+    from foehn.grids import _clean_snapshots, _snapshot, transient_snapshots
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    kept = _snapshot([source], tmp_path)
+    with transient_snapshots():
+        assert _snapshot([source], tmp_path) == kept
+
+    assert kept[0].exists()
+    _clean_snapshots()
+
+
+def test_a_shared_snapshot_goes_only_when_its_last_scope_ends(tmp_path):
+    from foehn.grids import _clean_snapshots, _snapshot, transient_snapshots
+
+    _clean_snapshots()
+    source = tmp_path / "a.nc"
+    source.write_bytes(b"payload")
+
+    with transient_snapshots():
+        outer = _snapshot([source], tmp_path)
+        with transient_snapshots():
+            assert _snapshot([source], tmp_path) == outer
+        assert outer[0].exists()
+
+    assert not outer[0].parent.exists()
