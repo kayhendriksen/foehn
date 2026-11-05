@@ -347,6 +347,7 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     failures = 0
     download_failures = 0
+    errored = 0
     held_back: list[str] = []
     for ds in datasets:
         # Each Dataset and Time slice keeps its own cursor. One shared instant let
@@ -354,16 +355,26 @@ def cmd_download(args: argparse.Namespace) -> None:
         # downloaded were dropped as "unchanged" — see foehn.state.
         since = None if full_refresh else load_cursor(workspace, ds, time_slices)
         console.status(f"  {ds}: {f'changes since {since}' if since else 'full listing'}")
-        ds_download_failures = registry.download(
-            ds,
-            workspace,
-            time_slice=time_slices,
-            since=since,
-            workers=args.workers,
-            force=full_refresh,
-            fetcher=fetcher,
-        ).failed
-        ds_failures = 0 if args.no_parquet else registry.convert(ds, workspace)
+        try:
+            ds_download_failures = registry.download(
+                ds,
+                workspace,
+                time_slice=time_slices,
+                since=since,
+                workers=args.workers,
+                force=full_refresh,
+                fetcher=fetcher,
+            ).failed
+            ds_failures = 0 if args.no_parquet else registry.convert(ds, workspace)
+        except Exception as exc:  # noqa: BLE001 - one Dataset's failure is reported, not allowed to stop the rest
+            # A listing that failed after its retries used to end the whole run:
+            # every Dataset after it went undownloaded, and a scheduled ingest
+            # that depends on this command skipped the day. Its cursor is held
+            # back like any other failure, so the next run tries it again.
+            console.error(f"{ds}: {exc}")
+            errored += 1
+            held_back.append(ds)
+            continue
         download_failures += ds_download_failures
         failures += ds_failures
         if ds_download_failures == ds_failures == 0:
@@ -376,6 +387,8 @@ def cmd_download(args: argparse.Namespace) -> None:
 
     if held_back:
         reasons = []
+        if errored:
+            reasons.append(f"{errored} dataset(s) failed outright")
         if download_failures:
             reasons.append(f"{download_failures} download failure(s)")
         if failures:
@@ -389,7 +402,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     if not args.no_parquet:
         console.status(f"Parquet files saved to: {workspace.parquet()}")
 
-    if failures or download_failures:
+    if failures or download_failures or errored:
         sys.exit(EXIT_FAILURE)
 
 

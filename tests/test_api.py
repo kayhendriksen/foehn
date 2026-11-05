@@ -248,6 +248,71 @@ def test_load_time_filters_match_across_multiple_stations(fetcher):
     assert len(narrowed) == 6  # 3 stations x 2 matching rows
 
 
+# --- The download budget ---
+
+
+def _station_files(fetcher, count: int) -> int:
+    """*count* smn stations serving the same daily CSV; returns one file's size in bytes."""
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
+        {"id": f"s{i}", "assets": {"data": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_s{i}_d_recent.csv"}}}
+        for i in range(count)
+    ]
+    fetcher.default_body = _FILTER_CSV
+    return len(_FILTER_CSV.encode())
+
+
+def test_load_refuses_a_query_that_downloads_more_than_max_bytes(fetcher):
+    """The calendar filters trim rows only after each file has been downloaded.
+
+    So a query's cost is how many files it selects, not how many rows it keeps,
+    and a caller that has to stay bounded — the MCP server, whose caller is a
+    model — needs a ceiling on the download itself.
+    """
+    size = _station_files(fetcher, 20)
+
+    with pytest.raises(ValueError, match=r"max_bytes=.*station="):
+        load("smn", frequency="d", year=2025, max_bytes=3 * size, workers=1)
+
+    # Stopped at the file that crossed the budget rather than after all twenty.
+    assert len(fetcher.gets) == 4
+
+
+def test_a_spent_budget_stops_the_queued_fetches_too(fetcher):
+    """With a worker pool, files already queued must not be fetched once the budget is gone."""
+    size = _station_files(fetcher, 40)
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        load("smn", frequency="d", max_bytes=3 * size, workers=8)
+
+    # At most the files that fit, the one that crossed, and what was already in flight.
+    assert len(fetcher.gets) <= 4 + 8
+
+
+def test_a_query_inside_its_budget_is_unchanged(fetcher):
+    size = _station_files(fetcher, 3)
+
+    assert load("smn", frequency="d", max_bytes=3 * size).equals(load("smn", frequency="d"))
+
+
+def test_the_forecast_reader_spends_the_same_budget(fetcher):
+    body = _param_csv("a", [(7, 1, 1)])
+    _forecast_run(fetcher, dict.fromkeys(("a", "b", "c", "d"), body))
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        load("forecast_local", max_bytes=len(body.encode()), workers=1)
+
+    assert len(fetcher.gets) == 2
+
+
+def test_the_archive_reader_refuses_an_archive_over_budget(fetcher):
+    fetcher.any_items = [{"assets": {"d": {"href": "https://data.geo.admin.ch/x/raumklima.csv.zip"}}}]
+    fetcher.default_body = _make_indoor_zip(["ABO_2035_RCP85_DRY.csv"])
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        load("climate_scenarios_indoor", max_bytes=10)
+
+
 def _forecast_item(item_id: str, runs: dict[str, list[str]]) -> dict:
     """Build a forecast STAC item: one item = one day, holding several hourly runs."""
     return {

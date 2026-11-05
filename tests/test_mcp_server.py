@@ -14,6 +14,7 @@ from foehn import registry
 from foehn.collections import COLLECTIONS
 from foehn.mcp_server import (
     _INSPECTABLE_GRIDS,
+    _LOAD_BUDGET_BYTES,
     _LOADABLE_DATASETS,
     Dataset,
     DataSummary,
@@ -221,7 +222,33 @@ def _make_df(rows: list[dict]) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def _oversized_smn(fetcher, monkeypatch) -> None:
+    """Five smn stations, against a budget smaller than one of their files."""
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [
+        {"id": s, "assets": {"data": {"href": f"https://data.geo.admin.ch/smn/ogd-smn_{s}_d_recent.csv"}}}
+        for s in ("ber", "zur", "gve", "bas", "lug")
+    ]
+    fetcher.default_body = "station_abbr;reference_timestamp;temp\nBER;2025-01-01T00:00:00;1.0\n"
+    monkeypatch.setattr("foehn.mcp_server._LOAD_BUDGET_BYTES", 10)
+
+
 class TestLoadData:
+    def test_every_query_has_a_download_budget(self):
+        """A model's query is refused past this, rather than run until the host runs out of memory."""
+        assert 0 < _LOAD_BUDGET_BYTES <= 4 * 1024**3
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_load_data_passes_the_budget(self, mock_load):
+        mock_load.return_value = _make_df([{"x": 1}])
+        load_data("smn")
+        assert mock_load.call_args.kwargs["max_bytes"] == _LOAD_BUDGET_BYTES
+
+    def test_an_oversized_query_is_refused_with_advice(self, fetcher, monkeypatch):
+        _oversized_smn(fetcher, monkeypatch)
+        with pytest.raises(ValueError, match="station="):
+            load_data("smn", frequency="d", year=[2025])
+
     @patch("foehn.mcp_server.foehn.load")
     def test_basic_load(self, mock_load):
         mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}, {"station": "ZUR", "temp": 18.3}])
@@ -427,6 +454,18 @@ class TestLoadData:
 
 
 class TestDescribeData:
+    @patch("foehn.mcp_server.foehn.load")
+    def test_describe_data_passes_the_budget(self, mock_load):
+        """It downloads exactly what load_data would, so it is held to the same ceiling."""
+        mock_load.return_value = pl.DataFrame({"x": [1]})
+        describe_data("smn")
+        assert mock_load.call_args.kwargs["max_bytes"] == _LOAD_BUDGET_BYTES
+
+    def test_an_oversized_summary_is_refused(self, fetcher, monkeypatch):
+        _oversized_smn(fetcher, monkeypatch)
+        with pytest.raises(ValueError, match="station="):
+            describe_data("smn", frequency="d")
+
     @patch("foehn.mcp_server.foehn.load")
     def test_basic_summary(self, mock_load):
         mock_load.return_value = pl.DataFrame(

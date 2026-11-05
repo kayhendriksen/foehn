@@ -19,8 +19,20 @@ changes**. The same notes are published with each
   `[dependency-groups]` table, which uv installs by default (`uv sync`).
   `pip install "foehn[dev]"` no longer installs ruff, ty and pytest into a
   user's environment.
+- **The MCP `load_data` and `describe_data` tools refuse a call that downloads
+  more than 1 GB.** MeteoSwiss publishes one file per station and time slice,
+  and `year`, `month` and `date_from`/`date_to` trim rows only after each file
+  is downloaded, so one call — `frequency="t"` over every station's history —
+  fetched gigabytes into the server's memory. Such a call now stops with an
+  error naming `station`, `frequency` and `time_slice` as the filters that
+  narrow the download. The tool descriptions and the `foehn://guide` resource
+  no longer present the time filters as the way to keep a call cheap.
 
 ### New features
+
+- **`foehn.load(max_bytes=N)`** refuses a query once its data files have
+  downloaded more than `N` bytes, rather than running it to completion. The
+  default, `None`, sets no ceiling.
 
 - **Machine-readable output.** `foehn list`, `foehn metadata` and `foehn load`
   take `--output-format` (`table`, `csv`, `json`, plus `ndjson` for the latter
@@ -41,6 +53,17 @@ changes**. The same notes are published with each
 
 ### Bug fixes
 
+- **`foehn download` stopped at the first dataset that failed outright.** A
+  STAC listing that still failed after its retries ended the whole run, so every
+  dataset after it went undownloaded — and the Databricks ingest task, which
+  depends on the download, skipped the day. Each dataset is now attempted; one
+  that fails is reported, its cursor is held back, and the command still exits 1.
+- **The Databricks bundle deployed whatever wheel `dist/` held.** Nothing built
+  it, so a deploy shipped the last wheel built in that checkout, or two versions
+  when the glob matched both. The bundle now builds the wheel on every deploy
+  (`uv build --wheel --clear --out-dir dist/bundle`). docs/databricks.md said
+  the bundle creates two jobs; it creates four, and the page now lists each
+  one's schedule, including the two radar jobs that run every five minutes.
 - **`foehn mcp` could corrupt its own protocol stream.** The CLI's log handler
   wrote to stdout, which is the JSON-RPC channel under the stdio transport; a
   `describe_grid` call that downloaded a file wrote a progress line into it.

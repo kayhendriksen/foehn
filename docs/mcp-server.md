@@ -65,6 +65,13 @@ it on demand — this is also what MCP Registry clients run:
 | `get_points` | Find local-forecast points by name, station or postal code |
 | `get_inventory` | Check data availability per station |
 
+`load_data` returns at most 500 rows, and `load_data` and `describe_data` may
+each download at most 1 GB. MeteoSwiss publishes one file per station and time
+slice, and the `year`, `month` and date filters trim rows only after a file is
+downloaded, so a call's cost is set by `station`, `frequency` and `time_slice`.
+A call over the budget is refused with an error naming them, so the model can
+narrow it and try again, and the server never runs out of memory.
+
 `describe_grid` is the gridded counterpart to `describe_data`, covering every
 gridded collection — NetCDF, GRIB2 forecasts, and HDF5/ODIM radar (GRIB2 and
 radar need a single-file `match`). It caches the source file locally and refreshes

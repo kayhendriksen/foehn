@@ -230,6 +230,7 @@ def load(
     sort: str | None = None,
     limit: int | None = None,
     workers: int = DEFAULT_WORKERS,
+    max_bytes: int | None = None,
 ) -> pl.DataFrame:
     """Load a dataset and return it as an in-memory Polars DataFrame.
 
@@ -261,9 +262,19 @@ def load(
             ``year``, or ``date_from/date_to``.
         workers: Concurrent CSV downloads (default $default_workers). The CSV fetches are
             parallelised via a ThreadPoolExecutor; metadata fetch stays serial.
+        max_bytes: Refuse the query with a ValueError once its data files have
+            downloaded more than this many bytes. None (the default) sets no
+            ceiling. Because ``year``, ``month`` and ``date_from``/``date_to`` trim
+            rows only after each file is downloaded, this is the way to bound
+            what a query costs; ``station``, ``frequency`` and ``time_slice``
+            decide how much it downloads.
 
     Returns:
         A Polars DataFrame containing all matching CSV data.
+
+    Raises:
+        ValueError: If the dataset or a filter is invalid, nothing matches, or
+            the download exceeds ``max_bytes``.
 
     Example::
 
@@ -301,6 +312,7 @@ def load(
         sort=sort,
         limit=limit,
         workers=workers,
+        max_bytes=max_bytes,
     )
     # Whether this dataset can answer that query — known, tabular, granularity,
     # calendar filters, vocabulary — is every one of them a fact on its row, so

@@ -357,6 +357,53 @@ def test_cursor_held_back_on_download_failure(tmp_path, capsys):
     assert "not advancing the _last_run.json cursor" in err
 
 
+def test_a_dataset_that_fails_outright_does_not_stop_the_rest(tmp_path, capsys):
+    """A listing that still failed after its retries used to end the whole run.
+
+    Every Dataset after it went undownloaded, and on Databricks the ingest task —
+    which depends on this one — then skipped the whole day.
+    """
+    from foehn.fetch import FetchError
+    from foehn.transfer import DownloadResult
+
+    def download(dataset, *_args, **_kwargs):
+        if dataset == "smn_precip":
+            raise FetchError("ConnectionError fetching https://data.geo.admin.ch/x: boom")
+        return DownloadResult(total_assets=1, downloaded=1)
+
+    with (
+        patch("foehn.registry.download", side_effect=download) as downloaded,
+        patch("foehn.registry.convert", return_value=0) as converted,
+        patch("foehn.cli.advance_cursor") as advanced,
+    ):
+        code, out, err = _main(["download", "smn", "smn_precip", "pollen", "--data-dir", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert out == ""
+    assert [c.args[0] for c in downloaded.call_args_list] == ["smn", "smn_precip", "pollen"]
+    # Nothing new arrived for the failed Dataset, so there is nothing to convert.
+    assert [c.args[0] for c in converted.call_args_list] == ["smn", "pollen"]
+    assert [c.args[1] for c in advanced.call_args_list] == ["smn", "pollen"]
+    assert "smn_precip: ConnectionError fetching" in err
+    assert "not advancing the _last_run.json cursor for smn_precip" in err
+
+
+def test_an_interrupt_still_stops_the_whole_download(tmp_path, capsys):
+    """Isolating each Dataset must not swallow Ctrl-C along with the failures."""
+
+    def download(dataset, *_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    with (
+        patch("foehn.registry.download", side_effect=download) as downloaded,
+        patch("foehn.registry.convert", return_value=0),
+    ):
+        code, _, _ = _main(["download", "smn", "pollen", "--data-dir", str(tmp_path)], capsys)
+
+    assert code == 130
+    assert [c.args[0] for c in downloaded.call_args_list] == ["smn"]
+
+
 def test_each_clean_dataset_advances_its_own_cursor(tmp_path):
     """When a Dataset downloads and converts cleanly, its cursor advances — and only its."""
     mocks = _run("download", ["smn", "pollen"], tmp_path)
