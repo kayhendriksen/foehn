@@ -247,6 +247,16 @@ def _recover_directory(path: Path, backup_path: Path) -> None:
         _remove_tree(backup_path)
 
 
+def recover_directory(path: Path) -> None:
+    """Restore a directory publication interrupted between its two renames.
+
+    Call before creating a missing target: an empty replacement directory hides
+    the missing-path state and would make the complete backup look obsolete.
+    """
+    with _directory_lock(path.parent):
+        _recover_directory(path, path.with_name(_BACKUP_PREFIX + path.name))
+
+
 @contextlib.contextmanager
 def staged_directory(path: Path) -> Generator[Path]:
     """Build a complete sibling directory, then publish it at ``path``.
@@ -298,4 +308,4 @@ def write_text(path: Path, text: str, *, mode: int | None = None, durable: bool 
     write_bytes(path, text.encode("utf-8"), mode=mode, durable=durable)
 
 
-__all__ = ["PRIVATE_FILE_MODE", "staged", "staged_directory", "write_bytes", "write_text"]
+__all__ = ["PRIVATE_FILE_MODE", "recover_directory", "staged", "staged_directory", "write_bytes", "write_text"]

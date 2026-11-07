@@ -20,6 +20,7 @@ another path.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
@@ -51,8 +52,13 @@ def user_cache_root() -> Path:
 
 
 def _slug(match: str) -> str:
-    """A ``match`` filter as a filesystem-safe fragment of a store name."""
-    return re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_") or "match"
+    """A readable fragment plus the exact filter's identity, safe on every filesystem."""
+    readable = re.sub(r"[^0-9A-Za-z]+", "_", match).strip("_")[:64] or "match"
+    # Delimiters matter to substring matching: ``tas`` also selects tasmax,
+    # whereas ``_tas_`` does not. A digest preserves that distinction, including
+    # case on case-insensitive filesystems, without allowing path separators.
+    digest = hashlib.blake2b(match.encode("utf-8"), digest_size=16).hexdigest()
+    return f"{readable}__{digest}"
 
 
 @dataclass(frozen=True)

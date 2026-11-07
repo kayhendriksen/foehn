@@ -612,18 +612,23 @@ class GridReader:
                     )
             return
 
-        ds = self.open_dataset(
-            dataset,
-            match=match,
-            variables=variables,
-            workspace=workspace,
-            fetcher=fetcher,
-        )
-        if mode == "w":
-            with atomicwrite.staged_directory(store) as staged:
-                _write_zarr(ds, staged, mode, rechunk=rechunk)
-        else:
-            _write_zarr(ds, store, mode, rechunk=rechunk)
+        # No Dataset escapes a conversion: close its files before releasing
+        # the snapshots, on failed writes/rechunking as well as successful ones.
+        with (
+            transient_snapshots(),
+            self.open_dataset(
+                dataset,
+                match=match,
+                variables=variables,
+                workspace=workspace,
+                fetcher=fetcher,
+            ) as ds,
+        ):
+            if mode == "w":
+                with atomicwrite.staged_directory(store) as staged:
+                    _write_zarr(ds, staged, mode, rechunk=rechunk)
+            else:
+                _write_zarr(ds, store, mode, rechunk=rechunk)
 
 
 # --- Writing ---------------------------------------------------------------
@@ -723,7 +728,11 @@ def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Da
     """
     if variables is None:
         return ds
-    selected = ds[[variables] if isinstance(variables, str) else list(variables)]
+    try:
+        selected = ds[[variables] if isinstance(variables, str) else list(variables)]
+    except BaseException:
+        ds.close()
+        raise
     # A selection is a new Dataset, and xarray does not hand it the source's
     # closer: closing it, or leaving a ``with`` block, kept the file open.
     selected.set_close(ds.close)
@@ -764,60 +773,51 @@ def _open_grid(xr: ModuleType, files: list[Path], engine: str | None, backend_kw
     that xarray/cftime cannot decode — MeteoSwiss climate normals, for example,
     label their time axis "years since 1991-01-01", which is not CF-compliant.
     """
+    kwargs: dict = {"engine": engine, "decode_times": True}
+    if backend_kwargs:
+        kwargs["backend_kwargs"] = backend_kwargs
+    lazy = len(files) > 1 and _dask_available()
+    if lazy:
+        kwargs["chunks"] = {}
 
-    def _do(*, decode_times: bool) -> XrDataset:
-        kwargs: dict = {"engine": engine, "decode_times": decode_times}
-        if backend_kwargs:
-            kwargs["backend_kwargs"] = backend_kwargs
-        if len(files) == 1:
-            return xr.open_dataset(files[0], **kwargs)
-        lazy = _dask_available()
-        if lazy:
-            kwargs["chunks"] = {}
-        # Opened one at a time so a failure can close what is already open. The
-        # comprehension this replaces leaked a handle per file whenever the
-        # combine raised, which on a large set exhausts the descriptor limit and
-        # reports the exhaustion instead of the original fault.
-        datasets: list = []
+    def _open_one(source: Path) -> XrDataset:
         try:
-            for source in files:
-                # Not a comprehension: the except below has to close whatever
-                # was opened before the failure, which needs the partial list.
-                datasets.append(xr.open_dataset(source, **kwargs))  # noqa: PERF401
-            if not lazy and (size := sum(ds.nbytes for ds in datasets)) > _IN_MEMORY_COMBINE_WARN_BYTES:
-                warnings.warn(
-                    f"Combining these {len(datasets)} files reads about {size / 1e9:.1f} GB into memory: "
-                    "xarray combines files lazily only with dask, which the 'grids' extra does not "
-                    "install. Install dask (pip install dask) or narrow match=.",
-                    stacklevel=2,
-                )
-            combined = xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
-        except BaseException:
-            _close_each(datasets)
-            raise
-        if lazy:
-            # Read from the per-file opens as it is used. The combined Dataset
-            # is new and carries no closer of its own, so closing it released
-            # nothing they held.
-            combined.set_close(partial(_close_each, datasets))
-        else:
-            # The combine has read every value already. Kept open until the
-            # caller closed the result, the files only held their locks.
-            _close_each(datasets)
-        return combined
+            return xr.open_dataset(source, **kwargs)
+        except ValueError as exc:
+            # xarray's CF decoder wraps unsupported units and out-of-range
+            # dates in this diagnostic. Other file errors must not change how
+            # time is interpreted; combination errors never enter this handler.
+            if "unable to decode time units" not in str(exc):
+                raise
+            logger.debug("CF time decoding failed (%s); retrying %s with decode_times=False", exc, source)
+            try:
+                return xr.open_dataset(source, **(kwargs | {"decode_times": False}))
+            except Exception as retry_exc:
+                raise retry_exc from exc
 
+    if len(files) == 1:
+        return _open_one(files[0])
+    # Open one at a time so any failed open or combine closes the partial set.
+    datasets: list = []
     try:
-        return _do(decode_times=True)
-    except (ValueError, OverflowError) as exc:
-        # Non-CF time units (e.g. "years since 1991-01-01") surface as a ValueError
-        # from the CF time decoder; an out-of-range reference can raise OverflowError.
-        # Narrow to those so an unrelated read error isn't masked behind the retry,
-        # and chain the original cause if the fallback also fails.
-        logger.debug("CF time decoding failed (%s); retrying with decode_times=False", exc)
-        try:
-            return _do(decode_times=False)
-        except Exception as retry_exc:
-            raise retry_exc from exc
+        for source in files:
+            datasets.append(_open_one(source))  # noqa: PERF401
+        if not lazy and (size := sum(ds.nbytes for ds in datasets)) > _IN_MEMORY_COMBINE_WARN_BYTES:
+            warnings.warn(
+                f"Combining these {len(datasets)} files reads about {size / 1e9:.1f} GB into memory: "
+                "xarray combines files lazily only with dask, which the 'grids' extra does not "
+                "install. Install dask (pip install dask) or narrow match=.",
+                stacklevel=2,
+            )
+        combined = xr.combine_by_coords(datasets, combine_attrs="drop_conflicts")
+    except BaseException:
+        _close_each(datasets)
+        raise
+    if lazy:
+        combined.set_close(partial(_close_each, datasets))
+    else:
+        _close_each(datasets)
+    return combined
 
 
 # --- The open adapters -----------------------------------------------------

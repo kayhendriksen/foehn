@@ -111,6 +111,33 @@ def test_a_source_removed_from_bronze_is_removed_from_its_table(tmp_path):
     assert table["station_abbr"].to_list() == ["AAA"]
 
 
+def test_last_rolling_source_retired_by_a_listing_removes_its_output(tmp_path):
+    from foehn.assets import assets_of
+    from foehn.downloads import prune_unlisted_rolling
+
+    workspace = _two_station_bronze(tmp_path)
+    assert convert_to_parquet("smn", workspace) == 0
+    bronze = workspace.bronze("smn")
+    retained = bronze / "ogd-smn_aaa_h_recent.csv"
+    shutil.copy(bronze / "ogd-smn_aaa_d_recent.csv", retained)
+    listed = assets_of([{"id": "aaa", "assets": {"hourly": {"href": f"https://data.geo.admin.ch/{retained.name}"}}}])
+    prune_unlisted_rolling(bronze, listed)
+
+    assert convert_to_parquet("smn", workspace) == 0
+    assert not (workspace.parquet("smn") / "smn_d_recent.parquet").exists()
+    assert (workspace.parquet("smn") / "smn_h_recent.parquet").exists()
+    assert convert_to_parquet("smn", workspace) == 0  # reconciliation is repeatable
+
+
+def test_locally_missing_sources_without_a_listing_keep_the_output(tmp_path):
+    workspace = _two_station_bronze(tmp_path)
+    assert convert_to_parquet("smn", workspace) == 0
+    for source in workspace.bronze("smn").glob("*.csv"):
+        source.unlink()
+    assert convert_to_parquet("smn", workspace) == 0
+    assert (workspace.parquet("smn") / "smn_d_recent.parquet").exists()
+
+
 def test_an_output_written_before_sources_were_recorded_is_judged_by_mtime(tmp_path):
     """A workspace from an older foehn is not reconverted wholesale on upgrade."""
     workspace = _two_station_bronze(tmp_path)

@@ -29,6 +29,7 @@ from foehn.collections import (
     time_slice_from_filename,
 )
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.retention import record_listing
 from foehn.state import EtagRun, parse_instant
 from foehn.transfer import (
     DownloadResult,
@@ -116,6 +117,7 @@ def prune_unlisted_rolling(out_dir: Path, listed: list[Asset]) -> list[str]:
         # An empty listing is a broken one, not a Collection to empty Bronze for.
         return []
     names = {asset.name for asset in listed}
+    record_listing(out_dir, sorted(names))
     return _delete(
         [
             path
@@ -164,6 +166,42 @@ def _skip_except(skip: SkipRule | None, forced: set[str]) -> SkipRule:
         return bool(skip(asset, path)) if skip is not None else False
 
     return decide
+
+
+def _after_cursor(
+    wanted: list[Asset], items: list[dict], since: str | None, out_dir: Path, pending: set[str]
+) -> list[Asset]:
+    """Narrow an incremental run without dropping missing files or pending repairs.
+
+    Called with the Dataset lock held: a forced refresh can invalidate a file
+    even when its upstream timestamp is older than the committed cursor.
+    """
+    if not since:
+        return wanted
+    changed = {item.get("id", "") for item in _updated_since(items, since)}
+    return [
+        asset
+        for asset in wanted
+        if asset.item_id in changed or asset.name in pending or not (out_dir / asset.name).exists()
+    ]
+
+
+def _mark_refresh(
+    out_dir: Path,
+    wanted: list[Asset],
+    skip: SkipRule | None,
+    pending: set[str],
+    *,
+    coherent: bool,
+    force: bool,
+) -> None:
+    """Persist set replacement state, or individual explicitly invalidated CSVs."""
+    if coherent:
+        replacing = [asset.name for asset in wanted if skip is None or not skip(asset, out_dir / asset.name)]
+        if len(wanted) > 1 or force or pending:
+            coherence.mark(out_dir, replacing)
+    elif force or pending:
+        coherence.mark(out_dir, [asset.name for asset in wanted if force or asset.name in pending])
 
 
 def stac_download(
@@ -262,27 +300,6 @@ def stac_download(
             time_slices=time_slice if time_sliced else None,
             latest_run=latest_run,
         )
-        if since:
-            # The cursor speaks for the files it saw written, not for files that
-            # are gone. A wanted file missing from disk is fetched whatever its
-            # Item's ``updated`` says: deleting part of the cache used to leave it
-            # deleted, because nothing upstream had changed since the cursor.
-            # Selected first, narrowed second, so a missing old forecast run can
-            # never pass for the newest one.
-            changed = {item.get("id", "") for item in _updated_since(items, since)}
-            missing = [a for a in wanted if a.item_id not in changed and not (out_dir / a.name).exists()]
-            if missing:
-                logger.info("  %d unchanged file(s) missing locally — fetching them again", len(missing))
-            wanted = [a for a in wanted if a.item_id in changed or not (out_dir / a.name).exists()]
-            if not wanted:
-                logger.info("  Nothing changed — skipping")
-                # ``every`` is still the full listing — ``since`` narrows what
-                # is fetched, not what is known — so what upstream stopped
-                # publishing can go even on a run with nothing new.
-                if prune is not None:
-                    with coherence.refresh_lock(out_dir):
-                        _prune(prune, out_dir, every)
-                return result
         if latest_run and (run := latest_run_of(every)) is not None:
             available = len({a.forecast_run for a in every if a.forecast_run is not None})
             logger.info("  Newest complete forecast run: %s (of %d listed)", run, available)
@@ -299,25 +316,35 @@ def stac_download(
         # older response could replace a newer file and the newer run then commit
         # its ETag, so every later refresh got a 304 and kept the stale bytes.
         # Per Dataset, so unrelated Datasets still download side by side.
-        names = [asset.name for asset in wanted]
         with coherence.refresh_lock(out_dir) if coherent or etags else nullcontext():
+            # Retry state precedes the cursor filter. Otherwise an invalidated
+            # file that still exists looks unchanged forever after a failed
+            # forced refresh, even though its ETag was correctly discarded.
+            forced = coherence.blocked(out_dir, [asset.name for asset in wanted]) if coherent or etags else set()
+            wanted = _after_cursor(wanted, items, since, out_dir, forced)
+            if since and not wanted:
+                logger.info("  Nothing changed — skipping")
+                if result.failed == 0:
+                    _prune(prune, out_dir, every)
+                return result
+            names = [asset.name for asset in wanted]
             # The conditional-GET writer decides "unchanged" from the server's 304,
             # so the ETag store is this kind's skip rule.
             etag_run = EtagRun.begin(workspace) if etags else None
             store = etag_run.values if etag_run is not None else None
-            if force and store is not None:
+            if store is not None:
                 # Unconditional GETs: a stored ETag would come back 304 and keep
                 # whatever is on disk, however damaged. Each asset that downloads
                 # records its new ETag again; one that fails stays without one.
                 for asset in wanted:
-                    store.pop(asset.href, None)
+                    if force or asset.name in forced:
+                        store.pop(asset.href, None)
 
             # Files a previous run left half-replaced are fetched again whatever
             # the freshness rule says. Without this a retry found both current —
             # the collection states no ``updated``, or the half-written file's
             # mtime is newer than it — skipped everything, called that success
             # and cleared a marker over a cache it had not repaired.
-            forced = coherence.blocked(out_dir, names) if coherent else set()
             if force:
                 run_skip = None
             else:
@@ -327,13 +354,7 @@ def stac_download(
             # are not touched and keep the generation they had. Marking the whole
             # set made one failed file cost a re-download of every other one on
             # the next run — for radar, a whole day of composites over one 404.
-            refreshing = [
-                asset.name
-                for asset in (wanted if coherent else [])
-                if run_skip is None or not run_skip(asset, out_dir / asset.name)
-            ]
-            if len(names) > 1 and refreshing:
-                coherence.mark(out_dir, refreshing)
+            _mark_refresh(out_dir, wanted, run_skip, forced, coherent=coherent, force=force)
             fetched = fetch_all(
                 wanted,
                 out_dir,
@@ -347,9 +368,13 @@ def stac_download(
             # Only a run that finished can say the set is whole again.
             if coherent and fetched.failed == 0:
                 coherence.clear(out_dir, names)
+            elif etags:
+                # CSV repairs are independent. Keep only unsuccessful repairs
+                # pending, so one failed station does not refetch its siblings.
+                coherence.clear(out_dir, fetched.filenames)
             # Only a clean run, too: after a failure the partial run on disk may
             # be the newest thing there is, and nothing is lost by waiting.
-            if fetched.failed == 0:
+            if result.failed == fetched.failed == 0:
                 _prune(prune, out_dir, every)
 
             if etag_run is not None:

@@ -149,7 +149,7 @@ differently from the static NetCDF grids:
 
   ```python
   foehn.to_zarr("forecast_icon_ch1", match="YYYYMMDDHHMM-0-t_2m-ctrl")
-  # -> data/meteoswiss/zarr/forecast_icon_ch1__YYYYMMDDHHMM_0_t_2m_ctrl.zarr
+  # -> data/meteoswiss/zarr/forecast_icon_ch1__YYYYMMDDHHMM_0_t_2m_ctrl__<digest>.zarr
   ```
 
 ### Cubing forecasts (`stack=True`)
@@ -224,15 +224,18 @@ many timesteps the match spans.
 ## Writing to Zarr
 
 `foehn.to_zarr()` materialises a dataset to a Zarr store under
-`<data_dir>/zarr/`. The default name encodes `match`, so different filtered
-slices of a collection don't overwrite each other:
+`<data_dir>/zarr/`. Filtered names contain a readable fragment and a 32-character
+digest of the exact `match`. Delimiters and case remain significant: `tas` and
+`_tas_` select different sets of climate-scenario variables and receive different
+stores. The readable fragment is capped at 64 characters to keep filenames short.
+`<digest>` below stands for the digest; use the returned Path to open the store:
 
 ```python
 store = foehn.to_zarr("surface_derived_grid", match="rhiresd")
-# -> data/meteoswiss/zarr/surface_derived_grid__rhiresd.zarr
+# -> data/meteoswiss/zarr/surface_derived_grid__rhiresd__<digest>.zarr
 
 foehn.to_zarr("surface_derived_grid", match="tabsd")
-# -> data/meteoswiss/zarr/surface_derived_grid__tabsd.zarr  (distinct store)
+# -> data/meteoswiss/zarr/surface_derived_grid__tabsd__<digest>.zarr  (distinct store)
 
 # Unfiltered keeps the bare name
 foehn.to_zarr("climate_normals_grid")
@@ -244,6 +247,13 @@ foehn.to_zarr("surface_derived_grid", match="rhiresd", store="out/rain.zarr")
 # Re-chunk before writing (requires `pip install dask`)
 foehn.to_zarr("surface_derived_grid", match="rhiresd", rechunk={"time": 24})
 ```
+
+**Existing filtered stores:** older versions omitted the digest and could map
+different filters to the same path. They are not automatically renamed or reused,
+because their name cannot establish which slice they contain. Rebuild with the
+intended `match` to get a new default store. To deliberately continue using an
+old location, first check its contents, then pass `store="<old-path>"` (CLI:
+`--out <old-path>`). Unfiltered names and explicit paths are unchanged.
 
 Non-CF time axes (MeteoSwiss climate normals label theirs `years since
 1991-01-01`, which CF decoding rejects) are sanitised on write so the resulting
@@ -276,7 +286,7 @@ foehn open surface_derived_grid --match rhiresd
 # Restrict to specific variables
 foehn open climate_scenarios_grid --match _pr_ --variables pr
 
-# Write a Zarr store (default name: surface_derived_grid__rhiresd.zarr)
+# Write a Zarr store (the default name includes a digest of the filter)
 foehn to-zarr surface_derived_grid --match rhiresd
 
 # Write to an explicit path

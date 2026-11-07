@@ -460,9 +460,12 @@ def to_zarr(
 
     The default store name encodes ``match`` so that different filtered slices of
     the same collection don't silently overwrite each other:
-    ``<dataset>.zarr`` when unfiltered, ``<dataset>__<match>.zarr`` otherwise
-    (e.g. ``surface_derived_grid__rhiresd.zarr``). Pass ``store`` for an explicit
-    path that overrides this.
+    ``<dataset>.zarr`` when unfiltered, or
+    ``<dataset>__<readable-match>__<digest>.zarr`` otherwise. The digest includes
+    the exact filter, so ``tas`` and ``_tas_`` remain distinct. Pass ``store``
+    for an explicit path that overrides this. Older filtered stores without a
+    digest are left untouched; rebuild them or explicitly name the old store
+    after checking that it holds the intended slice.
 
     Args:
         dataset: Dataset name. Must be a NetCDF, GRIB2, or HDF5/radar collection.

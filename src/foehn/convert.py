@@ -30,6 +30,7 @@ from foehn.meteocsv import (
     scan_indoor_csv,
     scan_standard_csv,
 )
+from foehn.retention import retired_groups
 from foehn.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,27 @@ def _group_out_name(collection_key: str, group_key: tuple[str, ...]) -> str:
     return f"{collection_key}_{'_'.join(group_key)}.parquet" if group_key else f"{collection_key}.parquet"
 
 
+def _retire_parquet(dataset: str, workspace: Workspace) -> int:
+    """Remove only foehn-authored rolling outputs after an authoritative refresh."""
+    candidates = {
+        tuple(path.stem.removeprefix(f"{dataset}_").split("_")): path
+        for path in workspace.parquet(dataset).glob(f"{dataset}_*.parquet")
+    }
+    failed = 0
+    for group in retired_groups(workspace.bronze(dataset), dataset, candidates):
+        path = candidates[group]
+        try:
+            # An unrelated/legacy file without our source footer is not ours to remove.
+            sources = json.loads(pl.read_parquet_metadata(path).get(_SOURCES_KEY, "null"))
+            if isinstance(sources, list) and sources:
+                path.unlink()
+                logger.info("  Removed retired rolling output %s", path.name)
+        except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
+            failed += 1
+            logger.warning("  Could not reconcile %s: %s", path.name, exc)
+    return failed
+
+
 def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[pl.DataType]]) -> ConvertOne:
     """Build the per-group converter for standard CSV collections.
 
@@ -215,17 +237,18 @@ def convert_to_parquet(dataset: str, workspace: Workspace) -> int:
     """
     csv_dir = workspace.bronze(dataset)
     out_dir = workspace.parquet(dataset)
+    failed = _retire_parquet(dataset, workspace)
 
     groups = [
         ConversionGroup(out_dir / _group_out_name(dataset, group_key), files)
         for group_key, files in group_csv_files(csv_dir, dataset).items()
     ]
     if not groups:
-        return 0
+        return failed
 
     # Load parameter type info from metadata once for the whole collection.
     metadata_types = load_metadata_types(csv_dir)
-    return run_conversions(groups, _convert_standard_group(dataset, metadata_types), label=dataset)
+    return failed + run_conversions(groups, _convert_standard_group(dataset, metadata_types), label=dataset)
 
 
 def convert_indoor_to_parquet(dataset: str, workspace: Workspace) -> int:

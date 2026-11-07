@@ -24,6 +24,7 @@ import logging
 import re
 from collections.abc import Sequence
 from functools import reduce
+from itertools import islice
 from pathlib import Path
 from typing import TypedDict, TypeVar, cast
 
@@ -305,9 +306,19 @@ def parse_forecast_points(content: bytes) -> pl.DataFrame:
     return pl.read_csv(decode_meteoswiss_csv(content).encode("utf-8"), separator=";", infer_schema_length=0)
 
 
-def read_normals_txt(path: Path) -> pl.DataFrame:
-    """Read one Direct ZIP climate-normal table from Bronze."""
-    return pl.read_csv(
+_NORMALS_EN_FILENAME = re.compile(r"^climate-reports-normtables_([^_]+)_(\d{4}-\d{4})_en\.txt$")
+
+
+def read_normals_txt(path: Path, *, with_identity: bool = False) -> pl.DataFrame:
+    """Read one Direct ZIP climate-normal table from Bronze.
+
+    Per-file Parquet keeps the source filename, so its existing schema is left
+    alone. A combined table requests *with_identity*: its English source's
+    filename and preamble supply the parameter, unit and normal period that the
+    station rows cannot identify on their own. Refuse an unfamiliar identity
+    rather than silently publishing values without their measurement context.
+    """
+    frame = pl.read_csv(
         path,
         separator="\t",
         skip_rows=8,
@@ -315,6 +326,26 @@ def read_normals_txt(path: Path) -> pl.DataFrame:
         infer_schema_length=None,
         try_parse_dates=True,
         truncate_ragged_lines=True,
+    )
+    if not with_identity:
+        return frame
+    match = _NORMALS_EN_FILENAME.fullmatch(path.name)
+    if match is None:
+        raise ValueError(f"Cannot identify English climate-normal table {path.name!r}.")
+    parameter, period = match.groups()
+    with path.open(encoding="latin1") as source:
+        preamble = list(islice(source, 8))
+    header = preamble[6].strip() if len(preamble) > 6 else ""
+    parts = header.rsplit(" / ", 2)
+    if len(parts) != 3 or not parts[1].strip() or parts[2] != f"Normals {period}":
+        raise ValueError(f"Cannot identify unit and normal period in {path.name!r}.")
+    # The published files include blank tab-delimited rows. Drop only rows
+    # without any source value before identity literals would make them nonempty.
+    return frame.filter(~pl.all_horizontal(pl.all().is_null())).with_columns(
+        pl.lit(parameter).alias("parameter"),
+        pl.lit(parts[1].strip()).alias("unit"),
+        pl.lit(period).alias("normal_period"),
+        pl.lit(path.name).alias("source_file"),
     )
 
 
@@ -406,7 +437,12 @@ def group_csv_files(csv_dir: Path, collection_key: str) -> dict[tuple[str, ...],
     must agree with the Parquet converter on where the boundaries are — these
     are upstream naming rules, and two copies of them drift.
     """
-    csv_files = [f for f in sorted(csv_dir.glob("*.csv")) if "_meta_" not in f.name]
+    return group_csv_paths(sorted(csv_dir.glob("*.csv")), collection_key)
+
+
+def group_csv_paths(csv_files: list[Path], collection_key: str) -> dict[tuple[str, ...], list[Path]]:
+    """Group paths using the same naming rules, including paths from a remote listing."""
+    csv_files = [f for f in csv_files if "_meta_" not in f.name]
     if kind(collection_key) is DatasetKind.ARCHIVE_CSV:
         csv_files = [path for path in csv_files if indoor_station(path.name) is not None]
     groups: dict[tuple[str, ...], list[Path]] = {}

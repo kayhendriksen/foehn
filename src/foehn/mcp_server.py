@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, ParamSpec, TypeVar
 
 import polars as pl
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 import foehn
 from foehn import registry
+from foehn._urls import redact_urls
 from foehn.collections import (
     CATEGORIES,
     CATEGORY_LABELS,
@@ -32,6 +36,7 @@ from foehn.collections import (
     options,
 )
 from foehn.docstrings import renders
+from foehn.fetch import FetchError
 from foehn.metadata import TABLES
 from foehn.workspace import DATA_DIR_ENV, user_cache_root
 
@@ -246,7 +251,36 @@ def _grid_data_dir() -> Path | None:
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 
-@mcp.tool(title="List datasets", annotations=_READ_ONLY)
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Translate anticipated library failures at the MCP protocol boundary.
+
+    Keep the Python functions' exception contract. Only the registered tool
+    translates validation and network failures; unexpected failures retain the
+    SDK's masking. In particular, response-model ValidationError subclasses
+    ValueError but describes an implementation/data problem, not a bad query.
+    """
+
+    def register(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        @wraps(fn)
+        def invoke(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            try:
+                return fn(*args, **kwargs)
+            except (ValueError, FetchError, ImportError) as exc:
+                if isinstance(exc, ValueError) and type(exc) is not ValueError:
+                    raise
+                raise ToolError(redact_urls(str(exc))) from None
+
+        mcp.tool(title=title, annotations=annotations)(invoke)
+        return fn
+
+    return register
+
+
+@_tool(title="List datasets", annotations=_READ_ONLY)
 @renders(**_VOCABULARY)
 def list_datasets(category: str | None = None) -> list[Dataset]:
     """List all available MeteoSwiss datasets.
@@ -266,7 +300,7 @@ def list_datasets(category: str | None = None) -> list[Dataset]:
     return [Dataset(**d) for d in datasets]
 
 
-@mcp.tool(title="Load data", annotations=_READ_ONLY)
+@_tool(title="Load data", annotations=_READ_ONLY)
 @renders(**_VOCABULARY)
 def load_data(
     dataset: str,
@@ -351,7 +385,7 @@ def load_data(
     return df.to_dicts()
 
 
-@mcp.tool(title="Describe data", annotations=_READ_ONLY)
+@_tool(title="Describe data", annotations=_READ_ONLY)
 @renders(**_VOCABULARY)
 def describe_data(
     dataset: str,
@@ -436,7 +470,7 @@ def describe_data(
     )
 
 
-@mcp.tool(title="Describe grid", annotations=_GRID_INSPECT)
+@_tool(title="Describe grid", annotations=_GRID_INSPECT)
 def describe_grid(
     dataset: str,
     match: str | None = None,
@@ -517,7 +551,7 @@ def describe_grid(
     )
 
 
-@mcp.tool(title="Get parameters", annotations=_READ_ONLY)
+@_tool(title="Get parameters", annotations=_READ_ONLY)
 def get_parameters(dataset: str) -> list[Parameter]:
     """Get parameter descriptions for a dataset.
 
@@ -533,7 +567,7 @@ def get_parameters(dataset: str) -> list[Parameter]:
     return [Parameter(**row) for row in foehn.parameters(dataset).to_dicts()]
 
 
-@mcp.tool(title="Get stations", annotations=_READ_ONLY)
+@_tool(title="Get stations", annotations=_READ_ONLY)
 def get_stations(dataset: str) -> list[Station]:
     """Get station metadata for a dataset.
 
@@ -547,7 +581,7 @@ def get_stations(dataset: str) -> list[Station]:
     return [Station(**row) for row in foehn.stations(dataset).to_dicts()]
 
 
-@mcp.tool(title="Get forecast points", annotations=_READ_ONLY)
+@_tool(title="Get forecast points", annotations=_READ_ONLY)
 def get_points(dataset: str, query: str | None = None) -> list[Point]:
     """Get the forecast points of a point-forecast dataset ("forecast_local").
 
@@ -573,7 +607,7 @@ def get_points(dataset: str, query: str | None = None) -> list[Point]:
     return [Point(**row) for row in df.to_dicts()]
 
 
-@mcp.tool(title="Get inventory", annotations=_READ_ONLY)
+@_tool(title="Get inventory", annotations=_READ_ONLY)
 def get_inventory(dataset: str) -> list[InventoryEntry]:
     """Get the data inventory for a dataset.
 
