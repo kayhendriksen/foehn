@@ -171,7 +171,7 @@ def test_to_zarr_grib2_writes_store(fetcher, tmp_path):
     _write_grib2(base / "icon-ch1-eps-202605231500-0-t_2m-ctrl.grib2")
 
     store = to_zarr("forecast_icon_ch1", data_dir=tmp_path, match="t_2m-ctrl")
-    assert store.name == "forecast_icon_ch1__t_2m_ctrl.zarr"
+    assert store == Workspace(tmp_path).zarr("forecast_icon_ch1", "t_2m-ctrl")
     assert store.exists()
     assert "t2m" in xr.open_zarr(store).data_vars
 
@@ -270,7 +270,7 @@ def test_to_zarr_radar_writes_store(fetcher, tmp_path):
     write_odim_composite(base / "cpc2613000000_00060.001.h5")
 
     store = to_zarr("radar_precip", data_dir=tmp_path, match="cpc2613000000")
-    assert store.name == "radar_precip__cpc2613000000.zarr"
+    assert store == Workspace(tmp_path).zarr("radar_precip", "cpc2613000000")
     assert store.exists()
     assert "acrr" in xr.open_zarr(store).data_vars
 
@@ -557,8 +557,8 @@ def test_to_zarr_match_yields_distinct_stores(fetcher, tmp_path):
     s1 = to_zarr("surface_derived_grid", data_dir=tmp_path, match="rhiresd")
     s2 = to_zarr("surface_derived_grid", data_dir=tmp_path, match="tabsd")
 
-    assert s1.name == "surface_derived_grid__rhiresd.zarr"
-    assert s2.name == "surface_derived_grid__tabsd.zarr"
+    assert s1 == Workspace(tmp_path).zarr("surface_derived_grid", "rhiresd")
+    assert s2 == Workspace(tmp_path).zarr("surface_derived_grid", "tabsd")
     assert s1 != s2
     assert s1.exists()
     assert s2.exists()
@@ -693,12 +693,13 @@ def test_append_writes_in_place_without_copying_the_existing_store(tmp_path):
 
 
 def test_grid_reader_append_targets_the_existing_store(fetcher, tmp_path):
+    xr = pytest.importorskip("xarray")
     from foehn import grids, registry
     from foehn.workspace import Workspace
 
     store = tmp_path / "existing.zarr"
     store.mkdir()
-    dataset = object()
+    dataset = xr.Dataset()
     reader = registry.spec("surface_derived_grid").grid
     assert reader is not None
 
@@ -1911,3 +1912,110 @@ def test_a_shared_snapshot_goes_only_when_its_last_scope_ends(tmp_path):
         assert outer[0].exists()
 
     assert not outer[0].parent.exists()
+
+
+def test_a_combine_error_never_retries_with_undecoded_times(tmp_path):
+    """Different epochs can encode the same instant; raw values cannot resolve a conflict."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    files = [tmp_path / "a.nc", tmp_path / "b.nc"]
+    for path, value, stamp, units in zip(
+        files, [1, 9], [0, 1], ["days since 2020-01-01", "days since 2019-12-31"], strict=True
+    ):
+        xr.Dataset({"v": ("time", [value])}, coords={"time": ("time", [stamp], {"units": units})}).to_netcdf(
+            path, engine="h5netcdf"
+        )
+
+    with pytest.raises(ValueError, match="Could not combine"):
+        grids.open_netcdf(files, dataset="surface_derived_grid")
+
+
+def test_an_unrelated_file_open_error_does_not_disable_time_decoding(tmp_path):
+    xr = pytest.importorskip("xarray")
+    with (
+        patch.object(xr, "open_dataset", side_effect=ValueError("invalid variable shape")) as opened,
+        pytest.raises(ValueError, match="invalid variable shape"),
+    ):
+        grids.open_netcdf([tmp_path / "a.nc"], dataset="surface_derived_grid")
+
+    assert opened.call_count == 1
+
+
+def test_boundary_delimited_matches_do_not_overwrite_a_broader_store(fetcher, tmp_path):
+    """Real CH2025 names distinguish tas from tasmax; stripping delimiters loses that distinction."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    import numpy as np
+
+    base = tmp_path / "bronze" / "climate_scenarios_grid"
+    names = [f"ogd-climate-scenarios-ch2025-grid_ch_{var}_clmcom-cclm4-cccma_gwl1.5.nc" for var in ("tas", "tasmax")]
+    for name, var in zip(names, ("tas", "tasmax"), strict=True):
+        _write_nc(base / name, xr, np, var=var)
+    fetcher.any_items = _items_for(*names)
+
+    broad = to_zarr("climate_scenarios_grid", data_dir=tmp_path, match="tas")
+    narrow = to_zarr("climate_scenarios_grid", data_dir=tmp_path, match="_tas_")
+
+    assert broad != narrow
+    with xr.open_zarr(broad) as ds:
+        assert set(ds.data_vars) == {"tas", "tasmax"}
+    with xr.open_zarr(narrow) as ds:
+        assert set(ds.data_vars) == {"tas"}
+
+
+@pytest.mark.parametrize("outcome", ["success", "write_failure", "rechunk_failure", "selection_failure"])
+def test_conversion_releases_every_source_revision(fetcher, tmp_path, monkeypatch, outcome):
+    """Only a Path escapes to_zarr: no reader needs its snapshots after success or failure."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("zarr")
+    base = tmp_path / "bronze" / "surface_derived_grid"
+    base.mkdir(parents=True)
+    fetcher.any_items = _items_for("grid.nc")
+    opened, closed = [], []
+    real_open = grids._open_grid
+
+    def tracking_open(*args, **kwargs):
+        ds = real_open(*args, **kwargs)
+        opened.append(ds)
+        close = ds._close
+
+        def tracking_close():
+            closed.append(ds)
+            if close is not None:
+                close()
+
+        ds.set_close(tracking_close)
+        return ds
+
+    monkeypatch.setattr(grids, "_open_grid", tracking_open)
+    options = {}
+    if outcome == "write_failure":
+
+        def fail_write(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(grids, "_write_zarr", fail_write)
+    elif outcome == "rechunk_failure":
+
+        def fail_rechunk():
+            raise ImportError("no dask")
+
+        monkeypatch.setattr(grids, "_require_dask", fail_rechunk)
+        options["rechunk"] = {"x": 1}
+    elif outcome == "selection_failure":
+        options["variables"] = "missing"
+
+    for revision in range(3):
+        replacement = base / ".replacement.nc"
+        xr.Dataset({"v": ("x", [float(revision)])}).to_netcdf(replacement, engine="h5netcdf")
+        replacement.replace(base / "grid.nc")
+        if outcome == "success":
+            to_zarr("surface_derived_grid", data_dir=tmp_path, **options)
+        else:
+            with pytest.raises((OSError, ImportError, KeyError)):
+                to_zarr("surface_derived_grid", data_dir=tmp_path, **options)
+
+        assert not list(base.glob(".foehn-snapshot-*"))
+        assert any(ds is opened[-1] for ds in closed)

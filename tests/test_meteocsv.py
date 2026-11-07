@@ -22,6 +22,7 @@ from foehn.meteocsv import (
     parse_climate_scenarios_csv,
     parse_csv_bytes,
     parse_metadata_types,
+    read_normals_txt,
     scan_climate_scenarios_csv,
     source_columns_for,
     utf8_meteoswiss_csv,
@@ -29,6 +30,28 @@ from foehn.meteocsv import (
 from foehn.workspace import Workspace
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def test_normals_identity_is_opt_in_so_per_file_parquet_keeps_its_schema(tmp_path):
+    path = tmp_path / "climate-reports-normtables_fkl010m0_1991-2020_en.txt"
+    shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", path)
+
+    original = read_normals_txt(path)
+    combined = read_normals_txt(path, with_identity=True)
+
+    assert combined.select(original.columns).equals(original)
+    assert not {"parameter", "unit", "normal_period", "source_file"} & set(original.columns)
+    assert combined["parameter"].unique().to_list() == ["fkl010m0"]
+    assert combined["unit"].unique().to_list() == ["meter/second"]
+
+
+@pytest.mark.parametrize("filename", ["unknown_en.txt", "climate-reports-normtables_fkl010m0_1961-1990_en.txt"])
+def test_normals_refuse_unknown_or_inconsistent_identity(tmp_path, filename):
+    path = tmp_path / filename
+    shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", path)
+
+    with pytest.raises(ValueError, match="Cannot identify"):
+        read_normals_txt(path, with_identity=True)
 
 
 @pytest.fixture

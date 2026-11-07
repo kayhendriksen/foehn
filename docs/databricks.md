@@ -8,10 +8,14 @@ foehn ships a Declarative Automation Bundle for deploying daily data ingestion i
 
 ```bash
 pip install "foehn[databricks]"
-pip install databricks-cli
 ```
 
-The `databricks` extra adds PySpark 4, Delta 4, and Polars' compatibility runtime
+Install the current [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install)
+using its supported installer, then check `databricks --version`. The legacy
+Python package `databricks-cli` does not provide the `bundle` commands used here.
+
+The `databricks` extra adds PySpark 4 with its SQL dependencies (Arrow, pandas,
+and NumPy), Delta 4, and Polars' compatibility runtime
 (`polars[rtcompat]`) for CPUs without AVX2; Polars uses it automatically when it
 is installed. PySpark 4 is required: the ingest hands Spark Arrow tables, which
 PySpark 3.5 cannot read. Running Spark locally needs Java 17 or 21. Earlier versions installed `polars-lts-cpu` instead, which ships
@@ -75,15 +79,25 @@ them in the Jobs UI afterwards.
 
 The Delta ingest path uses the same MeteoSwiss CSV readers as `foehn.load()` and
 the Parquet conversion path. Standard station CSVs, preamble climate scenarios,
-local forecasts, indoor archive members, metadata CSVs, and climate-normal TXT
-files therefore receive the same column names, timestamps, encodings, and dtype
-normalisation before Spark writes them. Where a name holds a character Delta
+local forecasts, indoor archive members, and metadata CSVs therefore receive the
+same column names, timestamps, encodings, and dtype normalisation before Spark
+writes them. Where a name holds a character Delta
 refuses — the climate normals' `Altitude [m asl]`, for one — the table is written
 with Delta column mapping (`delta.columnMapping.mode = name`) so the name is kept;
 such a table needs a Delta reader that supports column mapping, which Databricks
 does. Overwrite passes replace the stored
 schema and chunked append passes merge compatible additions, so a normalized
 schema change can migrate an existing table.
+
+The `climate_normals` Delta table combines only the English TXT variants from
+the archive, so translations do not duplicate measurements. It retains the
+English station and monthly-value columns and adds `parameter` (MeteoSwiss
+shortcode), `unit`, `normal_period` (for example `1991-2020`), and `source_file`.
+`normal_period` identifies the source's 30-year normal; the original
+`Reference period` column describes the station's available reference interval.
+Parameter identity must be included when selecting or aggregating observations.
+The separate per-file climate-normal Parquet outputs retain their existing
+schema and filenames.
 
 A table is only replaced once all of its input has been read and written.
 Chunked historical groups are built in a `<table>__foehn_staging_<id>` table,
@@ -93,3 +107,39 @@ leave its staging table behind; nothing publishes it, and it can be dropped by
 hand. Any table that fails to read or write is reported with
 its error and makes the job exit non-zero; a dataset with no input is reported
 as skipped and does not.
+
+An entire rolling group that stays unlisted upstream for seven days is reconciled
+too, once a later successful download has recorded that. Its managed
+`<dataset>_<frequency>_recent` or `<dataset>_<frequency>_now` Delta table is
+emptied, preserving its schema, comments, and grants. Reserve these exact names
+in the configured schema for foehn outputs. Historical, unsliced, metadata,
+and unrelated tables are retained. Missing local files without a successful
+listing do not authorize emptying a table.
+
+## Rebuild an existing climate-normal table
+
+Earlier versions combined parameters and languages without retaining their
+identity. Those rows cannot be repaired reliably from the existing Delta table;
+rebuild it from the TXT files in Bronze after deploying this version. On a
+Databricks compute environment with the deployed wheel and script, run:
+
+```bash
+python scripts/ingest_delta.py --climate-normals-only \
+  --catalog main --schema meteoswiss --volume landing
+```
+
+The same arguments can be supplied to a one-off Spark Python task pointing at
+the deployed `scripts/ingest_delta.py`. This replaces only
+`main.meteoswiss.climate_normals`, with its schema migrated in the overwrite;
+the previous table stays available if parsing or writing fails. Missing Bronze
+input makes this targeted rebuild fail instead of reporting a successful skip.
+If input is missing, download it first on the same Databricks environment:
+
+```bash
+foehn download climate_normals --no-parquet \
+  --data-dir /Volumes/main/meteoswiss/landing
+```
+
+After rebuilding, check that `parameter`, `unit`, `normal_period`, and
+`source_file` are populated, and update downstream queries to include parameter
+identity. Review station/parameter/normal-period duplicates before aggregating.

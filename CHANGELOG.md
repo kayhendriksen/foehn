@@ -10,6 +10,15 @@ changes**. The same notes are published with each
 
 ### Breaking changes
 
+- **Filtered default Zarr store names now include an exact-filter digest.**
+  Filters such as `tas` and `_tas_` previously shared a slug and could overwrite
+  each other's store. Existing stores are retained; rebuild with the intended
+  filter, or explicitly choose `store=` after checking its contents.
+- **The combined climate-normal Delta schema now retains measurement identity.**
+  Only English variants are combined, with `parameter`, `unit`, `normal_period`,
+  and `source_file`. Rebuild existing tables from Bronze with the new
+  `--climate-normals-only` ingestion flag; downstream queries must include the
+  parameter. Per-file Parquet schemas remain unchanged.
 - **The CLI writes progress and log output to stderr**, not stdout. stdout now
   carries only a command's output (tables, CSV/JSON, the version report), so
   `foehn load ... --output-format csv > file.csv` captures data and nothing
@@ -72,6 +81,21 @@ changes**. The same notes are published with each
 
 ### Bug fixes
 
+- Rolling groups that stay unlisted for seven days are reconciled once a later
+  successful listing confirms it: foehn-authored Parquet outputs are removed and
+  managed Delta tables emptied. Historical and unsliced outputs are retained, as
+  is any file whose foehn source footer cannot be read.
+- Failed forced repairs survive cursor filtering; archive publication recovers
+  its backup before recreating a missing target after a process crash.
+- Grid merge errors no longer trigger a raw-time retry. Internal Zarr writes
+  close datasets and release read snapshots on success and failure.
+- MCP clients receive actionable validation, network and missing-extra errors;
+  unexpected failures stay masked. URL diagnostics redact userinfo, query
+  strings and fragments, including repeated URLs in downstream errors.
+- The Databricks extra declares PySpark's SQL dependencies, so clean installs
+  include the Arrow handoff requirements. Dependency versions are unchanged.
+- Databricks documentation uses the current CLI installer; the GRIB2 CLI
+  example uses `--match=-t_2m-ctrl` so argparse accepts its leading hyphen.
 - **`foehn download` stopped at the first dataset that failed outright.** A
   STAC listing that still failed after its retries ended the whole run, so every
   dataset after it went undownloaded — and the Databricks ingest task, which
