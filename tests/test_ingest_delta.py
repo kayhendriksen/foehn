@@ -88,11 +88,14 @@ def test_table_suffix():
 
 
 def test_delta_reconciles_only_retired_rolling_tables(tmp_path, mock_spark):
+    from datetime import UTC, datetime
     from types import SimpleNamespace
 
-    from foehn.retention import record_listing
+    from foehn.retention import RETIREMENT_GRACE, record_listing
 
-    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"])
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"], now=start)
+    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"], now=start + RETIREMENT_GRACE)
     mock_spark.sql.return_value.collect.return_value = [
         SimpleNamespace(tableName=name, isTemporary=False)
         for name in ("smn_d_recent", "smn_h_recent", "smn_d_historical", "smn_m", "unrelated_d_recent")
@@ -103,6 +106,16 @@ def test_delta_reconciles_only_retired_rolling_tables(tmp_path, mock_spark):
     queries = [args[0] for args, _ in mock_spark.sql.call_args_list]
     assert [q for q in queries if q.startswith("DELETE")] == ["DELETE FROM `main`.`weather`.`smn_d_recent`"]
     assert tally.failed == 0
+
+
+def test_delta_keeps_a_table_through_one_incomplete_listing(tmp_path, mock_spark):
+    from foehn.retention import record_listing
+
+    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"])
+
+    _ingest_collection(mock_spark, "smn", tmp_path, "`main`", "`weather`")
+
+    assert not any(args[0].startswith("DELETE") for args, _ in mock_spark.sql.call_args_list)
 
 
 def test_delta_does_not_reconcile_without_authoritative_listing(tmp_path, mock_spark):

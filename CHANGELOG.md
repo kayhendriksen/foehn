@@ -81,9 +81,10 @@ changes**. The same notes are published with each
 
 ### Bug fixes
 
-- Entire retired rolling groups are reconciled after a successful listing:
-  foehn-authored Parquet outputs are removed and managed Delta tables emptied.
-  Historical and unsliced outputs are retained.
+- Rolling groups that stay unlisted for seven days are reconciled once a later
+  successful listing confirms it: foehn-authored Parquet outputs are removed and
+  managed Delta tables emptied. Historical and unsliced outputs are retained, as
+  is any file whose foehn source footer cannot be read.
 - Failed forced repairs survive cursor filtering; archive publication recovers
   its backup before recreating a missing target after a process crash.
 - Grid merge errors no longer trigger a raw-time retry. Internal Zarr writes

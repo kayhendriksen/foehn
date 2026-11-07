@@ -136,9 +136,11 @@ longer holds, and **Forecast runs** older than the one just selected. Grid kinds
 are never pruned: their Bronze is the `open_dataset` cache, and radar's is an
 archive upstream does not keep.
 Successful station refreshes also record their full filename listing in
-`.foehn-rolling-listing.json`. The `retention` module uses that evidence to
-reconcile completely absent rolling groups in Parquet and Delta. Missing local
-files alone cannot retire an output; historical and unsliced groups are kept.
+`.foehn-rolling-listing.json`, and when each dropped file first went missing. The
+`retention` module uses that evidence to reconcile rolling groups in Parquet and
+Delta once they have stayed unlisted for seven days, so one incomplete listing
+cannot retire an output. Nor can missing local files alone; historical and
+unsliced groups are kept.
 _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 
 **Fetcher**:

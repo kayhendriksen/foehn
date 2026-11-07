@@ -166,14 +166,22 @@ def _retire_parquet(dataset: str, workspace: Workspace) -> int:
     for group in retired_groups(workspace.bronze(dataset), dataset, candidates):
         path = candidates[group]
         try:
-            # An unrelated/legacy file without our source footer is not ours to remove.
             sources = json.loads(pl.read_parquet_metadata(path).get(_SOURCES_KEY, "null"))
-            if isinstance(sources, list) and sources:
-                path.unlink()
-                logger.info("  Removed retired rolling output %s", path.name)
         except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
+            # Not a failure: its source is gone, so no run could ever repair it,
+            # and counting it would hold the Dataset's cursor back for good.
+            logger.warning("  Keeping retired output %s: cannot read its source footer (%s)", path.name, exc)
+            continue
+        # An unrelated/legacy file without our source footer is not ours to remove.
+        if not (isinstance(sources, list) and sources):
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
             failed += 1
-            logger.warning("  Could not reconcile %s: %s", path.name, exc)
+            logger.warning("  Could not remove retired output %s: %s", path.name, exc)
+        else:
+            logger.info("  Removed retired rolling output %s", path.name)
     return failed
 
 

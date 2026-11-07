@@ -108,8 +108,8 @@ hand. Any table that fails to read or write is reported with
 its error and makes the job exit non-zero; a dataset with no input is reported
 as skipped and does not.
 
-After a successful download records its full listing, an entire rolling group
-that disappears upstream is reconciled too. Its managed
+An entire rolling group that stays unlisted upstream for seven days is reconciled
+too, once a later successful download has recorded that. Its managed
 `<dataset>_<frequency>_recent` or `<dataset>_<frequency>_now` Delta table is
 emptied, preserving its schema, comments, and grants. Reserve these exact names
 in the configured schema for foehn outputs. Historical, unsliced, metadata,

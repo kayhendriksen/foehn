@@ -12,6 +12,7 @@ installed. Anywhere PySpark is missing, it skips.
 """
 
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ pytest.importorskip("delta", reason="delta-spark not installed (the databricks e
 
 # Imported only once pyspark is known to be there.
 from foehn.meteocsv import read_normals_txt
-from foehn.retention import record_listing
+from foehn.retention import RETIREMENT_GRACE, record_listing
 from scripts.ingest_delta import (
     _ingest_climate_normals,
     _ingest_collection,
@@ -109,8 +110,11 @@ def test_retired_rolling_group_is_emptied_without_losing_schema_or_historical_da
 
     for path in csv_dir.glob("*_d_recent.csv"):
         path.unlink()
-    # Simulate the authority recorded by a successful full upstream refresh.
-    record_listing(csv_dir, [path.name for path in csv_dir.glob("*.csv")])
+    # Simulate the authority recorded by successful refreshes a grace period apart.
+    names = [path.name for path in csv_dir.glob("*.csv")]
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    record_listing(csv_dir, names, now=start)
+    record_listing(csv_dir, names, now=start + RETIREMENT_GRACE)
 
     for _ in range(2):
         refreshed = _ingest_collection(spark, "smn", csv_dir, CATALOG, SCHEMA)

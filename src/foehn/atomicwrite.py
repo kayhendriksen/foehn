@@ -252,9 +252,17 @@ def recover_directory(path: Path) -> None:
 
     Call before creating a missing target: an empty replacement directory hides
     the missing-path state and would make the complete backup look obsolete.
+
+    Every dataset lock lands here, so the usual case must not need the directory
+    lock: some filesystems refuse to flock a directory (Linux NFS needs a
+    descriptor open for writing), which would fail each refresh and read there.
+    Checking first is safe because a publication's backup only exists while its
+    publisher holds the same dataset lock, or after that publisher was killed.
     """
-    with _directory_lock(path.parent):
-        _recover_directory(path, path.with_name(_BACKUP_PREFIX + path.name))
+    backup_path = path.with_name(_BACKUP_PREFIX + path.name)
+    if backup_path.exists():
+        with _directory_lock(path.parent):
+            _recover_directory(path, backup_path)
 
 
 @contextlib.contextmanager

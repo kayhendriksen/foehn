@@ -159,9 +159,10 @@ dropped), and `forecast_local` runs older than the one just downloaded. A
 `historical` or unsliced file is a record and is kept, and grid datasets are
 never pruned — for radar, Bronze is the archive.
 
-If a whole rolling group disappears, conversion removes its foehn-generated
-Parquet output after a successful listing. Files without foehn source metadata
-are retained. A missing local source alone does not authorize output removal.
+If a whole rolling group stays unlisted upstream for seven days, conversion
+removes its foehn-generated Parquet output once a later successful listing
+confirms it. Files without readable foehn source metadata are retained. A missing
+local source alone does not authorize output removal.
 Failed forced repairs remain pending and are retried on the next incremental
 download, even when the upstream timestamp has not changed.
 
