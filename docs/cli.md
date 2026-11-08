@@ -159,6 +159,13 @@ dropped), and `forecast_local` runs older than the one just downloaded. A
 `historical` or unsliced file is a record and is kept, and grid datasets are
 never pruned — for radar, Bronze is the archive.
 
+If a whole rolling group stays unlisted upstream for seven days, conversion
+removes its foehn-generated Parquet output once a later successful listing
+confirms it. Files without readable foehn source metadata are retained. A missing
+local source alone does not authorize output removal.
+Failed forced repairs remain pending and are retried on the next incremental
+download, even when the upstream timestamp has not changed.
+
 ```bash
 foehn download              # all non-grid datasets
 foehn download smn pollen   # specific datasets only
@@ -219,8 +226,10 @@ foehn open radar_precip --match cpcYYDDDHHMM                   # one radar compo
 ## `foehn to-zarr DATASET`
 
 Write a gridded (NetCDF, GRIB2, or HDF5/radar) dataset to a Zarr store under
-`<data_dir>/zarr/`. The default name encodes `--match` (`<dataset>__<match>.zarr`),
-so different slices don't overwrite each other; use `--out` for an explicit path.
+`<data_dir>/zarr/`. Filtered names include a readable part and a digest of the
+exact `--match` value (`<dataset>__<readable-match>__<digest>.zarr`), so boundary
+delimiters remain significant. Use `--out` for an explicit path. Older filtered
+stores without a digest are left untouched; see [migration guidance](grids.md#writing-to-zarr).
 (GRIB2 and radar collections require `--match`, like `foehn open`.)
 
 ```bash
@@ -229,7 +238,7 @@ foehn to-zarr surface_derived_grid --match rhiresd --out out/rain.zarr
 foehn to-zarr forecast_icon_ch1 --match YYYYMMDDHHMM-0-t_2m-ctrl
 foehn to-zarr radar_precip --match cpcYYDDDHHMM              # one timestep
 foehn to-zarr radar_precip --match cpcYYDDD --stack           # a day -> one (time, y, x) cube
-foehn to-zarr forecast_icon_ch1 --match -t_2m-ctrl --stack    # GRIB2 -> (time, step, values) cube
+foehn to-zarr forecast_icon_ch1 --match=-t_2m-ctrl --stack    # GRIB2 -> (time, step, values) cube
 ```
 
 | Flag | Description |

@@ -18,6 +18,11 @@ and ``grids`` reads. All three write to or read from the same directory, so all
 three speak this protocol. When only the read path did, an ordinary
 ``foehn.download()`` running beside it produced exactly the mixed set this is
 for, with nothing on disk to say so.
+
+Explicitly forced CSV refreshes use the same pending filenames for retry state:
+an invalidated local file must be repaired even when its upstream timestamp is
+older than the incremental cursor. CSV repairs clear independently; a grid set
+is released only after its complete refresh succeeds.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from foehn._locking import reentrant_lock
-from foehn.atomicwrite import write_text
+from foehn.atomicwrite import recover_directory, write_text
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +67,12 @@ def refresh_lock(out_dir: Path) -> Generator[None]:
     kinds publish by replacing the whole directory, and Windows will not rename
     a directory with a file open inside it.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
     with reentrant_lock(_lock_path(out_dir)):
+        # A killed archive publication can leave its complete previous version
+        # only in the backup. Recover before mkdir obscures that missing target,
+        # and while holding the dataset lock so a second caller cannot race it.
+        recover_directory(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
         yield
 
 

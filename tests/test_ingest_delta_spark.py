@@ -12,6 +12,7 @@ installed. Anywhere PySpark is missing, it skips.
 """
 
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,10 +21,13 @@ pytest.importorskip("pyspark", reason="pyspark not installed (the databricks ext
 pytest.importorskip("delta", reason="delta-spark not installed (the databricks extra)")
 
 # Imported only once pyspark is known to be there.
+from foehn.meteocsv import read_normals_txt
+from foehn.retention import RETIREMENT_GRACE, record_listing
 from scripts.ingest_delta import (
     _ingest_climate_normals,
     _ingest_collection,
     _ingest_radar,
+    _write_to_delta,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -94,6 +98,33 @@ def test_a_chunked_group_is_published_whole_and_its_staging_table_dropped(spark,
     assert not [name for name in tables if "foehn_staging" in name]
 
 
+def test_retired_rolling_group_is_emptied_without_losing_schema_or_historical_data(spark, tmp_path):
+    csv_dir = _smn_bronze(tmp_path, "recent")
+    for name in ("ogd-smn_ber_h_recent.csv", "ogd-smn_ber_d_historical.csv"):
+        shutil.copy(FIXTURES_DIR / "smn_sample.csv", csv_dir / name)
+    initial = _ingest_collection(spark, "smn", csv_dir, CATALOG, SCHEMA, historical=True)
+    assert initial.failed == 0
+    retired_table = _table("smn_d_recent")
+    before = spark.table(retired_table).schema
+    assert spark.table(retired_table).count() == 6
+
+    for path in csv_dir.glob("*_d_recent.csv"):
+        path.unlink()
+    # Simulate the authority recorded by successful refreshes a grace period apart.
+    names = [path.name for path in csv_dir.glob("*.csv")]
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    record_listing(csv_dir, names, now=start)
+    record_listing(csv_dir, names, now=start + RETIREMENT_GRACE)
+
+    for _ in range(2):
+        refreshed = _ingest_collection(spark, "smn", csv_dir, CATALOG, SCHEMA)
+        assert refreshed.failed == 0
+        assert spark.table(retired_table).count() == 0
+        assert spark.table(retired_table).schema == before  # includes column comments
+        assert spark.table(_table("smn_h_recent")).count() == 3
+        assert spark.table(_table("smn_d_historical")).count() == 3
+
+
 def test_radar_files_are_merged_by_path_and_reindexing_adds_nothing(spark, tmp_path):
     radar = tmp_path / "radar_precip"
     radar.mkdir()
@@ -109,15 +140,26 @@ def test_radar_files_are_merged_by_path_and_reindexing_adds_nothing(spark, tmp_p
     assert {row["product"] for row in rows} == {"CPC"}
 
 
-def test_climate_normals_land_as_one_table(spark, tmp_path):
+def test_climate_normals_rebuild_preserves_identity_without_translation_duplicates(spark, tmp_path):
     txt_dir = tmp_path / "climate_normals"
     txt_dir.mkdir()
-    shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", txt_dir / "sample.txt")
+    wind = txt_dir / "climate-reports-normtables_fkl010m0_1991-2020_en.txt"
+    shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", wind)
+    temperature = wind.read_text(encoding="latin1").replace(
+        "Wind speed scalar / meter/second", "Air temperature / degree Celsius"
+    )
+    (txt_dir / "climate-reports-normtables_tre200m0_1991-2020_en.txt").write_text(temperature, encoding="latin1")
+    shutil.copy(wind, txt_dir / "climate-reports-normtables_fkl010m0_1991-2020_it.txt")
+    # A pre-fix table lacks identity; an overwrite must migrate that schema too.
+    _write_to_delta(spark, read_normals_txt(wind), _table("climate_normals"))
 
     written, _, failed = _ingest_climate_normals(spark, tmp_path, CATALOG, SCHEMA)
 
     assert (written, failed) == (1, 0)
     table = spark.table(_table("climate_normals"))
-    assert table.count() > 0
+    assert table.count() == 4
+    assert {row["parameter"] for row in table.select("parameter").distinct().collect()} == {"fkl010m0", "tre200m0"}
+    assert table.select("Station", "parameter", "normal_period").distinct().count() == 4
+    assert table.filter("Station IS NULL OR unit IS NULL OR source_file IS NULL").count() == 0
     # The names the Parquet path publishes, kept — not renamed to suit Delta.
     assert "Altitude [m asl]" in table.columns

@@ -1088,3 +1088,121 @@ def test_no_cursor_keeps_every_item():
 
     items = [{"id": "a", "properties": {"updated": "2020-01-01T00:00:00Z"}}]
     assert _updated_since(items, None) == items
+
+
+def test_cli_incremental_retry_repairs_a_failed_forced_csv(tmp_path, fetcher):
+    from foehn.cli import main
+    from foehn.state import load_cursor
+
+    url = "https://data.geo.admin.ch/x/ogd-smn_tst_d_recent.csv"
+    fetcher.any_collection = {"assets": {}}
+    fetcher.any_items = [stac_item("tst", url, updated="2020-01-01T00:00:00Z")]
+    fetcher.add_body(url, b"value\n1\n", etag="v1")
+    args = ["download", "smn", "--no-parquet", "--data-dir", str(tmp_path)]
+    main(args)
+    workspace = Workspace(tmp_path)
+    assert load_cursor(workspace, "smn", ["recent"]) is not None
+    cached = workspace.bronze("smn") / "ogd-smn_tst_d_recent.csv"
+    cached.write_text("damaged")
+
+    fetcher.fail(url, FetchError("offline"))
+    with pytest.raises(SystemExit):
+        main([*args, "--full-refresh"])
+    fetcher.errors.clear()
+    fetcher.gets.clear()
+
+    main(args)
+
+    assert fetcher.gets == [url]
+    assert cached.read_bytes() == b"value\n1\n"
+    fetcher.gets.clear()
+    main(args)
+    assert fetcher.gets == []  # a successful repair clears its persistent retry state
+
+
+def test_incremental_retry_repairs_pending_grid_files_before_filtering(tmp_path):
+    from foehn import coherence
+
+    urls = [f"https://data.geo.admin.ch/x/{name}.nc" for name in ("a", "b")]
+    fake = _fake([stac_item("grid", *urls, updated="2020-01-01T00:00:00Z")], body=b"old")
+    workspace = Workspace(tmp_path)
+    registry.download("surface_derived_grid", workspace, fetcher=fake)
+    fake.default_body = b"fresh"
+    fake.fail(urls[1], FetchError("offline"))
+    assert registry.download("surface_derived_grid", workspace, force=True, fetcher=fake).failed == 1
+    fake.errors.clear()
+    fake.streams.clear()
+
+    result = registry.download("surface_derived_grid", workspace, since="2021-01-01T00:00:00Z", fetcher=fake)
+
+    assert result.failed == 0
+    assert set(fake.streams) == set(urls)
+    assert not coherence.blocked(workspace.bronze("surface_derived_grid"), ["a.nc", "b.nc"])
+    assert (workspace.bronze("surface_derived_grid") / "b.nc").read_bytes() == b"fresh"
+
+
+def test_forced_download_respects_an_explicit_since(tmp_path):
+    url = "https://data.geo.admin.ch/x/ogd-smn_tst_d_recent.csv"
+    fake = _fake([stac_item("tst", url)], body=b"old")
+    workspace = Workspace(tmp_path)
+    registry.download("smn", workspace, fetcher=fake)
+    fake.default_body = b"fresh"
+
+    result = registry.download("smn", workspace, since="2027-01-01T00:00:00Z", force=True, fetcher=fake)
+
+    assert result.downloaded == 0
+    assert (workspace.bronze("smn") / "ogd-smn_tst_d_recent.csv").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_archive_crash_recovery_preserves_the_previous_generation_offline(tmp_path, force):
+    import subprocess
+    import sys
+
+    from foehn.collections import CLIMATE_NORMALS_ZIP_URL
+
+    # Kill a real publication in the gap between its two renames. An ordinary
+    # exception would run rollback and would not reproduce process termination.
+    script = """
+import io
+import os
+import sys
+import zipfile
+from pathlib import Path
+from foehn.downloads import download_normals_zip
+from foehn.workspace import Workspace
+from tests.fakes import InMemoryFetcher
+workspace = Workspace(Path(sys.argv[1]))
+target = workspace.bronze('climate_normals')
+body = io.BytesIO()
+with zipfile.ZipFile(body, 'w') as archive:
+    archive.writestr('sample.txt', 'previous complete data')
+fetcher = InMemoryFetcher()
+fetcher.default_body = body.getvalue()
+download_normals_zip('climate_normals', workspace, fetcher=fetcher)
+replace = Path.replace
+def interrupted(path, destination):
+    result = replace(path, destination)
+    if path == target:
+        os._exit(73)
+    return result
+Path.replace = interrupted
+download_normals_zip('climate_normals', workspace, force=True, fetcher=fetcher)
+"""
+    killed = subprocess.run([sys.executable, "-c", script, str(tmp_path)], check=False)  # noqa: S603
+    assert killed.returncode == 73
+    workspace = Workspace(tmp_path)
+    target = workspace.bronze("climate_normals")
+    backup = target.with_name(".foehn-previous-climate_normals")
+    assert (backup / "sample.txt").read_text() == "previous complete data"
+
+    offline = _fake()
+    offline.fail(CLIMATE_NORMALS_ZIP_URL, FetchError("offline"))
+    if force:
+        with pytest.raises(FetchError, match="offline"):
+            download_normals_zip("climate_normals", workspace, force=True, fetcher=offline)
+    else:
+        assert download_normals_zip("climate_normals", workspace, fetcher=offline).skipped == 1
+
+    assert (target / "sample.txt").read_text() == "previous complete data"
+    assert not backup.exists()

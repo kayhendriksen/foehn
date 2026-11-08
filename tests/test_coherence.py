@@ -95,6 +95,17 @@ def test_the_lock_lives_beside_the_directory_it_guards(tmp_path):
         assert (out_dir.parent / f".climate_normals{coherence.LOCK}").exists()
 
 
+def test_a_refresh_with_no_backup_to_recover_takes_no_directory_lock(tmp_path):
+    """Linux NFS refuses to flock a read-only directory handle, which would fail every refresh there."""
+    out_dir = tmp_path / "bronze" / "smn"
+
+    with (
+        patch("foehn.atomicwrite._directory_lock", side_effect=OSError("flock refused")),
+        coherence.refresh_lock(out_dir),
+    ):
+        assert out_dir.is_dir()
+
+
 def test_concurrent_marker_updates_do_not_lose_entries(tmp_path):
     """Two failed refreshes for different matches each record their own names."""
 

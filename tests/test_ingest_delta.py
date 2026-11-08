@@ -43,7 +43,10 @@ def climate_normals_bronze_dir(tmp_path):
     """Bronze dir with climate normals TXT files."""
     cn_dir = tmp_path / "climate_normals"
     cn_dir.mkdir()
-    shutil.copy(FIXTURES_DIR / "climate_normals_sample.txt", cn_dir / "sample.txt")
+    shutil.copy(
+        FIXTURES_DIR / "climate_normals_sample.txt",
+        cn_dir / "climate-reports-normtables_fkl010m0_1991-2020_en.txt",
+    )
     return tmp_path
 
 
@@ -82,6 +85,42 @@ def test_table_suffix():
     assert _table_suffix(("d", "recent")) == "_d_recent"
     assert _table_suffix(("d",)) == "_d"
     assert _table_suffix(()) == ""
+
+
+def test_delta_reconciles_only_retired_rolling_tables(tmp_path, mock_spark):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from foehn.retention import RETIREMENT_GRACE, record_listing
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"], now=start)
+    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"], now=start + RETIREMENT_GRACE)
+    mock_spark.sql.return_value.collect.return_value = [
+        SimpleNamespace(tableName=name, isTemporary=False)
+        for name in ("smn_d_recent", "smn_h_recent", "smn_d_historical", "smn_m", "unrelated_d_recent")
+    ]
+
+    tally = _ingest_collection(mock_spark, "smn", tmp_path, "`main`", "`weather`")
+
+    queries = [args[0] for args, _ in mock_spark.sql.call_args_list]
+    assert [q for q in queries if q.startswith("DELETE")] == ["DELETE FROM `main`.`weather`.`smn_d_recent`"]
+    assert tally.failed == 0
+
+
+def test_delta_keeps_a_table_through_one_incomplete_listing(tmp_path, mock_spark):
+    from foehn.retention import record_listing
+
+    record_listing(tmp_path, ["ogd-smn_aaa_h_recent.csv"])
+
+    _ingest_collection(mock_spark, "smn", tmp_path, "`main`", "`weather`")
+
+    assert not any(args[0].startswith("DELETE") for args, _ in mock_spark.sql.call_args_list)
+
+
+def test_delta_does_not_reconcile_without_authoritative_listing(tmp_path, mock_spark):
+    _ingest_collection(mock_spark, "smn", tmp_path, "`main`", "`weather`")
+    assert not any(args[0].startswith("DELETE") for args, _ in mock_spark.sql.call_args_list)
 
 
 # ── _scan_and_collect ────────────────────────────────────────────────────────
@@ -529,6 +568,91 @@ def test_ingest_climate_normals(climate_normals_bronze_dir, mock_spark):
     mock_spark.createDataFrame.assert_called_once()
 
 
+def test_climate_normals_keep_measurement_identity_and_skip_translations(climate_normals_bronze_dir, mock_spark):
+    """Two measurements for one station/period must remain distinguishable, with no translation duplicates."""
+    folder = climate_normals_bronze_dir / "climate_normals"
+    wind = folder / "climate-reports-normtables_fkl010m0_1991-2020_en.txt"
+    # The real archive includes an empty tab-delimited row in each source.
+    wind.write_text(wind.read_text(encoding="latin1") + "\t" * 16 + "\n", encoding="latin1")
+    temperature = wind.read_text(encoding="latin1").replace(
+        "Wind speed scalar / meter/second", "Air temperature / degree Celsius"
+    )
+    (folder / "climate-reports-normtables_tre200m0_1991-2020_en.txt").write_text(temperature, encoding="latin1")
+    (folder / "climate-reports-normtables_fkl010m0_1991-2020_it.txt").write_text(
+        wind.read_text(encoding="latin1").replace("Station", "Stazione"), encoding="latin1"
+    )
+
+    with patch("scripts.ingest_delta._write_to_delta") as write:
+        tally = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
+
+    assert (tally.written, tally.failed) == (1, 0)
+    frame = write.call_args.args[1]
+    assert frame.height == 4  # two stations per measurement, one language
+    assert set(frame["parameter"]) == {"fkl010m0", "tre200m0"}
+    assert set(frame["unit"]) == {"meter/second", "degree Celsius"}
+    assert frame["normal_period"].unique().to_list() == ["1991-2020"]
+    assert frame["Station"].null_count() == 0
+    assert "Stazione" not in frame.columns
+    assert all(name.endswith("_en.txt") for name in frame["source_file"])
+    assert frame.select("Station", "parameter", "normal_period").unique().height == frame.height
+
+
+def test_climate_normals_refuse_input_without_english_tables(tmp_path, mock_spark):
+    folder = tmp_path / "climate_normals"
+    folder.mkdir()
+    shutil.copy(
+        FIXTURES_DIR / "climate_normals_sample.txt",
+        folder / "climate-reports-normtables_fkl010m0_1991-2020_de.txt",
+    )
+    with patch("scripts.ingest_delta._write_to_delta") as write:
+        tally = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
+
+    assert tally.failed == 1
+    write.assert_not_called()
+
+
+def test_climate_normals_only_rebuild_touches_no_other_dataset(climate_normals_bronze_dir):
+    from foehn.workspace import Workspace
+
+    workspace = Workspace(climate_normals_bronze_dir / "volume")
+    shutil.copytree(climate_normals_bronze_dir / "climate_normals", workspace.bronze("climate_normals"))
+    with (
+        patch.dict("sys.modules", {"pyspark.sql": MagicMock()}),
+        patch("scripts.ingest_delta.Workspace", return_value=workspace),
+        patch("scripts.ingest_delta._write_to_delta") as write,
+        patch("scripts.ingest_delta._ingest_collection") as others,
+        patch("sys.argv", ["ingest_delta.py", "--climate-normals-only"]),
+    ):
+        main()
+
+    others.assert_not_called()
+    assert [call.args[2] for call in write.call_args_list] == ["`main`.`meteoswiss`.`climate_normals`"]
+
+
+def test_climate_normals_only_rebuild_refuses_missing_input(tmp_path):
+    from foehn.workspace import Workspace
+
+    with (
+        patch.dict("sys.modules", {"pyspark.sql": MagicMock()}),
+        patch("scripts.ingest_delta.Workspace", return_value=Workspace(tmp_path)),
+        patch("sys.argv", ["ingest_delta.py", "--climate-normals-only"]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+
+    assert exited.value.code == 1
+
+
+def test_climate_normals_only_and_radar_are_mutually_exclusive():
+    with (
+        patch("sys.argv", ["ingest_delta.py", "--climate-normals-only", "--radar"]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+
+    assert exited.value.code == 2
+
+
 def test_ingest_climate_normals_no_dir(tmp_path, mock_spark):
     ok, skip, failed = _ingest_climate_normals(mock_spark, tmp_path, "`main`", "`meteoswiss`")
     assert ok == 0
@@ -637,7 +761,8 @@ def test_a_write_failure_is_reported_with_its_reason(smn_bronze_dir, mock_spark,
 
 
 def test_an_unreadable_normals_file_fails_the_table_instead_of_shrinking_it(climate_normals_bronze_dir, mock_spark):
-    (climate_normals_bronze_dir / "climate_normals" / "broken.txt").write_bytes(b"\x00")
+    folder = climate_normals_bronze_dir / "climate_normals"
+    (folder / "climate-reports-normtables_tre200m0_1991-2020_en.txt").write_bytes(b"\x00")
 
     with patch("scripts.ingest_delta.read_normals_txt", side_effect=[pl.DataFrame({"a": [1]}), ValueError("bad")]):
         ok, skip, failed = _ingest_climate_normals(mock_spark, climate_normals_bronze_dir, "`main`", "`meteoswiss`")
