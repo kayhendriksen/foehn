@@ -8,36 +8,50 @@ changes**. The same notes are published with each
 
 ## Unreleased
 
+## 0.5.1 (2026-11-08)
+
+A correctness release. Repeated reviews of `main` since 0.5.0 fixed GRIB2
+forecast downloads, the Databricks ingest, incremental and forced refreshes, and
+the MCP server's launch and error handling. The CLI gains machine-readable
+output, and this is the first release with signed build provenance.
+
+Some defaults, outputs and table schemas change, so please read **Breaking
+changes** and **Upgrade notes** before upgrading.
+
 ### Breaking changes
 
-- **Filtered default Zarr store names now include an exact-filter digest.**
-  Filters such as `tas` and `_tas_` previously shared a slug and could overwrite
-  each other's store. Existing stores are retained; rebuild with the intended
-  filter, or explicitly choose `store=` after checking its contents.
-- **The combined climate-normal Delta schema now retains measurement identity.**
-  Only English variants are combined, with `parameter`, `unit`, `normal_period`,
-  and `source_file`. Rebuild existing tables from Bronze with the new
-  `--climate-normals-only` ingestion flag; downstream queries must include the
-  parameter. Per-file Parquet schemas remain unchanged.
-- **The CLI writes progress and log output to stderr**, not stdout. stdout now
-  carries only a command's output (tables, CSV/JSON, the version report), so
+- **Filtered default Zarr store names now include an exact-filter digest**
+  (#121). Filters such as `tas` and `_tas_` previously shared a slug and could
+  overwrite each other's store. Existing stores are retained; rebuild with the
+  intended filter, or explicitly choose `store=` after checking its contents.
+- **The combined climate-normal Delta schema now retains measurement identity**
+  (#121). Only English variants are combined, with `parameter`, `unit`,
+  `normal_period`, and `source_file`. Rebuild existing tables from Bronze with
+  the new `--climate-normals-only` ingestion flag; downstream queries must
+  include the parameter. Per-file Parquet schemas remain unchanged.
+- **The CLI writes progress and log output to stderr** (#111), not stdout. stdout
+  now carries only a command's output (tables, CSV/JSON, the version report), so
   `foehn load ... --output-format csv > file.csv` captures data and nothing
   else. Scripts that parsed progress lines such as `Bronze data saved to:`
   from stdout must read stderr instead.
-- **The `dev` extra is gone.** Development tools now live in a PEP 735
+- **The `dev` extra is gone** (#111). Development tools now live in a PEP 735
   `[dependency-groups]` table, which uv installs by default (`uv sync`).
   `pip install "foehn[dev]"` no longer installs ruff, ty and pytest into a
   user's environment.
+- **Minimum dependency versions rose** (#109, #110). foehn now needs
+  `polars>=1.34`, because Polars 1.18 cannot stream the forecast join to Parquet.
+  The `grids` extra needs `eccodes>=2.43`, plus `eccodeslib>=2.43` outside
+  Windows.
 - **The MCP `load_data` and `describe_data` tools refuse a call that downloads
-  more than 1 GB.** MeteoSwiss publishes one file per station and time slice,
-  and `year`, `month` and `date_from`/`date_to` trim rows only after each file
-  is downloaded, so one call — `frequency="t"` over every station's history —
-  fetched gigabytes into the server's memory. Such a call now stops with an
-  error naming `station`, `frequency` and `time_slice` as the filters that
-  narrow the download. The tool descriptions and the `foehn://guide` resource
-  no longer present the time filters as the way to keep a call cheap.
-- **`foehn download` deletes what Bronze no longer needs.** After a clean run, a
-  `recent` or `now` CSV that the collection no longer lists is deleted — a
+  more than 1 GB** (#120). MeteoSwiss publishes one file per station and time
+  slice, and `year`, `month` and `date_from`/`date_to` trim rows only after each
+  file is downloaded, so one call — `frequency="t"` over every station's
+  history — fetched gigabytes into the server's memory. Such a call now stops
+  with an error naming `station`, `frequency` and `time_slice` as the filters
+  that narrow the download. The tool descriptions and the `foehn://guide`
+  resource no longer present the time filters as the way to keep a call cheap.
+- **`foehn download` deletes what Bronze no longer needs** (#120). After a clean
+  run, a `recent` or `now` CSV that the collection no longer lists is deleted — a
   station MeteoSwiss dropped kept feeding every later `*_recent` table, into the
   next year — and so are `forecast_local` runs older than the one just
   downloaded, each about 1 GB, which only ever accumulated. Historical and
@@ -45,11 +59,17 @@ changes**. The same notes are published with each
   is the archive the Delta table indexes. A workspace that has downloaded
   `forecast_local` for a while loses its older runs on the first run after
   upgrading.
-- **The `databricks` extra requires PySpark 4.0 and delta-spark 4.0.** The Delta
-  ingest hands Spark a `pyarrow.Table`, which `createDataFrame` accepts only
-  from PySpark 4.0; the extra allowed 3.5, where the ingest could not work.
+- **Rolling groups that disappear upstream are retired** (#121). A group that
+  stays unlisted for seven days, confirmed by a later successful listing, has its
+  foehn-authored Parquet output removed and its managed
+  `<dataset>_<frequency>_recent` or `_now` Delta table emptied, keeping the
+  table's schema, comments and grants. Historical and unsliced outputs are kept,
+  as is any file whose foehn source footer cannot be read.
+- **The `databricks` extra requires PySpark 4.0 and delta-spark 4.0** (#120). The
+  Delta ingest hands Spark a `pyarrow.Table`, which `createDataFrame` accepts
+  only from PySpark 4.0; the extra allowed 3.5, where the ingest could not work.
   Databricks Runtime 17.3, which the bundle deploys on, is Spark 4.0.
-- **The MCP server caches grid files in the user cache directory**
+- **The MCP server caches grid files in the user cache directory** (#120)
   (`~/Library/Caches/foehn`, `~/.cache/foehn`, `%LOCALAPPDATA%\foehn\Cache`)
   rather than under whatever directory the client started it in, which was
   often `/`, where `describe_grid` could not write at all. `FOEHN_DATA_DIR`
@@ -58,129 +78,271 @@ changes**. The same notes are published with each
 
 ### New features
 
-- **`foehn.load(max_bytes=N)`** refuses a query once its data files have
+- **`foehn.load(max_bytes=N)`** (#120) refuses a query once its data files have
   downloaded more than `N` bytes, rather than running it to completion. The
   default, `None`, sets no ceiling.
-
-- **Machine-readable output.** `foehn list`, `foehn metadata` and `foehn load`
-  take `--output-format` (`table`, `csv`, `json`, plus `ndjson` for the latter
-  two), and `foehn load -o PATH` writes every row to a `.parquet`, `.csv`,
-  `.json` or `.ndjson` file.
-- **Global `-q`/`--quiet`, `-v`/`--verbose` and `--color` options**, accepted
-  before or after the subcommand. Colour honours `NO_COLOR` and `FORCE_COLOR`.
-- **`foehn version` and `foehn.show_versions()`** print foehn's version, the
-  platform, where the data directory resolves to, and every dependency's
+- **Machine-readable output** (#111). `foehn list`, `foehn metadata` and
+  `foehn load` take `--output-format` (`table`, `csv`, `json`, plus `ndjson` for
+  the latter two), and `foehn load -o PATH` writes every row to a `.parquet`,
+  `.csv`, `.json` or `.ndjson` file.
+- **Global `-q`/`--quiet`, `-v`/`--verbose` and `--color` options** (#111),
+  accepted before or after the subcommand. Colour honours `NO_COLOR` and
+  `FORCE_COLOR`.
+- **`foehn version` and `foehn.show_versions()`** (#111) print foehn's version,
+  the platform, where the data directory resolves to, and every dependency's
   version for bug reports. `foehn -V` is a short `--version`.
-- **`python -m foehn`** runs the CLI.
-- **Typo suggestions.** An unknown dataset names the closest one, from the
+- **`python -m foehn`** runs the CLI (#111).
+- **`foehn mcp --transport streamable-http`** (#110), which the server already
+  supported. `sse` is still accepted.
+- **Typo suggestions** (#111). An unknown dataset names the closest one, from the
   Python API (`Did you mean 'smn'?`), the CLI (`hint: did you mean 'smn'?`) and
   the MCP tools alike. On Python 3.14+ a mistyped subcommand is suggested too.
-- **A User-Agent header** (`foehn/<version> (+https://github.com/kayhendriksen/foehn)`)
-  on every request, so the MeteoSwiss and CSCS operators can identify foehn's
-  traffic.
+- **A User-Agent header** (#111)
+  (`foehn/<version> (+https://github.com/kayhendriksen/foehn)`) on every request,
+  so the MeteoSwiss and CSCS operators can identify foehn's traffic.
 
 ### Bug fixes
 
-- Rolling groups that stay unlisted for seven days are reconciled once a later
-  successful listing confirms it: foehn-authored Parquet outputs are removed and
-  managed Delta tables emptied. Historical and unsliced outputs are retained, as
-  is any file whose foehn source footer cannot be read.
-- Failed forced repairs survive cursor filtering; archive publication recovers
-  its backup before recreating a missing target after a process crash.
-- Grid merge errors no longer trigger a raw-time retry. Internal Zarr writes
-  close datasets and release read snapshots on success and failure.
-- MCP clients receive actionable validation, network and missing-extra errors;
-  unexpected failures stay masked. URL diagnostics redact userinfo, query
-  strings and fragments, including repeated URLs in downstream errors.
-- The Databricks extra declares PySpark's SQL dependencies, so clean installs
-  include the Arrow handoff requirements. Dependency versions are unchanged.
-- Databricks documentation uses the current CLI installer; the GRIB2 CLI
-  example uses `--match=-t_2m-ctrl` so argparse accepts its leading hyphen.
-- **`foehn download` stopped at the first dataset that failed outright.** A
-  STAC listing that still failed after its retries ended the whole run, so every
-  dataset after it went undownloaded — and the Databricks ingest task, which
-  depends on the download, skipped the day. Each dataset is now attempted; one
-  that fails is reported, its cursor is held back, and the command still exits 1.
-- **The Databricks bundle deployed whatever wheel `dist/` held.** Nothing built
-  it, so a deploy shipped the last wheel built in that checkout, or two versions
-  when the glob matched both. The bundle now builds the wheel on every deploy
-  (`uv build --wheel --clear --out-dir dist/bundle`). docs/databricks.md said
-  the bundle creates two jobs; it creates four, and the page now lists each
-  one's schedule, including the two radar jobs that run every five minutes.
-- **A partly downloaded forecast run became the `forecast_local` table.**
+#### Forecasts and grids
+
+- **GRIB2 downloads fetched the oldest run** (#108). The listing stopped at the
+  first 100 STAC items on the assumption that the API lists newest first. It
+  lists oldest first, so `foehn download forecast_icon_ch1` got the oldest run at
+  lead 0 only, and some KENDA files had already expired. A GRIB2 download now
+  lists the whole collection and fetches the control member of the newest run.
+  Radar no longer truncates its listing either.
+- **Forecast downloads took a run that was still publishing** (#109). An hour
+  into publication, an ICON-CH1 run can hold 1,800 of its 3,400 control files.
+  Forecast downloads and `load("forecast_local")` now take the newest complete
+  run.
+- **A partly downloaded forecast run became the `forecast_local` table** (#120).
   Conversion took the newest run in Bronze outright; a file that fails is
   counted rather than fatal, so that run could be partial, and the table lost
   those parameters. It now takes the newest complete run, as the download and
   `foehn.load` do — and so does the Delta ingest, which shares the grouping.
-- **A Parquet table kept a source that was no longer in Bronze.** Every source
-  left was older than the table, so by mtime it was current. Each table now
-  records the files it was built from and is rebuilt when they change. Tables
+- **Opening several NetCDF files read them all into memory** (#109). With dask
+  installed the combine now stays lazy. Without it, foehn warns above 1 GB; dask
+  is not part of the `grids` extra.
+- **One failed file re-downloaded a whole grid set** (#109). Only the files being
+  replaced are marked now. For the five-minute radar job, a single 404 used to
+  cost a whole day of composites.
+- **A correction published during a download was missed** (#109). Grid files are
+  now dated by the upstream version they hold, so a later restatement compares
+  as newer.
+- **Grid files were left open** (#109, #110, #121). `with` and `close()` now
+  release the files behind a returned grid, GRIB2 cubes and the ICON constants
+  reader close what they open, and internal Zarr writes close datasets and
+  release read snapshots on success and failure.
+- **Grid merge errors triggered a raw-time retry** (#121). Only files whose CF
+  time units cannot be decoded now fall back to raw times.
+- **Radar coordinates sat up to 3 m off the whole-kilometre grid** (#108), so
+  they did not align with the NetCDF Swiss grids. The origin is now snapped, and
+  the file's unit is carried onto the variable as `units`.
+- **ICON coordinates were cached for the life of the process** (#109). The cache
+  now follows the constants file on disk, and a constants grid of the wrong size
+  warns instead of silently returning a field without coordinates (#108).
+- **A corrupt coherence marker was never repaired** (#108, #109). Invalid UTF-8
+  now counts as unreadable like any other damage, and an unreadable marker is
+  rewritten and released set by set as each refresh completes.
+
+#### Downloads and incremental state
+
+- **`--full-refresh` and `force=True` did not re-download CSVs** (#110). A stored
+  ETag still came back 304 over whatever was on disk, corrupted or not. A forced
+  run now sends no stored ETags and applies no freshness check.
+- **A failed forced repair could be forgotten** (#121). It now stays pending and
+  survives cursor filtering, so the file is retried even when its upstream
+  timestamp has not changed.
+- **`foehn download` stopped at the first dataset that failed outright** (#120).
+  A STAC listing that still failed after its retries ended the whole run, so
+  every dataset after it went undownloaded — and the Databricks ingest task,
+  which depends on the download, skipped the day. Each dataset is now attempted;
+  one that fails is reported, its cursor is held back, and the command still
+  exits 1.
+- **Stale Parquet after a concurrent download** (#109). Conversion judges
+  freshness by mtime, so a CSV replaced mid-read left Parquet newer than its new
+  source, and every later run skipped it. Conversion now holds the dataset lock
+  that downloads publish under.
+- **A Parquet table kept a source that was no longer in Bronze** (#120). Every
+  source left was older than the table, so by mtime it was current. Each table
+  now records the files it was built from and is rebuilt when they change. Tables
   written by earlier versions are judged by mtime as before, so upgrading does
   not reconvert everything.
-- **Asset names from the STAC listing were joined onto Bronze unchecked.** On
-  Windows a backslash is a separator, so an href ending `..\..\evil.csv` named a
-  file outside the data directory. A name that is not a plain file name — or
-  that starts with a dot, where foehn keeps its own markers — is now ignored
-  and logged. Malformed assets with no href are left out the same way rather
-  than failing and holding back the cursor on every run.
-- **Redirects were not checked against the host allowlist.** Only the first
-  URL of a request was; a redirect could lead anywhere, including off HTTPS.
-  Each hop is now checked, and one that leaves the allowlist fails the request.
-- **A long-running MCP server grew without bound.** Expired STAC listings stayed
-  in memory — the forecast listing is keyed on window bounds that move, so
+- **`download(time_slice="historical")` downloaded nothing historical** (#109). A
+  bare string was iterated character by character. It is now accepted as in
+  `load()`, and unknown tokens are rejected.
+- **The incremental cursor trusted this machine's clock to the second** (#120).
+  It is compared with the API's own timestamps, so a clock running ahead skipped
+  Items restated just after their listing page was read — a historical slice
+  until the next full refresh. The cursor now starts 15 minutes early, which
+  costs only conditional requests that come back unchanged.
+- **The run state could be lost to a power cut** (#120). The ETag store and
+  cursor are now synced to disk before they replace the previous version.
+- **A killed archive publication could hide the previous version** (#121). The
+  backup is now recovered before a missing target is recreated.
+- **Metadata files were downloaded in full on every run** (#120). They are now
+  fetched with the stored ETag like the data files, and kept when unchanged.
+- **A same-day `date_from`/`date_to` range was rejected** (#109).
+- **A STAC `updated` without a timezone crashed the freshness check** (#108). It
+  is now read as UTC.
+- **A refused call left directories behind** (#110). `foehn.download("bogus")`,
+  `to_zarr` and `foehn download` created the data directory before rejecting
+  their input.
+
+#### Network safety
+
+- **Asset names from the STAC listing were joined onto Bronze unchecked** (#120).
+  On Windows a backslash is a separator, so an href ending `..\..\evil.csv` named
+  a file outside the data directory. A name that is not a plain file name — or
+  that starts with a dot, where foehn keeps its own markers — is now ignored and
+  logged. Malformed assets with no href are left out the same way rather than
+  failing and holding back the cursor on every run.
+- **Redirects were not checked against the host allowlist** (#120). Only the
+  first URL of a request was; a redirect could lead anywhere, including off
+  HTTPS. Each hop is now checked, and one that leaves the allowlist fails the
+  request.
+- **URLs in diagnostics could carry credentials** (#121). Errors and logs now drop
+  userinfo, query strings and fragments, including URLs repeated in downstream
+  errors.
+- **A URL could pass the host allowlist and connect elsewhere** (#122). The
+  allowlist and the HTTP client parsed some URLs differently, so a backslash
+  before the `@` could name an allowlisted host to one and another host to the
+  other. URLs containing a backslash, control character or space are now refused.
+
+#### Databricks
+
+- **The daily ingest rebuilt the historical tables every day** (#108). Once a
+  backfill had left its CSVs in the volume, every daily run re-ingested them
+  unchunked; SMN's 10-minute history is ~20 GB. Historical groups are now
+  ingested only with `--historical`.
+- **The `climate_normals` Delta table could never be written** (#120). Its
+  columns `Altitude [m asl]`, `CH coordinates` and `Reference period` hold
+  characters Delta refuses in a column name unless the table maps its columns by
+  name, so the table failed on every ingest — and since a failed table fails the
+  run, the ingest exited 1 over it. A table whose names need it is now written
+  with Delta column mapping, which keeps the names the Parquet path publishes;
+  every other table is written as before. Found by the new test against a real
+  Spark.
+- **The radar ingest's `product` column was always empty** (#108). The pattern
+  expected upper case, and MeteoSwiss names the files in lower case. The MERGE
+  also updates rows whose product differs, so existing tables are corrected.
+- **The Databricks bundle deployed whatever wheel `dist/` held** (#120). Nothing
+  built it, so a deploy shipped the last wheel built in that checkout, or two
+  versions when the glob matched both. The bundle now builds the wheel on every
+  deploy (`uv build --wheel --clear --out-dir dist/bundle`). docs/databricks.md
+  said the bundle creates two jobs; it creates four, and the page now lists each
+  one's schedule, including the two radar jobs that run every five minutes.
+- **Overlapping chunked ingests shared one staging table** (#109). Each run now
+  gets its own, and a `--chunk-size` below 1 is refused before Spark starts.
+- **The Delta ingest's column comments broke on a backtick** (#120) in a column
+  name, which closed the quoted identifier early.
+- **The `databricks` extra omitted PySpark's SQL dependencies** (#121), so clean
+  installs lacked the Arrow handoff requirements. The docs also now use the
+  current Databricks CLI installer.
+
+#### MCP server
+
+- **The MCP Registry entry could not start the server** (#110). `mcp` was passed
+  to `uvx` rather than to foehn, and a plain `uvx foehn` installs no MCP SDK.
+- **`foehn mcp` could corrupt its own protocol stream** (#111). The CLI's log
+  handler wrote to stdout, which is the JSON-RPC channel under the stdio
+  transport; a `describe_grid` call that downloaded a file wrote a progress line
+  into it.
+- **A long-running MCP server grew without bound** (#120). Expired STAC listings
+  stayed in memory — the forecast listing is keyed on window bounds that move, so
   most were never replaced — and each `describe_grid` call left a read snapshot
   until the process exited, pinning old file generations on disk. Expired
   listings are now dropped, the cache holds at most 1,024, and `describe_grid`
   removes its snapshot when it returns.
-- **The incremental cursor trusted this machine's clock to the second.** It is
-  compared with the API's own timestamps, so a clock running ahead skipped
-  Items restated just after their listing page was read — a historical slice
-  until the next full refresh. The cursor now starts 15 minutes early, which
-  costs only conditional requests that come back unchanged.
-- **The run state could be lost to a power cut.** The ETag store and cursor are
-  now synced to disk before they replace the previous version.
-- **Metadata files were downloaded in full on every run.** They are now fetched
-  with the stored ETag like the data files, and kept when unchanged.
-- **A filesystem error printed a traceback** (`foehn load` into a directory
-  that cannot be written, a full disk). It is now one `error:` line naming the
-  path, like every other failure.
-- **The Delta ingest's column comments broke on a backtick** in a column name,
-  which closed the quoted identifier early.
-- **The `climate_normals` Delta table could never be written.** Its columns
-  `Altitude [m asl]`, `CH coordinates` and `Reference period` hold characters
-  Delta refuses in a column name unless the table maps its columns by name, so
-  the table failed on every ingest — and since a failed table fails the run,
-  the ingest exited 1 over it. A table whose names need it is now written with
-  Delta column mapping, which keeps the names the Parquet path publishes; every
-  other table is written as before. Found by the new test against a real Spark.
-- **`foehn mcp` could corrupt its own protocol stream.** The CLI's log handler
-  wrote to stdout, which is the JSON-RPC channel under the stdio transport; a
-  `describe_grid` call that downloaded a file wrote a progress line into it.
-- **`foehn load -n N` showed at most ten rows.** Polars truncates any frame to
-  ten rows when printed, so the preview showed five, an ellipsis and five more.
-- **`foehn load -n 0` showed twenty rows** instead of none.
-- **Piping into `head` crashed with a `BrokenPipeError` traceback** (e.g.
+- **MCP clients could not see why a call failed** (#121). They now receive
+  validation, network and missing-extra errors; other exception types stay
+  masked.
+
+#### CLI
+
+- **User errors printed tracebacks** (#110, #120): an unknown dataset, a metadata
+  table a dataset does not publish, an unreachable API, a directory that cannot
+  be written, a full disk. Each is now one `error:` line and exit 1, Ctrl-C exits
+  130, and `foehn mcp` without the extra names the install command.
+- **`foehn load -n N` showed at most ten rows** (#111). Polars truncates any frame
+  to ten rows when printed, so the preview showed five, an ellipsis and five more.
+- **`foehn load -n 0` showed twenty rows** (#111) instead of none.
+- **Piping into `head` crashed with a `BrokenPipeError` traceback** (#111) (e.g.
   `foehn metadata inventory smn | head`). It now stops quietly with status 141.
-- **`foehn download --workers 0`** printed its header and created the data
+- **`foehn download --workers 0`** (#111) printed its header and created the data
   directory before failing. Non-positive `--workers` and negative `-n`/`--limit`
   are now usage errors (status 2) before anything runs.
-- **Dependabot could not bump `ty` without breaking CI.** Its pip ecosystem
+- **docs/cli.md** (#111) was missing `foehn load --limit` and `--workers`, the
+  `foehn list` filters, and `--data-dir` for `open` and `to-zarr`. A test now
+  fails when a flag is added without documentation. The GRIB2 example now uses
+  `--match=-t_2m-ctrl` so argparse accepts its leading hyphen (#121).
+
+#### Packaging
+
+- **uv-managed installs had no ecCodes library on Linux or macOS** (#110). eccodes
+  declares `eccodeslib` only in its `py3-none-any` wheel, so `uv.lock` never
+  contained it. The `grids` extra now declares it directly.
+- **Dependabot could not bump `ty` without breaking CI** (#111). Its pip ecosystem
   edits `pyproject.toml` but not `uv.lock`, and CI installs with
   `uv sync --locked`. A `uv` ecosystem now bumps both together.
-- **docs/cli.md** was missing `foehn load --limit` and `--workers`, the
-  `foehn list` filters, and `--data-dir` for `open` and `to-zarr`. A test now
-  fails when a flag is added without documentation.
+
+### Upgrade notes
+
+- **Rebuild the `climate_normals` Delta table** after deploying this version:
+
+  ```bash
+  python scripts/ingest_delta.py --climate-normals-only \
+    --catalog main --schema meteoswiss --volume landing
+  ```
+
+  See [Databricks](https://github.com/kayhendriksen/foehn/blob/main/docs/databricks.md)
+  for the full migration, and update downstream queries to include `parameter`.
+- **Filtered Zarr stores** with default names are not reused. Rebuild them, or
+  pass `store=` with the old path after checking that it holds the intended
+  slice.
+- **`foehn download` of a GRIB2 forecast now fetches a whole control run:** about
+  3,500 files / 8 GB for ICON-CH1 and 7 GB for ICON-CH2. Ensemble members are left
+  to `open_dataset` and `to_zarr` with `match=`.
+- **Do not run old and new versions against one workspace.** The per-dataset lock
+  moved to `bronze/.<dataset>.foehn-refresh.lock`, so the two would not exclude
+  each other.
+- **A downloaded grid file's modification time** is now the upstream version it
+  holds, not when it was downloaded.
+
+### Known limitations
+
+- A long `--historical` Delta ingest holds the dataset's lock for its whole run,
+  so a download of that dataset on the same machine waits for it.
+- A retired Delta table is emptied again on every ingest and counted among the
+  tables written.
+- A grid `match=` that mixes CF and non-CF time units raises `TypeError`. Narrow
+  the match to files with one kind of time axis.
+- A chunked Delta ingest that is killed outright leaves its
+  `<table>__foehn_staging_<id>` table behind, to be dropped by hand.
+- A clean `foehn[databricks]` install resolves to pandas 3, which PySpark warns it
+  does not yet fully support.
 
 ### Project
 
-- Documentation site (MkDocs Material) with an API reference generated from the
-  docstrings, built in CI with `--strict`.
-- `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `CITATION.cff`, issue forms, a pull
-  request template and `.editorconfig`.
-- This changelog, assembled from every GitHub release.
-- **The Delta ingest is tested against a real Spark.** A CI job runs it with
-  Java, local Spark and Delta; every earlier test mocked the session, so its
+- **Signed releases** (#102, #108). The wheel and sdist carry SLSA build
+  provenance and the wheel an SBOM attestation, attached to the GitHub release,
+  and the publish toolchain (`build`, `twine`, `hatchling`) is hash-locked. The
+  artifacts are uploaded before the SBOM step runs its unhashed tools (#122). See
+  "Verifying a Release" in `SECURITY.md`.
+- **The Delta ingest is tested against a real Spark** (#120). A CI job runs it
+  with Java, local Spark and Delta; every earlier test mocked the session, so its
   SQL and its Arrow handoff had only ever run on a Databricks cluster.
+- Documentation site (MkDocs Material) with an API reference generated from the
+  docstrings, built in CI with `--strict` (#111).
+- `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `CITATION.cff`, issue forms, a pull
+  request template and `.editorconfig` (#111).
+- This changelog, assembled from every GitHub release (#111).
+- CI installs from `uv.lock`, so a lock that no longer matches `pyproject.toml`
+  fails the build (#110).
+- Test suite grown from 870 to over 1,100 tests.
+- Dependency and GitHub Actions updates via Dependabot.
+
+[Release](https://github.com/kayhendriksen/foehn/releases/tag/v0.5.1)
 
 ## 0.5.0 (2026-10-25)
 
