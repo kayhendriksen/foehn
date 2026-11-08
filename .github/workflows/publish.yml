@@ -52,6 +52,12 @@ jobs:
       # the backend is the part that actually writes the wheel.
       - run: python3 -m build --no-isolation
       - run: twine check dist/*
+      # Uploaded before the SBOM step on purpose: that step runs tools resolved
+      # without hashes, and they must not get a chance to alter what is published.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
       # CycloneDX SBOM of what actually ships, resolved by installing the built
       # wheel rather than from the pyproject specs. Written outside dist/ — the
       # publish job uploads all of dist/ to PyPI, which would reject a stray file.
@@ -70,10 +76,6 @@ jobs:
             --output-file "sbom/foehn-${GITHUB_REF_NAME#v}-sbom.cdx.json"
         env:
           CYCLONEDX_PIN: ${{ steps.pins.outputs.cyclonedx }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dist
-          path: dist/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
