@@ -135,6 +135,12 @@ CSV kind prunes it with the kind's **Pruner**: rolling-slice files the listing n
 longer holds, and **Forecast runs** older than the one just selected. Grid kinds
 are never pruned: their Bronze is the `open_dataset` cache, and radar's is an
 archive upstream does not keep.
+Successful station refreshes also record their full filename listing in
+`.foehn-rolling-listing.json`, and when each dropped file first went missing. The
+`retention` module uses that evidence to reconcile rolling groups in Parquet and
+Delta once they have stayed unlisted for seven days, so one incomplete listing
+cannot retire an output. Nor can missing local files alone; historical and
+unsliced groups are kept.
 _Avoid_: raw, landing (the Databricks ingest script's word for the same place)
 
 **Fetcher**:
@@ -194,6 +200,9 @@ cursor costs one redundant download and a raised exception costs the run. Short
 read/merge/write transitions are locked across processes; network work is not.
 The cursor records the run's pre-listing watermark so a concurrent upstream item
 cannot fall into the gap between listing and commit.
+Explicitly forced repairs also use the dataset's pending-file marker, so a
+failed replacement cannot be hidden by an older successful cursor. Pending
+files bypass freshness checks until they have actually been repaired.
 _Avoid_: cache (the **Fetcher**'s listing memo is a cache; this is not)
 
 **Reader**:

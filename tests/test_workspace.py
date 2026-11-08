@@ -118,9 +118,29 @@ def test_a_match_narrows_the_store_name(tmp_path):
     """
     workspace = Workspace(tmp_path)
     assert workspace.zarr("radar_precip") == tmp_path / "zarr" / "radar_precip.zarr"
-    assert workspace.zarr("radar_precip", "cpc2613/00") == tmp_path / "zarr" / "radar_precip__cpc2613_00.zarr"
+    filtered = workspace.zarr("radar_precip", "cpc2613/00")
+    assert filtered.parent == tmp_path / "zarr"
+    assert filtered.name.startswith("radar_precip__cpc2613_00__")
+    assert filtered.suffix == ".zarr"
     # A match of nothing but separators still has to name a directory.
-    assert workspace.zarr("radar_precip", "//") == tmp_path / "zarr" / "radar_precip__match.zarr"
+    assert workspace.zarr("radar_precip", "//").name.startswith("radar_precip__match__")
+
+
+def test_store_names_keep_the_exact_match_identity(tmp_path):
+    workspace = Workspace(tmp_path)
+    matches = ["tas", "_tas_", "tas-", "tas.", "TAS", "//", "__", ""]
+    paths = [workspace.zarr("climate_scenarios_grid", match) for match in matches]
+    assert len(set(paths)) == len(matches)
+    assert len({path.name.lower() for path in paths}) == len(matches)
+    assert workspace.zarr("climate_scenarios_grid", "tas") == paths[0]
+    assert all(path.parent == tmp_path / "zarr" for path in paths)
+
+
+def test_a_long_match_still_produces_a_usable_store_name(tmp_path):
+    path = Workspace(tmp_path).zarr("climate_scenarios_grid", "tas" * 200)
+    path.parent.mkdir()
+    path.mkdir()
+    assert path.is_dir()
 
 
 @pytest.mark.parametrize(

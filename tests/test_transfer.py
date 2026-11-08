@@ -372,3 +372,28 @@ def test_a_marker_that_is_not_utf8_means_not_materialized(tmp_path):
     (tmp_path / ".foehn-complete.json").write_bytes(b"\xff")
 
     assert materialization_current(asset("normals.zip"), tmp_path) is False
+
+
+def test_transfer_logs_redact_url_credentials_in_failures_and_collisions(tmp_path, caplog):
+    url = "https://review-user:review-password@data.geo.admin.ch/a/same.nc?token=review-query#review-fragment"
+    duplicate = url.replace("/a/", "/b/")
+    fetcher = InMemoryFetcher()
+    fetcher.fail(url, FetchError(f"nested failure fetching {url}"))
+
+    result = fetch_all([asset("same.nc", url), asset("same.nc", duplicate)], tmp_path, fetcher=fetcher)
+
+    assert (result.failed, result.skipped) == (1, 1)
+    assert "data.geo.admin.ch/a/same.nc" in caplog.text
+    for secret in ("review-user", "review-password", "review-query", "review-fragment"):
+        assert secret not in caplog.text
+
+
+def test_asset_filenames_do_not_publish_url_fragments(tmp_path):
+    url = "https://data.geo.admin.ch/x/same.nc#review-fragment"
+    fetcher = InMemoryFetcher()
+    fetcher.default_body = b"data"
+
+    result = fetch_all([asset("same.nc", url)], tmp_path, fetcher=fetcher)
+
+    assert result.filenames == ["same.nc"]
+    assert (tmp_path / "same.nc").read_bytes() == b"data"

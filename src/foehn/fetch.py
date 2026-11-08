@@ -27,7 +27,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from foehn import __version__
-from foehn._urls import validate_download_href, validate_stac_url
+from foehn._urls import safe_url, validate_download_href, validate_stac_url
 from foehn.atomicwrite import staged
 from foehn.collections import STAC_API_BASE
 
@@ -120,11 +120,16 @@ class Fetcher(Protocol):
 
 @contextlib.contextmanager
 def _as_fetch_error(url: str) -> Generator[None]:
-    """Re-raise ``requests`` failures as :class:`FetchError`, keeping the cause."""
+    """Report a safe network failure while retaining its raw context for a debugger."""
     try:
         yield
     except requests.exceptions.RequestException as exc:
-        raise FetchError(f"{type(exc).__name__} fetching {url}: {exc}") from exc
+        # urllib3's nested messages can repeat a relative request target with
+        # its query token. Report only the error class and HTTP status, not that
+        # free text. Suppress chained traceback rendering too; __context__ still
+        # holds the original exception for an attached debugger.
+        status = f" (HTTP {exc.response.status_code})" if exc.response is not None else ""
+        raise FetchError(f"{type(exc).__name__} fetching {safe_url(url)}{status}") from None
 
 
 class _AllowlistedSession(requests.Session):
@@ -145,7 +150,9 @@ class _AllowlistedSession(requests.Session):
             except ValueError as exc:
                 # A requests exception, so the port reports it as a FetchError
                 # like any other failed request.
-                raise requests.exceptions.InvalidURL(f"Refusing redirect from {resp.url} to {location!r}") from exc
+                raise requests.exceptions.InvalidURL(
+                    f"Refusing redirect from {safe_url(resp.url)} to {safe_url(location)!r}"
+                ) from exc
         return target
 
 

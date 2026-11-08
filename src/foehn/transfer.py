@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Literal
 
 from foehn import atomicwrite
+from foehn._urls import redact_urls, safe_url
 from foehn.archives import safe_extract
 from foehn.assets import Asset
 from foehn.fetch import DEFAULT_WORKERS, Fetcher
@@ -307,7 +308,7 @@ def _dedupe_by_destination(pairs: list[tuple[Asset, Path]]) -> tuple[list[tuple[
     dropped = 0
     for asset, filepath in pairs:
         if filepath in kept:
-            logger.warning("  Duplicate destination %s — skipping %s", filepath.name, asset.href)
+            logger.warning("  Duplicate destination %s — skipping %s", filepath.name, safe_url(asset.href))
             dropped += 1
             continue
         kept[filepath] = asset
@@ -395,7 +396,7 @@ def fetch_all(
                         pool.shutdown(cancel_futures=True)
                         raise
                     failed += 1
-                    logger.warning("  [%d/%d] FAILED: %s — %s", i, total, asset.href, exc)
+                    logger.warning("  [%d/%d] FAILED: %s — %s", i, total, safe_url(asset.href), redact_urls(str(exc)))
                     continue
                 if not outcome.downloaded:
                     skipped += 1

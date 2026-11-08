@@ -39,8 +39,8 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
-from foehn import registry
-from foehn.collections import DatasetKind, kind
+from foehn import coherence, registry
+from foehn.collections import GRANULARITY_LABELS, ROLLING_TIME_SLICES, DatasetKind, kind
 from foehn.meteocsv import (
     combine_frames,
     group_csv_files,
@@ -50,6 +50,7 @@ from foehn.meteocsv import (
     read_normals_txt,
     scan_dataset_csv,
 )
+from foehn.retention import retired_groups
 from foehn.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -247,6 +248,35 @@ def _ingest_metadata(
     return tally
 
 
+def _retire_delta(spark: SparkSession, key: str, csv_dir: Path, catalog: str, schema: str) -> Tally:
+    """Empty retired rolling tables in the pipeline's managed table namespace.
+
+    Keep schemas, comments and grants so consumers can still query an empty
+    table. Only exact dataset/frequency/rolling-slice names qualify; metadata,
+    historical tables, temporary views and unrelated names are untouched.
+    """
+    candidates = [(frequency, time_slice) for frequency in GRANULARITY_LABELS for time_slice in ROLLING_TIME_SLICES]
+    retired = retired_groups(csv_dir, key, candidates)
+    if not retired:
+        return Tally()
+    tally = Tally()
+    try:
+        names = {
+            row.tableName for row in spark.sql(f"SHOW TABLES IN {catalog}.{schema}").collect() if not row.isTemporary
+        }
+        for group in sorted(retired):
+            name = f"{key}{_table_suffix(group)}"
+            if name in names:
+                # catalog/schema are validated identifiers; key and group come from the registry vocabularies.
+                spark.sql(f"DELETE FROM {catalog}.{schema}.`{name}`")  # noqa: S608  # nosec B608
+                print(f"  OK  {name:25s}   emptied (no longer published)", flush=True)
+                tally.written += 1
+    except Exception as exc:  # noqa: BLE001 - failed reconciliation must fail the scheduled run
+        _report_failure(f"{key} rolling reconciliation", exc)
+        tally.failed += 1
+    return tally
+
+
 def _ingest_collection(
     spark: SparkSession,
     key: str,
@@ -269,6 +299,7 @@ def _ingest_collection(
     groups = group_csv_files(csv_dir, key)
 
     tally = _ingest_metadata(spark, key, csv_dir, catalog, schema)
+    tally += _retire_delta(spark, key, csv_dir, catalog, schema)
 
     if not groups:
         print(f"  --  {key:25s}   skipped (no CSVs)", flush=True)
@@ -410,10 +441,12 @@ def _ingest_radar(
 
 
 def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str, schema: str) -> Tally:
-    """Ingest climate normals TXT files into a single Delta table.
+    """Ingest English climate normals, retaining each measurement's identity.
 
     All or nothing, like the chunked groups: one unreadable file fails the
     table rather than replacing it with the files that happened to parse.
+    The archive repeats each table in four languages; the English variant is
+    the published one, matching the other curated metadata tables.
     """
     txt_dir = bronze_base / "climate_normals"
     if not txt_dir.exists():
@@ -427,13 +460,16 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
 
     table = f"{catalog}.{schema}.`climate_normals`"
     try:
+        english_files = [path for path in txt_files if path.name.endswith("_en.txt")]
+        if not english_files:
+            raise ValueError("No English climate-normal TXT tables found; the existing table is kept.")
         # scan_csv doesn't support encoding="latin1", so use eager read_csv.
-        frames = [read_normals_txt(txt_path) for txt_path in txt_files]
+        frames = [read_normals_txt(txt_path, with_identity=True) for txt_path in english_files]
         _write_to_delta(spark, pl.concat(frames, how="diagonal_relaxed"), table)
     except Exception as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
         _report_failure("climate_normals", e)
         return Tally(failed=1)
-    print(f"  OK  {'climate_normals':25s} → {table} ({len(txt_files)} files)", flush=True)
+    print(f"  OK  {'climate_normals':25s} → {table} ({len(english_files)} English files)", flush=True)
     return Tally(written=1)
 
 
@@ -460,13 +496,19 @@ def main() -> None:
         action="store_true",
         help="Also ingest the historical time slice, with chunked writes for large collections (SMN, etc.)",
     )
-    parser.add_argument(
+    subset = parser.add_mutually_exclusive_group()
+    subset.add_argument(
         "--radar",
         nargs="*",
         default=None,
         metavar="COLLECTION",
         help="Only index radar HDF5 files into Delta catalogs. Pass one or more "
         "collection keys (radar_precip, radar_hail) to restrict; bare --radar ingests all.",
+    )
+    subset.add_argument(
+        "--climate-normals-only",
+        action="store_true",
+        help="Rebuild only the climate_normals table from existing Bronze; missing input fails the run.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -497,6 +539,14 @@ def main() -> None:
 
     workspace = Workspace(Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}"))
 
+    if args.climate_normals_only:
+        tally = _ingest_climate_normals(spark, workspace.bronze(), cat, sch)
+        if tally.skipped:
+            print("  FAIL climate_normals: no input to rebuild; download climate_normals first.", flush=True)
+            tally = Tally(failed=1)
+        _finish(tally)
+        return
+
     if args.radar is not None:
         keys = tuple(args.radar) if args.radar else RADAR_COLLECTIONS
         invalid = [k for k in keys if k not in RADAR_COLLECTIONS]
@@ -518,16 +568,17 @@ def main() -> None:
             total += Tally(skipped=1)
             continue
 
-        total += _ingest_collection(
-            spark,
-            key,
-            csv_dir,
-            cat,
-            sch,
-            historical=args.historical,
-            chunked=args.historical,
-            chunk_size=args.chunk_size,
-        )
+        with coherence.refresh_lock(csv_dir):
+            total += _ingest_collection(
+                spark,
+                key,
+                csv_dir,
+                cat,
+                sch,
+                historical=args.historical,
+                chunked=args.historical,
+                chunk_size=args.chunk_size,
+            )
 
     _finish(total)
 

@@ -6,6 +6,7 @@ the per-kind converters.
 """
 
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -19,6 +20,7 @@ from foehn.convert import (
     convert_to_parquet,
     run_conversions,
 )
+from foehn.retention import RETIREMENT_GRACE, record_listing
 from foehn.workspace import Workspace
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -109,6 +111,80 @@ def test_a_source_removed_from_bronze_is_removed_from_its_table(tmp_path):
 
     table = pl.read_parquet(workspace.parquet("smn") / "smn_d_recent.parquet")
     assert table["station_abbr"].to_list() == ["AAA"]
+
+
+def test_last_rolling_source_retired_by_a_listing_removes_its_output(tmp_path):
+    from foehn.assets import assets_of
+    from foehn.downloads import prune_unlisted_rolling
+
+    workspace = _two_station_bronze(tmp_path)
+    assert convert_to_parquet("smn", workspace) == 0
+    bronze = workspace.bronze("smn")
+    retained = bronze / "ogd-smn_aaa_h_recent.csv"
+    shutil.copy(bronze / "ogd-smn_aaa_d_recent.csv", retained)
+    listed = assets_of([{"id": "aaa", "assets": {"hourly": {"href": f"https://data.geo.admin.ch/{retained.name}"}}}])
+    prune_unlisted_rolling(bronze, listed)
+
+    assert convert_to_parquet("smn", workspace) == 0
+    assert (workspace.parquet("smn") / "smn_d_recent.parquet").exists()  # one listing proves nothing
+
+    record_listing(bronze, [retained.name], now=datetime.now(UTC) + RETIREMENT_GRACE)
+
+    assert convert_to_parquet("smn", workspace) == 0
+    assert not (workspace.parquet("smn") / "smn_d_recent.parquet").exists()
+    assert (workspace.parquet("smn") / "smn_h_recent.parquet").exists()
+    assert convert_to_parquet("smn", workspace) == 0  # reconciliation is repeatable
+
+
+def _retired_output(workspace: Workspace) -> Path:
+    """Leave smn_d_recent's output behind evidence that its group has been retired."""
+    assert convert_to_parquet("smn", workspace) == 0
+    bronze = workspace.bronze("smn")
+    for source in bronze.glob("*.csv"):
+        source.unlink()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    record_listing(bronze, ["ogd-smn_aaa_h_recent.csv"], now=start)
+    record_listing(bronze, ["ogd-smn_aaa_h_recent.csv"], now=start + RETIREMENT_GRACE)
+    return workspace.parquet("smn") / "smn_d_recent.parquet"
+
+
+def test_an_unreadable_retired_output_is_kept_without_failing_the_run(tmp_path, caplog):
+    """Its source is gone, so a failure here would repeat every run and hold the cursor back for good."""
+    workspace = _two_station_bronze(tmp_path)
+    output = _retired_output(workspace)
+    output.write_bytes(b"not parquet")
+
+    with caplog.at_level("WARNING", logger="foehn"):
+        assert convert_to_parquet("smn", workspace) == 0
+
+    assert output.read_bytes() == b"not parquet"
+    assert output.name in caplog.text
+
+
+def test_a_retired_output_that_cannot_be_removed_fails_the_run(tmp_path, monkeypatch):
+    """Unlike an unreadable footer, this one is ours and a later run can finish the job."""
+    workspace = _two_station_bronze(tmp_path)
+    output = _retired_output(workspace)
+    unlink = Path.unlink
+
+    def refuse(path, *args, **kwargs):
+        if path == output:
+            raise PermissionError("read-only")
+        unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    assert convert_to_parquet("smn", workspace) == 1
+    assert output.exists()
+
+
+def test_locally_missing_sources_without_a_listing_keep_the_output(tmp_path):
+    workspace = _two_station_bronze(tmp_path)
+    assert convert_to_parquet("smn", workspace) == 0
+    for source in workspace.bronze("smn").glob("*.csv"):
+        source.unlink()
+    assert convert_to_parquet("smn", workspace) == 0
+    assert (workspace.parquet("smn") / "smn_d_recent.parquet").exists()
 
 
 def test_an_output_written_before_sources_were_recorded_is_judged_by_mtime(tmp_path):

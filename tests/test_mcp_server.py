@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from unittest.mock import ANY, patch
 
@@ -965,6 +966,98 @@ class TestMCPInstance:
     def test_mcp_has_instructions(self):
         assert mcp.instructions is not None
         assert "foehn" in mcp.instructions
+
+    @pytest.mark.parametrize(
+        ("tool", "arguments", "guidance"),
+        [
+            ("list_datasets", {"category": "bogus"}, "Valid options"),
+            ("load_data", {"dataset": "smn", "frequency": "bogus"}, "Invalid frequency"),
+            ("describe_grid", {"dataset": "smn"}, "Use describe_data()"),
+            ("get_stations", {"dataset": "bogus"}, "Unknown dataset"),
+        ],
+    )
+    def test_expected_errors_reach_protocol_clients(self, tool, arguments, guidance):
+        from mcp import Client
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool(tool, arguments)
+
+        result = asyncio.run(call_tool())
+        assert result.is_error
+        assert guidance in result.content[0].text
+
+    def test_unexpected_failures_remain_masked(self):
+        from mcp import Client
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool("load_data", {"dataset": "smn"})
+
+        with patch("foehn.mcp_server.foehn.load", side_effect=RuntimeError("private implementation detail")):
+            result = asyncio.run(call_tool())
+        assert result.is_error
+        assert "private implementation detail" not in result.content[0].text
+
+    def test_missing_grid_dependencies_explain_the_install_to_protocol_clients(self):
+        from mcp import Client
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool("describe_grid", {"dataset": "surface_derived_grid"})
+
+        guidance = 'Reading gridded data requires optional dependencies. Install pip install "foehn[grids]"'
+        with patch("foehn.mcp_server.foehn.open_dataset", side_effect=ImportError(guidance)):
+            result = asyncio.run(call_tool())
+
+        assert result.is_error
+        assert 'pip install "foehn[grids]"' in result.content[0].text
+
+    def test_fetch_errors_keep_guidance_without_url_credentials(self):
+        from mcp import Client
+
+        from foehn.fetch import FetchError
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool("load_data", {"dataset": "smn"})
+
+        error = FetchError(
+            "Cannot fetch https://user:password@data.geo.admin.ch/x.csv?token=private-token#private-fragment"
+        )
+        with patch("foehn.mcp_server.foehn.load", side_effect=error):
+            result = asyncio.run(call_tool())
+
+        assert result.is_error
+        message = result.content[0].text
+        assert "Cannot fetch https://data.geo.admin.ch/x.csv" in message
+        assert all(private not in message for private in ("password", "private-token", "private-fragment"))
+
+    def test_response_validation_details_remain_masked(self):
+        """Pydantic's ValueError subclass reports malformed server output, not bad query arguments."""
+        from mcp import Client
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool("get_parameters", {"dataset": "smn"})
+
+        malformed = pl.DataFrame(
+            {
+                "shortname": ["tre200d0"],
+                "description": ["Temperature"],
+                "unit": ["C"],
+                "type": ["Float"],
+                "granularity": ["d"],
+                "decimals": [["private server value"]],
+                "group": ["Temperature"],
+            }
+        )
+        with patch("foehn.mcp_server.foehn.parameters", return_value=malformed):
+            result = asyncio.run(call_tool())
+
+        assert result.is_error
+        assert "private server value" not in result.content[0].text
+        assert "Error executing tool" in result.content[0].text
 
 
 # ── run() ────────────────────────────────────────────────────────────────────

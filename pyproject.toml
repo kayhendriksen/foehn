@@ -62,7 +62,9 @@ databricks = [
     # 4.0, not 3.5: the Delta ingest hands Spark a pyarrow.Table, which
     # createDataFrame accepts only from PySpark 4.0 — 3.5 iterated it as rows.
     # Databricks Runtime 17.3, which databricks.yml deploys on, is Spark 4.0.
-    "pyspark>=4.0,<5.0",
+    # SQL's extra declares Arrow, pandas and NumPy for that handoff. Plain
+    # pyspark only installs py4j; a managed runtime hid the missing dependencies.
+    "pyspark[sql]>=4.0,<5.0",
     # Delta 4.x is the line built for Spark 4.
     "delta-spark>=4.0,<5.0",
 ]

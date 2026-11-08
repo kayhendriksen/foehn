@@ -331,7 +331,7 @@ def test_requests_failures_surface_as_fetch_error(exc):
         fetcher.collection("ch.test.collection")
 
 
-def test_fetch_error_keeps_the_cause():
+def test_fetch_error_keeps_the_context_without_rendering_it():
     cause = requests.exceptions.ConnectionError("offline")
     fetcher, session = _fetcher_with()
     session.get.side_effect = cause
@@ -339,7 +339,8 @@ def test_fetch_error_keeps_the_cause():
     with pytest.raises(FetchError) as excinfo:
         fetcher.get(CSV_URL)
 
-    assert excinfo.value.__cause__ is cause
+    assert excinfo.value.__context__ is cause
+    assert excinfo.value.__suppress_context__ is True
 
 
 # --- sessions ------------------------------------------------------------
@@ -451,7 +452,7 @@ def test_a_refused_redirect_surfaces_as_a_fetch_error():
     session.get = MagicMock(side_effect=requests.exceptions.InvalidURL("Refusing redirect to evil.example"))
     fetcher._build_session = lambda: session
 
-    with pytest.raises(FetchError, match="redirect"):
+    with pytest.raises(FetchError, match="InvalidURL"):
         fetcher.get(CSV_URL)
 
 
@@ -505,3 +506,57 @@ def test_a_refreshed_listing_counts_as_new_for_eviction(monkeypatch):
     fetcher.items("ch.c", cache=True)
 
     assert [key[0] for key in fetcher._listing_cache] == ["ch.a", "ch.c"]
+
+
+def test_request_errors_redact_urls_and_suppress_the_raw_exception_traceback():
+    import traceback
+
+    url = "https://review-user:review-password@data.geo.admin.ch/data.csv?token=review-query#review-fragment"
+    cause = requests.exceptions.ConnectionError(f"GET {url} failed; nested url: /data.csv?token=review-query")
+    fetcher, session = _fetcher_with()
+    session.get.side_effect = cause
+
+    with pytest.raises(FetchError) as caught:
+        fetcher.get(url)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "https://data.geo.admin.ch/data.csv" in str(caught.value)
+    for secret in ("review-user", "review-password", "review-query", "review-fragment"):
+        assert secret not in rendered
+    assert caught.value.__context__ is cause  # available to an attached debugger
+
+
+def test_rejected_urls_and_redirects_redact_credentials():
+    import traceback
+
+    from foehn._urls import validate_download_href
+
+    url = "https://review-user:review-password@evil.example/data.csv?token=review-query#review-fragment"
+    with pytest.raises(ValueError, match="Untrusted download URL") as rejected:
+        validate_download_href(url)
+    with pytest.raises(requests.exceptions.InvalidURL) as redirect:
+        HttpFetcher()._build_session().get_redirect_target(_redirect(url))
+    for failure in (rejected.value, redirect.value):
+        rendered = "".join(traceback.format_exception(failure))
+        assert "evil.example/data.csv" in str(failure)
+        for secret in ("review-user", "review-password", "review-query", "review-fragment"):
+            assert secret not in rendered
+
+
+def test_malformed_urls_are_rejected_without_echoing_credentials():
+    from foehn._urls import validate_download_href
+
+    with pytest.raises(ValueError, match="invalid URL") as rejected:
+        validate_download_href("https://review-user:review-password@[?token=review-query")
+    assert "review-" not in str(rejected.value)
+
+
+def test_http_errors_keep_the_status_without_the_raw_request_text():
+    response = requests.Response()
+    response.status_code = 503
+    fetcher, session = _fetcher_with()
+    session.get.side_effect = requests.exceptions.HTTPError("url: /x?token=review-query", response=response)
+
+    with pytest.raises(FetchError, match=r"HTTP 503") as caught:
+        fetcher.get(CSV_URL)
+    assert "review-query" not in str(caught.value)
