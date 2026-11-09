@@ -12,5 +12,5 @@
 # build, twine and hatchling are in requirements-publish.txt, locked with
 # hashes, because they produce and check the artifact that is published.
 bandit==1.9.4
-cyclonedx-bom==7.5.0
+cyclonedx-bom==7.6.0
 pip-audit==2.10.1
