@@ -41,6 +41,13 @@ def test_a_string_data_dir_is_accepted():
     assert Workspace.resolve("/some/where").root == Path("/some/where")
 
 
+def test_a_leading_tilde_means_the_home_directory(monkeypatch):
+    """--data-dir ~/... and $FOEHN_DATA_DIR must not create a literal '~' directory."""
+    monkeypatch.setenv(DATA_DIR_ENV, "~/somedata-xyz")
+    assert Workspace.resolve().root == Path.home() / "somedata-xyz"
+    assert Workspace.resolve("~/somedata-xyz").root == Path.home() / "somedata-xyz"
+
+
 def test_equivalent_spellings_resolve_to_the_same_root(tmp_path):
     """Two names for one directory must produce one workspace.
 
