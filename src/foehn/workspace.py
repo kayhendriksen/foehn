@@ -83,10 +83,10 @@ class Workspace:
         under different spellings.
         """
         if data_dir is not None:
-            return cls(Path(data_dir).resolve())
+            return cls(Path(data_dir).expanduser().resolve())
         env_dir = os.environ.get(DATA_DIR_ENV)
         if env_dir:
-            return cls(Path(env_dir).resolve())
+            return cls(Path(env_dir).expanduser().resolve())
         return cls(Path.cwd().joinpath(*DEFAULT_ROOT).resolve())
 
     def bronze(self, dataset: str | None = None) -> Path:
