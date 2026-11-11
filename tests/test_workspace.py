@@ -116,6 +116,18 @@ def test_to_zarr_store_lands_in_the_workspace(tmp_path, monkeypatch):
     assert mock.call_args.kwargs["workspace"] == Workspace(tmp_path)
 
 
+def test_an_explicit_store_expands_a_leading_tilde(tmp_path, monkeypatch):
+    """``store="~/x.zarr"`` from Python never passes through a shell that would expand it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path / "data"))
+    with patch("foehn.registry.write_zarr") as mock:
+        store = foehn.to_zarr("surface_derived_grid", match="rhiresd", store="~/mine.zarr")
+
+    assert store == tmp_path / "mine.zarr"
+    assert mock.call_args.args[1] == store
+
+
 def test_a_match_narrows_the_store_name(tmp_path):
     """Two filtered slices of one collection must not overwrite each other.
 

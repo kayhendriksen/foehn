@@ -75,6 +75,10 @@ class Workspace:
         caller that passes nothing gets ``$FOEHN_DATA_DIR`` whether it reached
         foehn through the CLI or through the Python API.
 
+        A leading ``~`` is expanded to the home directory in both, since neither
+        an MCP client config nor a Python string passes through a shell that
+        would expand it first.
+
         Resolved (symlinks followed, ``.``/``..`` collapsed) so that two spellings
         of the same directory — a relative path here, an absolute or symlinked one
         there — produce the same root. Every ownership and cache lock foehn takes
