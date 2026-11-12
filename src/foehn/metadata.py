@@ -27,7 +27,7 @@ import polars as pl
 from foehn.assets import collection_assets
 from foehn.collections import DatasetKind, collection_id, kind
 from foehn.fetch import Fetcher
-from foehn.meteocsv import decode_meteoswiss_csv
+from foehn.meteocsv import decode_meteoswiss_csv, refuse_compressed
 
 
 @dataclass(frozen=True)
@@ -217,8 +217,9 @@ def fetch_table(dataset: str, table: str, *, fetcher: Fetcher) -> pl.DataFrame:
     for asset in csv_assets:
         if spec.suffix not in asset.name:
             continue
-        content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
-        df = pl.read_csv(content.encode("utf-8"), separator=";", schema_overrides=spec.schema_overrides)
+        content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body).encode("utf-8")
+        refuse_compressed(content, asset.name)
+        df = pl.read_csv(content, separator=";", schema_overrides=spec.schema_overrides)
         return df.select(pl.col(field.source).alias(field.published) for field in spec.fields)
 
     available = [name for name, other in TABLES.items() if any(other.suffix in a.name for a in csv_assets)]
