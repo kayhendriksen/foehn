@@ -24,6 +24,7 @@ from foehn.mcp_server import (
     Page,
     Parameter,
     Station,
+    aggregate_data,
     describe_data,
     describe_grid,
     get_inventory,
@@ -71,7 +72,7 @@ class TestConstants:
 
     def test_no_tool_docstring_is_left_holding_a_placeholder(self):
         """A ``$name`` that survives import is a fragment nobody rendered."""
-        for tool in (list_datasets, load_data):
+        for tool in (list_datasets, load_data, aggregate_data):
             assert "$" not in tool.__doc__
 
 
@@ -592,6 +593,206 @@ class TestDescribeData:
         assert result.stations == []
         assert result.date_min is None
         assert result.date_max is None
+
+
+# ── aggregate_data ───────────────────────────────────────────────────────────
+
+
+def _daily_smn() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "station_abbr": ["BER", "BER", "BER", "ZUR", "ZUR"],
+            "reference_timestamp": [
+                datetime(2024, 7, 1),
+                datetime(2024, 7, 2),
+                datetime(2025, 7, 1),
+                datetime(2024, 7, 1),
+                datetime(2025, 7, 1),
+            ],
+            "temp": [20.0, 24.0, 30.0, 18.0, None],
+            "rain": [1.0, 0.0, 2.5, 4.0, 3.0],
+        }
+    )
+
+
+class TestAggregateData:
+    @patch("foehn.mcp_server.foehn.load")
+    def test_means_per_station_by_default(self, mock_load):
+        mock_load.return_value = _daily_smn()
+        result = aggregate_data("smn", "temp")
+        assert isinstance(result, Page)
+        assert result.items == [
+            {"station_abbr": "BER", "rows": 3, "temp_mean": 24.667},
+            {"station_abbr": "ZUR", "rows": 2, "temp_mean": 18.0},
+        ]
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_several_stats_and_columns_per_station_and_year(self, mock_load):
+        mock_load.return_value = _daily_smn()
+        result = aggregate_data("smn", ["temp", "rain"], stats=["max", "sum", "count"], group_by=["station", "year"])
+        assert result.total == 4
+        assert result.items[0] == {
+            "station_abbr": "BER",
+            "year": 2024,
+            "rows": 2,
+            "temp_max": 24.0,
+            "temp_sum": 44.0,
+            "temp_count": 2,
+            "rain_max": 1.0,
+            "rain_sum": 1.0,
+            "rain_count": 2,
+        }
+        # A null is a missing reading: counted as a row, not as a value.
+        zur_2025 = result.items[3]
+        assert (zur_2025["rows"], zur_2025["temp_count"], zur_2025["temp_max"]) == (1, 0, None)
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_time_parts_are_derived_from_the_timestamp(self, mock_load):
+        mock_load.return_value = _daily_smn()
+        by_date = aggregate_data("smn", "rain", stats="sum", group_by=["date"])
+        assert [(row["date"].isoformat(), row["rain_sum"]) for row in by_date.items] == [
+            ("2024-07-01", 5.0),
+            ("2024-07-02", 0.0),
+            ("2025-07-01", 5.5),
+        ]
+        by_month = aggregate_data("smn", "rain", group_by=["month"])
+        assert [row["month"] for row in by_month.items] == [7]
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_an_empty_group_by_is_one_row_over_everything(self, mock_load):
+        mock_load.return_value = _daily_smn()
+        result = aggregate_data("smn", "rain", stats="sum", group_by=[])
+        assert result.items == [{"rows": 5, "rain_sum": 10.5}]
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_top_n_by_a_result_column(self, mock_load):
+        mock_load.return_value = _daily_smn()
+        result = aggregate_data(
+            "smn", "temp", stats="max", group_by=["station", "date"], order_by="temp_max", sort="desc", limit=2
+        )
+        assert [row["temp_max"] for row in result.items] == [30.0, 24.0]
+        assert (result.total, result.next_offset) == (5, 2)
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_ties_in_order_by_break_on_the_group_keys(self, mock_load):
+        """Groups come back in no fixed order, so pages would otherwise shift between calls."""
+        mock_load.return_value = pl.DataFrame(
+            {"station_abbr": ["ZUR", "BER", "GVE"], "reference_timestamp": [datetime(2025, 1, 1)] * 3, "x": [1, 1, 1]}
+        )
+        result = aggregate_data("smn", "x", order_by="x_mean", sort="desc")
+        assert [row["station_abbr"] for row in result.items] == ["BER", "GVE", "ZUR"]
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_station_means_the_point_pair_for_forecast_local(self, mock_load):
+        """Point IDs are reused across point types, so one ID is not one point."""
+        mock_load.return_value = pl.DataFrame(
+            {
+                "point_id": [1, 1, 1],
+                "point_type_id": [1, 2, 1],
+                "reference_timestamp": [datetime(2026, 11, 12, h) for h in (1, 1, 2)],
+                "tre200h0": [5.0, 9.0, 7.0],
+            }
+        )
+        result = aggregate_data("forecast_local", "tre200h0", stats="max")
+        assert [(r["point_id"], r["point_type_id"], r["tre200h0_max"]) for r in result.items] == [
+            (1, 1, 7.0),
+            (1, 2, 9.0),
+        ]
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_a_column_group_key_is_loaded_alongside_the_metrics(self, mock_load):
+        mock_load.return_value = pl.DataFrame(
+            {
+                "station_abbr": ["BER", "BER"],
+                "gwl": ["1.5", "3.0"],
+                "date": ["0001-01-01"] * 2,
+                "SMHI-RCA-ECEARTH": [2.0, 3.0],
+            }
+        )
+        result = aggregate_data("climate_scenarios", "SMHI-RCA-ECEARTH", group_by=["gwl"])
+        assert mock_load.call_args.kwargs["columns"] == ["SMHI-RCA-ECEARTH", "gwl"]
+        assert [(r["gwl"], r["SMHI-RCA-ECEARTH_mean"]) for r in result.items] == [("1.5", 2.0), ("3.0", 3.0)]
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_filters_and_budget_are_passed_to_load(self, mock_load):
+        mock_load.return_value = _daily_smn()
+        aggregate_data(
+            "smn",
+            ["temp"],
+            station="BER",
+            frequency="d",
+            time_slice="historical",
+            year=[2024],
+            month=7,
+            date_from="2024-01-01",
+            date_to="2024-12-31",
+        )
+        mock_load.assert_called_once_with(
+            "smn",
+            station="BER",
+            frequency="d",
+            time_slice="historical",
+            year=[2024],
+            month=7,
+            date_from="2024-01-01",
+            date_to="2024-12-31",
+            columns=["temp"],
+            max_bytes=_LOAD_BUDGET_BYTES,
+        )
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_float_results_are_rounded(self, mock_load):
+        mock_load.return_value = pl.DataFrame({"station_abbr": ["BER"] * 3, "x": [1.0, 1.0, 2.0]})
+        assert aggregate_data("smn", "x").items[0]["x_mean"] == 1.333
+
+    @patch("foehn.mcp_server.foehn.load")
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"columns": []}, "at least one column"),
+            ({"columns": "temp", "stats": "mode"}, "Invalid stats"),
+            ({"columns": "temp", "sort": "up"}, "Invalid sort"),
+            ({"columns": "station_abbr"}, "numeric"),
+            ({"columns": "temp", "group_by": ["season"]}, "Invalid group_by 'season'"),
+            ({"columns": "temp", "order_by": "temp_max"}, "Invalid order_by"),
+        ],
+    )
+    def test_bad_arguments_are_refused_with_the_valid_options(self, mock_load, kwargs, message):
+        mock_load.return_value = _daily_smn()
+        with pytest.raises(ValueError, match=message):
+            aggregate_data("smn", **kwargs)
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_a_time_group_needs_a_timestamp(self, mock_load):
+        mock_load.return_value = pl.DataFrame({"gwl": ["1.5"], "SMHI-RCA-ECEARTH": [2.0]})
+        with pytest.raises(ValueError, match="reference_timestamp"):
+            aggregate_data("climate_scenarios", "SMHI-RCA-ECEARTH", group_by=["year"])
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_a_dataset_without_a_timestamp_groups_by_its_own_date_column(self, mock_load):
+        """climate_scenarios has nominal days in ``date`` and no reference_timestamp."""
+        mock_load.return_value = pl.DataFrame({"date": ["0001-01-01", "0001-01-01"], "SMHI-RCA-ECEARTH": [2.0, 4.0]})
+        result = aggregate_data("climate_scenarios", "SMHI-RCA-ECEARTH", group_by=["date"])
+        assert result.items == [{"date": "0001-01-01", "rows": 2, "SMHI-RCA-ECEARTH_mean": 3.0}]
+
+    def test_an_oversized_aggregation_is_refused(self, fetcher, monkeypatch):
+        _oversized_smn(fetcher, monkeypatch)
+        with pytest.raises(ValueError, match="station="):
+            aggregate_data("smn", "temp", frequency="d")
+
+    def test_dates_in_the_result_reach_protocol_clients(self):
+        from mcp import Client
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool(
+                    "aggregate_data", {"dataset": "smn", "columns": "rain", "stats": "sum", "group_by": ["date"]}
+                )
+
+        with patch("foehn.mcp_server.foehn.load", return_value=_daily_smn()):
+            result = asyncio.run(call_tool())
+        assert not result.is_error
+        assert result.structured_content["items"][0] == {"date": "2024-07-01", "rows": 2, "rain_sum": 5.0}
 
 
 # ── describe_grid ────────────────────────────────────────────────────────────
