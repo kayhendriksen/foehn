@@ -41,6 +41,13 @@ def test_a_string_data_dir_is_accepted():
     assert Workspace.resolve("/some/where").root == Path("/some/where")
 
 
+def test_a_leading_tilde_means_the_home_directory(monkeypatch):
+    """--data-dir ~/... and $FOEHN_DATA_DIR must not create a literal '~' directory."""
+    monkeypatch.setenv(DATA_DIR_ENV, "~/somedata-xyz")
+    assert Workspace.resolve().root == Path.home() / "somedata-xyz"
+    assert Workspace.resolve("~/somedata-xyz").root == Path.home() / "somedata-xyz"
+
+
 def test_equivalent_spellings_resolve_to_the_same_root(tmp_path):
     """Two names for one directory must produce one workspace.
 
@@ -107,6 +114,18 @@ def test_to_zarr_store_lands_in_the_workspace(tmp_path, monkeypatch):
     assert store == Workspace(tmp_path).zarr("surface_derived_grid", "rhiresd")
     assert mock.call_args.args[1] == store
     assert mock.call_args.kwargs["workspace"] == Workspace(tmp_path)
+
+
+def test_an_explicit_store_expands_a_leading_tilde(tmp_path, monkeypatch):
+    """``store="~/x.zarr"`` from Python never passes through a shell that would expand it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path / "data"))
+    with patch("foehn.registry.write_zarr") as mock:
+        store = foehn.to_zarr("surface_derived_grid", match="rhiresd", store="~/mine.zarr")
+
+    assert store == tmp_path / "mine.zarr"
+    assert mock.call_args.args[1] == store
 
 
 def test_a_match_narrows_the_store_name(tmp_path):

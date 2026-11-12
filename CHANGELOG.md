@@ -8,6 +8,15 @@ changes**. The same notes are published with each
 
 ## Unreleased
 
+### Bug fixes
+
+- **A leading `~` in a path now means the home directory.** `--data-dir`,
+  `$FOEHN_DATA_DIR`, `foehn load --output` and `to_zarr(store=...)` /
+  `foehn zarr --out` used to create a literal `~` folder under the current
+  directory whenever no shell expanded the tilde first: a quoted path,
+  `--option=~/...`, a Python string, or `FOEHN_DATA_DIR` set in an MCP client
+  config.
+
 ## 0.5.1 (2026-11-08)
 
 A correctness release. Repeated reviews of `main` since 0.5.0 fixed GRIB2

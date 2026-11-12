@@ -455,8 +455,10 @@ def cmd_load(args: argparse.Namespace) -> None:
     )
 
     if args.output is not None:
-        _save_frame(df, args.output)
-        _console(args).status(f"Wrote {df.height} rows x {df.width} columns to {args.output}")
+        # The shell leaves ``-o=~/x.csv`` and a quoted ``'~/x.csv'`` alone.
+        output = args.output.expanduser()
+        _save_frame(df, output)
+        _console(args).status(f"Wrote {df.height} rows x {df.width} columns to {output}")
     elif args.output_format != "table":
         _write_frame(df, args.output_format)
     else:
