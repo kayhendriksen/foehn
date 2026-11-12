@@ -59,6 +59,7 @@ it on demand — this is also what MCP Registry clients run:
 | `list_datasets` | Browse all MeteoSwiss datasets with metadata |
 | `load_data` | Fetch weather measurements as rows |
 | `describe_data` | Get summary statistics for a dataset |
+| `aggregate_data` | Compute means, extremes, totals and counts per station, year, month, date or hour |
 | `describe_grid` | Inspect a gridded dataset's dimensions and variables (NetCDF, GRIB2, radar) |
 | `get_parameters` | Look up what each column measures |
 | `get_stations` | Find station abbreviations and locations |
@@ -72,7 +73,14 @@ downloaded, so a call's cost is set by `station`, `frequency` and `time_slice`.
 A call over the budget is refused with an error naming them, so the model can
 narrow it and try again, and the server never runs out of memory.
 
-`load_data`, `get_inventory` and `get_points` return one page at a time — at
+`aggregate_data` answers summary questions — "mean July temperature per year in
+Bern", "the 10 hottest days at Zurich" — without sending the rows to the model.
+It takes the same filters and download budget as `load_data`, reduces the rows
+on the server with the chosen `stats` (mean, min, max, sum, median, std, count),
+grouped by `station`, a time part (`year`, `month`, `date`, `hour`) or any column,
+and returns one row per group, sortable by any result column (`order_by`, `sort`).
+
+`load_data`, `aggregate_data`, `get_inventory` and `get_points` return one page at a time — at
 most 500 rows, 50 by default for `load_data` and 100 for the other two — with
 `total`, `has_more` and `next_offset`; pass `offset` to get the next page. A full
 listing (about 19,500 inventory rows for `smn`, 5,800 forecast points) would

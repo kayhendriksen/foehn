@@ -103,6 +103,21 @@ _PAGE_MAX = 500
 _PAGE_DEFAULT = 100
 _LOAD_DEFAULT = 50
 
+# What aggregate_data computes, as polars expression methods; and the time parts
+# it can group on, derived from reference_timestamp. "month" is the month of the
+# year (1-12), so group_by=["year", "month"] gives a monthly series and "month"
+# alone a monthly climatology.
+_STATS = ("mean", "min", "max", "sum", "median", "std", "count")
+_TIME_GROUPS = {
+    "year": lambda ts: ts.dt.year(),
+    "month": lambda ts: ts.dt.month(),
+    "date": lambda ts: ts.dt.date(),
+    "hour": lambda ts: ts.dt.hour(),
+}
+# Float results are rounded to this many decimals: a mean carries fifteen digits
+# of noise, and every one of them costs the model context.
+_AGGREGATE_DECIMALS = 3
+
 # What every tool docstring below is filled from. ``load_data`` and
 # ``describe_data`` used to name the granularity and time-slice tokens as prose,
 # directly under the comment above saying they would not.
@@ -116,6 +131,8 @@ _VOCABULARY = {
     "page_default": str(_PAGE_DEFAULT),
     "page_max": str(_PAGE_MAX),
     "load_default": str(_LOAD_DEFAULT),
+    "stats": ", ".join(_STATS),
+    "time_groups": ", ".join(_TIME_GROUPS),
 }
 
 # ── Parameter types ──────────────────────────────────────────────────────────
@@ -139,6 +156,8 @@ _Frequency = Annotated[str, _one_of(GRANULARITY_LABELS)]
 _TimeSlice = Annotated[str, _one_of(TIME_SLICE_LABELS)]
 _Sort = Annotated[str, _one_of(SORT_ORDERS)]
 _Category = Annotated[str, _one_of(sorted(CATEGORIES))]
+_Stat = Annotated[str, _one_of(_STATS)]
+_Stats = _Stat | list[_Stat]
 
 # One value or several. Models often pass a lone station as "BER" rather than
 # ["BER"] — especially once a client has dropped the schema saying it is a list.
@@ -170,7 +189,9 @@ mcp = MCPServer(
         "2. get_stations(dataset) — find station abbreviations (e.g. 'BER' for Bern)\n"
         "3. get_parameters(dataset) — understand what each column measures\n"
         "4. describe_data(dataset, ...) — check row count and date range before loading\n"
-        "5. load_data(dataset, ...) — fetch the data with filters\n\n"
+        "5. load_data(dataset, ...) — fetch the data with filters\n"
+        "   or aggregate_data(dataset, columns, ...) — means, extremes and totals\n"
+        "   computed on the server, instead of paging raw rows\n\n"
         "Key tip: station, frequency and time_slice decide how much is downloaded;\n"
         "year, month and date_from/date_to only trim rows afterwards. Narrow the\n"
         "first three before loading historical data — a call that downloads too\n"
@@ -610,6 +631,163 @@ def describe_data(
     )
 
 
+def _group_expressions(df: pl.DataFrame, group_by: list[str]) -> list[pl.Expr]:
+    """The expressions one aggregate_data group key stands for, in order.
+
+    "station" is the frame's station key: ``station_abbr``, or the point pair
+    for forecast_local, whose IDs are reused across point types. Time parts are
+    derived from ``reference_timestamp``. Anything else names a column.
+    """
+    exprs: list[pl.Expr] = []
+    for key in group_by:
+        if key == "station":
+            if "station_abbr" in df.columns:
+                exprs.append(pl.col("station_abbr"))
+            elif {"point_id", "point_type_id"} <= set(df.columns):
+                exprs += [pl.col("point_id"), pl.col("point_type_id")]
+            else:
+                raise ValueError(f"This dataset has no station column to group by. Columns: {df.columns}.")
+        elif key in _TIME_GROUPS and "reference_timestamp" in df.columns:
+            exprs.append(_TIME_GROUPS[key](pl.col("reference_timestamp").cast(pl.Datetime)).alias(key))
+        # A column of the same name, when there is no timestamp to derive from:
+        # climate_scenarios carries its nominal days as ``date``.
+        elif key in df.columns:
+            exprs.append(pl.col(key))
+        elif key in _TIME_GROUPS:
+            raise ValueError(
+                f"group_by {key!r} needs a reference_timestamp, which this dataset does not have. "
+                f"Group by one of its columns instead: {df.columns}."
+            )
+        else:
+            raise ValueError(
+                f"Invalid group_by {key!r}. Use 'station', one of {', '.join(_TIME_GROUPS)}, or a column: {df.columns}."
+            )
+    return exprs
+
+
+@_tool(title="Aggregate data", annotations=_READ_ONLY)
+@renders(**_VOCABULARY)
+def aggregate_data(
+    dataset: str,
+    columns: _Names,
+    stats: _Stats = "mean",
+    group_by: _Names | None = "station",
+    station: _Names | None = None,
+    frequency: _Frequency | None = None,
+    time_slice: _TimeSlice | None = None,
+    year: _Years | None = None,
+    month: _Months | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    order_by: str | None = None,
+    sort: _Sort | None = None,
+    limit: _PageLimit = _PAGE_DEFAULT,
+    offset: _Offset = 0,
+) -> Page[dict[str, Any]]:
+    """Compute means, extremes, totals and counts on the server, grouped as asked.
+
+    Use this instead of load_data() whenever the answer is a summary — an
+    average, a maximum, a yearly total, the hottest days — rather than the rows
+    themselves. The rows are loaded and reduced here, so only the result reaches
+    you: one row per group, with the group keys, ``rows`` (rows in the group),
+    and one ``<column>_<stat>`` column per column and statistic.
+
+    Takes the same filters as load_data() and is held to the same $load_budget
+    download budget: station, frequency and time_slice decide what is
+    downloaded; year, month and date_from/date_to only trim rows.
+
+    Timestamps are grouped as published. For frequency "t" and "h" a timestamp
+    marks the END of its interval, so the 00:00 reading falls on the new day.
+
+    Examples:
+        Mean July temperature per year in Bern:
+        aggregate_data("smn", "tre200d0", group_by=["year"], station="BER",
+                       frequency="d", time_slice="historical", month=7)
+        The 10 hottest days at Zurich since 2000:
+        aggregate_data("smn", "tre200dx", stats="max", group_by=["date"],
+                       station="SMA", frequency="d", time_slice="historical",
+                       date_from="2000-01-01", order_by="tre200dx_max",
+                       sort="desc", limit=10)
+
+    Args:
+        dataset: Dataset name (e.g. "smn"). Loadable datasets: $loadable.
+        columns: Column(s) to aggregate (e.g. ["tre200d0", "rre150d0"]). Must be
+            numeric. Use get_parameters() to find column names.
+        stats: Statistic(s) to compute for every column. Options: $stats.
+            "count" counts non-null values. Defaults to "mean".
+        group_by: What each result row is for, in order. "station" (the station,
+            or the forecast point for "forecast_local"), a time part derived from
+            the timestamp ($time_groups — "month" is the month of the year, so
+            use ["year", "month"] for a monthly series), or any column name
+            (e.g. ["variable", "gwl"] for "climate_scenarios", whose value
+            columns are climate models). Defaults to "station"; pass an empty
+            list for a single row over everything.
+        station: Station abbreviation(s) to include (e.g. ["BER"]).
+        frequency: Granularity. Options: $granularities.
+        time_slice: Time period. Options: $time_slices.
+            Defaults to "$default_time_slice".
+        year: Only these year(s).
+        month: Only these month(s) (1-12).
+        date_from: Start date (inclusive), ISO format "YYYY-MM-DD".
+        date_to: End date (inclusive), ISO format "YYYY-MM-DD".
+        order_by: Result column to sort by (e.g. "tre200d0_mean" or "year").
+            Defaults to the group keys.
+        sort: "asc" or "desc" for order_by. Defaults to "asc". Use "desc" with a
+            limit for the top N.
+        limit: Maximum result rows (default $page_default, max $page_max).
+        offset: Number of result rows to skip; pass the previous response's
+            ``next_offset`` to get the next page.
+    """
+    metrics = _as_list(columns) or []
+    if not metrics:
+        raise ValueError("Pass at least one column to aggregate.")
+    stat_list = [stats] if isinstance(stats, str) else list(stats)
+    if not stat_list or any(s not in _STATS for s in stat_list):
+        raise ValueError(f"Invalid stats {stat_list!r}. Valid options: {', '.join(_STATS)}.")
+    if sort is not None and sort not in SORT_ORDERS:
+        raise ValueError(f"Invalid sort {sort!r}. Valid options: {', '.join(SORT_ORDERS)}.")
+    groups = _as_list(group_by) or []
+
+    # Group keys that name a column have to survive load()'s column projection.
+    passthrough = [g for g in groups if g != "station" and g not in _TIME_GROUPS]
+    df = foehn.load(
+        dataset,
+        station=station,
+        frequency=frequency,
+        time_slice=time_slice,
+        year=year,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
+        columns=list(dict.fromkeys([*metrics, *passthrough])),
+        max_bytes=_LOAD_BUDGET_BYTES,
+    )
+    if non_numeric := [c for c in metrics if not df.schema[c].is_numeric()]:
+        raise ValueError(f"Only numeric columns can be aggregated: {non_numeric} are not.")
+
+    aggs = [pl.len().alias("rows")] + [
+        getattr(pl.col(c), stat)().alias(f"{c}_{stat}") for c in metrics for stat in stat_list
+    ]
+    keys = _group_expressions(df, groups)
+    result = df.group_by(keys).agg(aggs) if keys else df.select(aggs)
+    result = result.with_columns(pl.col(pl.Float32, pl.Float64).round(_AGGREGATE_DECIMALS))
+
+    # group_by returns groups in no particular order, so the keys always break
+    # ties: without them a page boundary could fall differently on every call.
+    agg_names = {a.meta.output_name() for a in aggs}
+    key_names = [c for c in result.columns if c not in agg_names]
+    if order_by is not None:
+        if order_by not in result.columns:
+            raise ValueError(f"Invalid order_by {order_by!r}. Result columns: {result.columns}.")
+        tiebreak = [k for k in key_names if k != order_by]
+        result = result.sort(
+            [order_by, *tiebreak], descending=[sort == "desc"] + [False] * len(tiebreak), nulls_last=True
+        )
+    elif key_names:
+        result = result.sort(key_names, descending=(sort == "desc"), nulls_last=True)
+    return _page(result, limit, offset)
+
+
 @_tool(title="Describe grid", annotations=_GRID_INSPECT)
 def describe_grid(
     dataset: str,
@@ -832,6 +1010,9 @@ Data provided by MeteoSwiss Open Government Data
 3. **get_parameters(dataset)** — understand column names, units, and groups.
 4. **describe_data(dataset, ...)** — check row count and date range before loading.
 5. **load_data(dataset, station, frequency, time_slice, year, columns, limit)** — fetch data.
+   When the answer is a summary (an average, an extreme, a total), use
+   **aggregate_data(dataset, columns, stats, group_by, ...)** instead: it reduces
+   the rows on the server and returns one row per group.
 
 Always call get_parameters() if you need to interpret column names — they
 use MeteoSwiss shortcodes (e.g. `tre200s0` = 2m air temperature in Celsius).
@@ -870,7 +1051,7 @@ Timestamp convention (all UTC):
 
 ## Filtering
 
-load_data() and describe_data() support these filters (all combinable):
+load_data(), describe_data() and aggregate_data() support these filters (all combinable):
 
 - **year** — e.g. year=[2025] or year=[2020, 2021, 2022]
 - **month** — e.g. month=[6, 7, 8] for summer months (works across years)
@@ -945,6 +1126,23 @@ get_inventory("smn", station=["BER"])
 **Compare multiple stations:**
 load_data("smn", station=["BER", "ZUR", "GVE"], frequency="d")
 
+**Mean July temperature per year in Bern:**
+aggregate_data("smn", "tre200d0", group_by=["year"], station="BER",
+               frequency="d", time_slice="historical", month=7)
+
+**Monthly rainfall totals this year, per station:**
+aggregate_data("smn", "rre150d0", stats="sum", group_by=["station", "year", "month"],
+               station=["BER", "GVE"], frequency="d")
+
+**The 10 hottest days at Zurich Fluntern since 2000:**
+aggregate_data("smn", "tre200dx", stats="max", group_by=["date"], station="SMA",
+               frequency="d", time_slice="historical", date_from="2000-01-01",
+               order_by="tre200dx_max", sort="desc", limit=10)
+
+**Forecast daily min/max for a postal code:**
+aggregate_data("forecast_local", "tre200h0", stats=["min", "max"],
+               group_by=["date"], station="3011")
+
 ## Attribution
 
 When presenting results, mention that they are powered by foehn
@@ -973,7 +1171,8 @@ Follow this workflow:
 4. Call get_parameters(dataset) to understand what columns are returned and their units.
 5. Call describe_data() to check row count and plan your query.
 6. Call load_data() with filters (year, month, date_from/date_to, columns,
-   drop_null, sort) to fetch only the data you need.
+   drop_null, sort) to fetch only the data you need — or, when the answer is an
+   average, extreme or total, aggregate_data() to compute it on the server.
 7. Summarise the result clearly with station name, parameter, time period, units, and values.
 
 Mention that results are powered by foehn with data from MeteoSwiss."""

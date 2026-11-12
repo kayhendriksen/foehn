@@ -24,6 +24,13 @@ changes**. The same notes are published with each
 
 ### Improvements
 
+- **New MCP tool `aggregate_data`.** It computes means, extremes, totals,
+  medians, standard deviations and counts on the server, grouped by station,
+  year, month, date, hour or any column, and returns one row per group, sorted by
+  any result column. Summary questions ("mean July temperature per year", "the
+  10 hottest days") no longer mean paging raw rows into the model's context. It
+  takes `load_data`'s filters and is held to the same download budget.
+
 - **MCP tool parameters carry their descriptions and vocabularies in the input
   schema.** Each parameter's docstring text is published as its description, and
   `frequency`, `time_slice`, `sort` and `category` list their allowed values,
