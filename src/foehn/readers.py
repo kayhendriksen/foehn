@@ -52,6 +52,9 @@ from foehn.meteocsv import (
 # A ``date_to`` of exactly "YYYY-MM-DD" names a whole day, not its midnight.
 _BARE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# The ``sort`` vocabulary ``Filters`` enforces, for every front end to render from.
+SORT_ORDERS = ("asc", "desc")
+
 
 @dataclass(frozen=True)
 class Filters:
@@ -136,8 +139,8 @@ class Filters:
             invalid_months := sorted({value for value in self.month if not 1 <= value <= 12})
         ):
             raise ValueError(f"Invalid month {invalid_months}. Valid options: 1 through 12.")
-        if self.sort is not None and self.sort not in ("asc", "desc"):
-            raise ValueError(f"Invalid sort {self.sort!r}. Valid options: asc, desc.")
+        if self.sort is not None and self.sort not in SORT_ORDERS:
+            raise ValueError(f"Invalid sort {self.sort!r}. Valid options: {', '.join(SORT_ORDERS)}.")
         if self.limit is not None and self.limit < 0:
             raise ValueError("limit must be zero or greater.")
         if self.workers < 1:
@@ -562,6 +565,7 @@ def read_archive(dataset: str, filters: Filters, *, fetcher: Fetcher) -> pl.Data
 
 
 __all__ = [
+    "SORT_ORDERS",
     "Filters",
     "ReadAdapter",
     "Reader",

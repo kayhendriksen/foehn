@@ -8,6 +8,30 @@ changes**. The same notes are published with each
 
 ## Unreleased
 
+### Breaking changes
+
+- **The MCP tools `load_data`, `get_inventory` and `get_points` are paged.**
+  They return `{total, count, offset, has_more, next_offset, items}` instead of a
+  bare list, at most 500 rows per call (`limit`, `offset`; 50 by default for
+  `load_data`, 100 for the others). `load_data` can now page past its first 500
+  rows and says how many match. Unpaged, the `smn` inventory (~600k tokens) and
+  the full forecast-point list (~340k tokens) overflowed a model's context
+  window. `get_inventory` also gains `station` and `parameter` filters.
+- **MCP tools refuse an out-of-range `limit` instead of clamping it.** The input
+  schemas now declare `limit` (1–500), `offset` (≥ 0) and `month` (1–12), so a
+  client is told the call is invalid rather than silently given a different page
+  size.
+
+### Improvements
+
+- **MCP tool parameters carry their descriptions and vocabularies in the input
+  schema.** Each parameter's docstring text is published as its description, and
+  `frequency`, `time_slice`, `sort` and `category` list their allowed values,
+  rendered from the same tables `foehn.load` validates against. Some clients drop
+  a nullable parameter's type; the description survives that.
+- **MCP list parameters accept a single value.** `station`, `columns`,
+  `variables`, `parameter`, `year` and `month` take `"BER"` as well as `["BER"]`.
+
 ### Bug fixes
 
 - **A leading `~` in a path now means the home directory.** `--data-dir`,
