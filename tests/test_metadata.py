@@ -172,8 +172,8 @@ def test_points_parse_with_their_declared_types_whatever_the_rows_look_like():
     df = fetch_table("forecast_local", "points", fetcher=fake)
     assert df.schema["postal_code"] == pl.String
     with patch("foehn.api.default_fetcher", return_value=fake):
-        assert [p.point_id for p in get_points("forecast_local")] == [301100, 78]
-        assert [p.point_id for p in get_points("forecast_local", query="3011")] == [301100]
+        assert [p.point_id for p in get_points("forecast_local").items] == [301100, 78]
+        assert [p.point_id for p in get_points("forecast_local", query="3011").items] == [301100]
 
 
 def test_a_compressed_metadata_table_is_refused():

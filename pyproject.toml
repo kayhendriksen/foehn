@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "foehn"
-version = "0.5.0"
+version = "0.5.1"
 description = "Python toolkit for Swiss weather data — download, query, and analyse MeteoSwiss Open Government Data"
 readme = "README.md"
 license = "MIT"
@@ -118,7 +118,7 @@ dev = [
     # and uv.lock together, so the upgrade arrives as its own reviewable PR rather
     # than landing on whoever opens the next one. (ruff and zizmor are pinned in
     # .pre-commit-config.yaml, which CI reads — see scripts/tool_version.sh.)
-    "ty==0.0.92",
+    "ty==0.0.95",
     "numpy>=1.24",
     "pydantic>=2.0",
     # Strict YAML parsing for the workflow-structure test: PyYAML silently

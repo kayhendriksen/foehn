@@ -9,6 +9,11 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 STAC_DOMAINS = frozenset({"data.geo.admin.ch"})
 DOWNLOAD_DOMAINS = frozenset({"data.geo.admin.ch", "opendata.swiss", "rgw.cscs.ch"})
 
+# Never valid in a URL, and read differently by urllib.parse and by urllib3: with
+# a backslash before the "@", the first sees an allowlisted host and the second
+# connects somewhere else. urllib.parse also drops tabs and newlines silently.
+_AMBIGUOUS_URL_CHARACTERS = re.compile(r"[\\\x00-\x20\x7f]")
+
 
 def safe_url(url: str) -> str:
     """The diagnostic form of a URL, without userinfo, query or fragment."""
@@ -30,6 +35,8 @@ def redact_urls(message: str) -> str:
 
 
 def _validate_https_url(url: str, allowed_domains: frozenset[str], label: str) -> str:
+    if _AMBIGUOUS_URL_CHARACTERS.search(url):
+        raise ValueError(f"Untrusted {label} URL: {safe_url(url)!r}")
     try:
         parsed = urlparse(url)
     except ValueError:

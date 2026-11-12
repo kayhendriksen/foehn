@@ -9,18 +9,20 @@ GRIB2, or radar) into the local bronze cache (annotated ``read_only_hint=False``
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
+import re
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, Literal, ParamSpec, TypeVar
+from typing import Annotated, Any, Generic, Literal, ParamSpec, TypeVar
 
 import polars as pl
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, WithJsonSchema
 
 import foehn
 from foehn import registry
@@ -38,6 +40,7 @@ from foehn.collections import (
 from foehn.docstrings import renders
 from foehn.fetch import FetchError
 from foehn.metadata import TABLES
+from foehn.readers import SORT_ORDERS
 from foehn.workspace import DATA_DIR_ENV, user_cache_root
 
 logger = logging.getLogger(__name__)
@@ -90,6 +93,16 @@ _CATEGORY_CODES = ", ".join(sorted(CATEGORIES))
 # with the filters that would narrow it, rather than run until the host fails.
 _LOAD_BUDGET_BYTES = 1_000_000_000
 
+# Every listing tool returns a page at a time, at most this many rows: it bounds
+# what goes back to a model's context window. The smn inventory is ~19,500 rows
+# (~600k tokens) and the forecast points ~5,800 (~340k tokens); either alone
+# overflowed it before they were paged.
+_PAGE_MAX = 500
+# Metadata rows are small, so the listings default to a larger page than
+# load_data's measurement rows.
+_PAGE_DEFAULT = 100
+_LOAD_DEFAULT = 50
+
 # What every tool docstring below is filled from. ``load_data`` and
 # ``describe_data`` used to name the granularity and time-slice tokens as prose,
 # directly under the comment above saying they would not.
@@ -100,7 +113,49 @@ _VOCABULARY = {
     "time_slices": options(TIME_SLICE_LABELS),
     "default_time_slice": DEFAULT_TIME_SLICE,
     "load_budget": f"{_LOAD_BUDGET_BYTES / 1e6:,.0f} MB",
+    "page_default": str(_PAGE_DEFAULT),
+    "page_max": str(_PAGE_MAX),
+    "load_default": str(_LOAD_DEFAULT),
 }
+
+# ── Parameter types ──────────────────────────────────────────────────────────
+#
+# A tool's input schema is the one part of its interface a client validates, so
+# the vocabularies and ranges belong in it, not only in the docstring. Some
+# clients flatten a nullable parameter's anyOf away, types and all; the
+# description each parameter also carries (see _tool) is what survives that.
+#
+# The vocabularies are *advertised* as enums, not enforced here: foehn.load and
+# list_datasets already reject a bad token with a message naming the valid ones,
+# and a second check at this seam could only drift from theirs. They are
+# rendered from the same tables those checks read.
+
+
+def _one_of(tokens: Any) -> WithJsonSchema:  # noqa: ANN401 - any iterable of tokens
+    return WithJsonSchema({"type": "string", "enum": list(tokens)})
+
+
+_Frequency = Annotated[str, _one_of(GRANULARITY_LABELS)]
+_TimeSlice = Annotated[str, _one_of(TIME_SLICE_LABELS)]
+_Sort = Annotated[str, _one_of(SORT_ORDERS)]
+_Category = Annotated[str, _one_of(sorted(CATEGORIES))]
+
+# One value or several. Models often pass a lone station as "BER" rather than
+# ["BER"] — especially once a client has dropped the schema saying it is a list.
+_Names = str | list[str]
+_Month = Annotated[int, Field(ge=1, le=12)]
+_Months = _Month | list[_Month]
+_Years = int | list[int]
+
+# Declared to the client, so an out-of-range value is refused rather than
+# silently changed. The tool bodies still clamp, for direct Python callers.
+_PageLimit = Annotated[int, Field(ge=1, le=_PAGE_MAX)]
+_Offset = Annotated[int, Field(ge=0)]
+
+
+def _as_list(value: str | list[str] | None) -> list[str] | None:
+    """A lone name as a one-item list; a list or None unchanged."""
+    return [value] if isinstance(value, str) else value
 
 
 mcp = MCPServer(
@@ -194,6 +249,18 @@ class InventoryEntry(BaseModel):
     owner: str = _metadata_field("inventory", "owner")
 
 
+_ItemT = TypeVar("_ItemT")
+
+
+class Page(BaseModel, Generic[_ItemT]):
+    total: int = Field(description="Number of matching items across all pages")
+    count: int = Field(description="Number of items in this page")
+    offset: int = Field(description="Offset of the first item in this page")
+    has_more: bool = Field(description="Whether more items follow this page")
+    next_offset: int | None = Field(description="Pass as offset to fetch the next page; null on the last page")
+    items: list[_ItemT] = Field(description="The items in this page")
+
+
 TABLES["parameters"].assert_model(Parameter.model_fields)
 TABLES["stations"].assert_model(Station.model_fields)
 TABLES["points"].assert_model(Point.model_fields)
@@ -248,11 +315,78 @@ def _grid_data_dir() -> Path | None:
     return None if os.environ.get(DATA_DIR_ENV) else user_cache_root()
 
 
+def _page(df: pl.DataFrame, limit: int, offset: int, model: Callable[..., _ItemT] | None = None) -> Page[_ItemT]:
+    """Slice one page of ``df``, as ``model`` items or plain row dicts, with pagination metadata.
+
+    ``limit`` is clamped to 1..``_PAGE_MAX`` (the schema already refuses values
+    outside it; this covers direct Python callers). A negative ``offset`` is a
+    caller error rather than something to guess at.
+    """
+    if offset < 0:
+        raise ValueError(f"Invalid offset {offset}. It must be 0 or greater.")
+    limit = min(max(1, limit), _PAGE_MAX)
+    total = len(df)
+    rows = df.slice(offset, limit).to_dicts()
+    items: list[Any] = [model(**row) for row in rows] if model else rows
+    end = offset + len(items)
+    has_more = end < total
+    return Page(
+        total=total,
+        count=len(items),
+        offset=offset,
+        has_more=has_more,
+        next_offset=end if has_more else None,
+        items=items,
+    )
+
+
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
+
+_ARG_RE = re.compile(r"^ {4}(\w+): (.*)$")
+
+
+def _arg_docs(doc: str | None) -> dict[str, str]:
+    """Each parameter's description, from a docstring's Google-style ``Args:`` section."""
+    if not doc:
+        return {}
+    lines = inspect.cleandoc(doc).splitlines()
+    if "Args:" not in lines:
+        return {}
+    docs: dict[str, str] = {}
+    name = None
+    for line in lines[lines.index("Args:") + 1 :]:
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            break
+        if match := _ARG_RE.match(line):
+            name = match[1]
+            docs[name] = match[2]
+        elif name:
+            docs[name] += " " + line.strip()
+    return docs
+
+
+def _described(fn: Callable[..., Any]) -> inspect.Signature:
+    """``fn``'s signature with each parameter's docstring description in its schema.
+
+    The SDK publishes the docstring only as the tool's description, so each
+    parameter's schema carried a type and nothing else — and a client that
+    flattens a nullable type is left with ``{"default": null}``. The text is
+    taken from the docstring, not restated beside it.
+    """
+    signature = inspect.signature(fn, eval_str=True)
+    docs = _arg_docs(fn.__doc__)
+    return signature.replace(
+        parameters=[
+            p.replace(annotation=Annotated[p.annotation, Field(description=docs[p.name])]) if p.name in docs else p
+            for p in signature.parameters.values()
+        ]
+    )
 
 
 def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
@@ -274,6 +408,7 @@ def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P,
                     raise
                 raise ToolError(redact_urls(str(exc))) from None
 
+        invoke.__signature__ = _described(fn)  # ty: ignore[unresolved-attribute]
         mcp.tool(title=title, annotations=annotations)(invoke)
         return fn
 
@@ -282,7 +417,7 @@ def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P,
 
 @_tool(title="List datasets", annotations=_READ_ONLY)
 @renders(**_VOCABULARY)
-def list_datasets(category: str | None = None) -> list[Dataset]:
+def list_datasets(category: _Category | None = None) -> list[Dataset]:
     """List all available MeteoSwiss datasets.
 
     Returns dataset name, collection ID, category, description, format,
@@ -304,19 +439,23 @@ def list_datasets(category: str | None = None) -> list[Dataset]:
 @renders(**_VOCABULARY)
 def load_data(
     dataset: str,
-    station: list[str] | None = None,
-    frequency: str | None = None,
-    time_slice: str | None = None,
-    year: list[int] | None = None,
-    month: list[int] | None = None,
+    station: _Names | None = None,
+    frequency: _Frequency | None = None,
+    time_slice: _TimeSlice | None = None,
+    year: _Years | None = None,
+    month: _Months | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    columns: list[str] | None = None,
+    columns: _Names | None = None,
     drop_null: str | None = None,
-    sort: str | None = None,
-    limit: int = 50,
-) -> list[dict]:
-    """Load weather measurements and return rows as a list of dicts.
+    sort: _Sort | None = None,
+    limit: _PageLimit = _LOAD_DEFAULT,
+    offset: _Offset = 0,
+) -> Page[dict[str, Any]]:
+    """Load weather measurements, a page of rows at a time.
+
+    The response carries ``total`` (rows matching the filters), ``has_more`` and
+    ``next_offset``; the rows are in ``items``, one dict per row.
 
     Fetches live data from MeteoSwiss. Only works with the CSV-backed datasets
     named below. Binary/grid datasets (GRIB2, NetCDF, radar) are not supported —
@@ -358,15 +497,17 @@ def load_data(
             first). Omit it and the rows are NOT sorted — they come back grouped
             by station in the order the files were fetched. Use "desc" with a
             limit to get the most recent data.
-        limit: Maximum rows to return (default 50, max 500). Use filters to stay
-            within limits on large datasets.
+        limit: Maximum rows to return (default $load_default, max $page_max). Use
+            filters to stay within limits on large datasets.
+        offset: Number of matching rows to skip; pass the previous response's
+            ``next_offset`` to get the next page. Each page re-downloads the
+            files, so narrow the filters rather than paging far.
     """
     # Unknown dataset, grid datasets, and the frequency/time_slice/sort
     # vocabularies are all foehn.load's contract — it raises on each of them, so
-    # restating them here could only drift. The row cap is genuinely this
-    # layer's: it bounds what goes back to a model's context window.
-    limit = min(max(1, limit), 500)
-
+    # restating them here could only drift. The page is this layer's: foehn.load
+    # parses every matching row before its own limit would apply, so slicing here
+    # costs nothing more and lets the response say how many rows there are.
     df = foehn.load(
         dataset,
         station=station,
@@ -376,24 +517,23 @@ def load_data(
         month=month,
         date_from=date_from,
         date_to=date_to,
-        columns=columns,
+        columns=_as_list(columns),
         drop_null=drop_null,
         sort=sort,
-        limit=limit,
         max_bytes=_LOAD_BUDGET_BYTES,
     )
-    return df.to_dicts()
+    return _page(df, limit, offset)
 
 
 @_tool(title="Describe data", annotations=_READ_ONLY)
 @renders(**_VOCABULARY)
 def describe_data(
     dataset: str,
-    station: list[str] | None = None,
-    frequency: str | None = None,
-    time_slice: str | None = None,
-    year: list[int] | None = None,
-    month: list[int] | None = None,
+    station: _Names | None = None,
+    frequency: _Frequency | None = None,
+    time_slice: _TimeSlice | None = None,
+    year: _Years | None = None,
+    month: _Months | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     drop_null: str | None = None,
@@ -474,7 +614,7 @@ def describe_data(
 def describe_grid(
     dataset: str,
     match: str | None = None,
-    variables: list[str] | None = None,
+    variables: _Names | None = None,
 ) -> GridSummary:
     """Inspect a gridded dataset's structure without returning array values.
 
@@ -582,7 +722,13 @@ def get_stations(dataset: str) -> list[Station]:
 
 
 @_tool(title="Get forecast points", annotations=_READ_ONLY)
-def get_points(dataset: str, query: str | None = None) -> list[Point]:
+@renders(**_VOCABULARY)
+def get_points(
+    dataset: str,
+    query: str | None = None,
+    limit: _PageLimit = _PAGE_DEFAULT,
+    offset: _Offset = 0,
+) -> Page[Point]:
     """Get the forecast points of a point-forecast dataset ("forecast_local").
 
     Local forecasts are published per point, not per station: the stations,
@@ -592,9 +738,16 @@ def get_points(dataset: str, query: str | None = None) -> list[Point]:
     "3011". Then pass the abbreviation or postal code as ``station`` to
     load_data().
 
+    Results are paged: the response carries ``total``, ``has_more`` and
+    ``next_offset``. Prefer narrowing with ``query`` over paging through all
+    points.
+
     Args:
         dataset: Dataset name ("forecast_local").
         query: Optional case-insensitive substring to narrow the points.
+        limit: Maximum points to return (default $page_default, max $page_max).
+        offset: Number of matching points to skip; pass the previous
+            response's ``next_offset`` to get the next page.
     """
     df = foehn.points(dataset)
     if query:
@@ -604,20 +757,41 @@ def get_points(dataset: str, query: str | None = None) -> list[Point]:
             | pl.col("abbr").str.to_lowercase().str.contains(needle, literal=True).fill_null(False)
             | pl.col("postal_code").str.contains(needle, literal=True).fill_null(False)
         )
-    return [Point(**row) for row in df.to_dicts()]
+    return _page(df, limit, offset, Point)
 
 
 @_tool(title="Get inventory", annotations=_READ_ONLY)
-def get_inventory(dataset: str) -> list[InventoryEntry]:
+@renders(**_VOCABULARY)
+def get_inventory(
+    dataset: str,
+    station: _Names | None = None,
+    parameter: _Names | None = None,
+    limit: _PageLimit = _PAGE_DEFAULT,
+    offset: _Offset = 0,
+) -> Page[InventoryEntry]:
     """Get the data inventory for a dataset.
 
     Shows which parameters are available at which stations, and the time
-    range (data_since, data_till) of available data.
+    range (data_since, data_till) of available data. One row per station and
+    parameter, so a full inventory runs to thousands of rows (smn: ~19,500).
+    Narrow it with ``station`` and/or ``parameter``; results are paged, and the
+    response carries ``total``, ``has_more`` and ``next_offset``.
 
     Args:
         dataset: Dataset name (e.g. "smn"). Call list_datasets() to see options.
+        station: Only these station abbreviation(s) (e.g. ["BER"]). Case-insensitive.
+        parameter: Only these parameter shortname(s) (e.g. ["tre200d0"]).
+            Case-insensitive. Use get_parameters() to find them.
+        limit: Maximum rows to return (default $page_default, max $page_max).
+        offset: Number of matching rows to skip; pass the previous response's
+            ``next_offset`` to get the next page.
     """
-    return [InventoryEntry(**row) for row in foehn.inventory(dataset).to_dicts()]
+    df = foehn.inventory(dataset)
+    if station := _as_list(station):
+        df = df.filter(pl.col("station").str.to_uppercase().is_in([s.upper() for s in station]))
+    if parameter := _as_list(parameter):
+        df = df.filter(pl.col("parameter").str.to_lowercase().is_in([p.lower() for p in parameter]))
+    return _page(df, limit, offset, InventoryEntry)
 
 
 # ── Resource ─────────────────────────────────────────────────────────────────
@@ -708,7 +882,8 @@ load_data() and describe_data() support these filters (all combinable):
 
 ## Limits and performance
 
-load_data() returns at most 500 rows per call, and load_data() and
+load_data() returns at most {_PAGE_MAX} rows per call — page on with
+`offset`/`next_offset`; `total` says how many rows match — and load_data() and
 describe_data() may each download at most {load_budget}; a call
 past that is refused with the filters that would narrow it. MeteoSwiss publishes
 one file per station and time slice, so:
@@ -721,6 +896,11 @@ one file per station and time slice, so:
 - **Use sort="desc"** with limit to get the most recent data first
 - Specify stations and use coarser frequencies when possible
 - **Call describe_data() first** to check how many rows your query will return
+
+get_inventory() and get_points() are paged the same way (default
+{_PAGE_DEFAULT} rows): each response carries `total`, `has_more` and
+`next_offset`. Narrow them first — get_inventory by `station`/`parameter`,
+get_points by `query` — rather than paging through thousands of rows.
 
 ## Common examples
 
@@ -757,7 +937,10 @@ describe_data("obs", frequency="m", time_slice="historical", year=[2025])
 get_stations("smn") → filter by canton == "ZH"
 
 **Longest historical records:**
-get_inventory("nbcn") → check data_since for each station
+get_inventory("nbcn", parameter=["tre200d0"]) → check data_since for each station
+
+**Where is daily temperature measured in Bern, and since when:**
+get_inventory("smn", station=["BER"])
 
 **Compare multiple stations:**
 load_data("smn", station=["BER", "ZUR", "GVE"], frequency="d")

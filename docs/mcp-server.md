@@ -72,6 +72,19 @@ downloaded, so a call's cost is set by `station`, `frequency` and `time_slice`.
 A call over the budget is refused with an error naming them, so the model can
 narrow it and try again, and the server never runs out of memory.
 
+`load_data`, `get_inventory` and `get_points` return one page at a time — at
+most 500 rows, 50 by default for `load_data` and 100 for the other two — with
+`total`, `has_more` and `next_offset`; pass `offset` to get the next page. A full
+listing (about 19,500 inventory rows for `smn`, 5,800 forecast points) would
+otherwise overflow a model's context window. `get_inventory` also filters by
+`station` and `parameter`.
+
+Every parameter's schema carries its description, and the fixed vocabularies
+(`frequency`, `time_slice`, `sort`, `category`) and ranges (`month`, `limit`,
+`offset`) are declared in it, so a client can check a call before sending it. A
+parameter that takes a list of stations, columns, years or months also accepts a
+single value.
+
 `describe_grid` is the gridded counterpart to `describe_data`, covering every
 gridded collection — NetCDF, GRIB2 forecasts, and HDF5/ODIM radar (GRIB2 and
 radar need a single-file `match`). It caches the source file locally and refreshes

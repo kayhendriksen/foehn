@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("mcp", reason="mcp not installed")
 
 from foehn import registry
-from foehn.collections import COLLECTIONS
+from foehn.collections import CATEGORIES, COLLECTIONS, GRANULARITY_LABELS, TIME_SLICE_LABELS
 from foehn.mcp_server import (
     _INSPECTABLE_GRIDS,
     _LOAD_BUDGET_BYTES,
@@ -21,6 +21,7 @@ from foehn.mcp_server import (
     DataSummary,
     GridSummary,
     InventoryEntry,
+    Page,
     Parameter,
     Station,
     describe_data,
@@ -254,49 +255,62 @@ class TestLoadData:
     def test_basic_load(self, mock_load):
         mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}, {"station": "ZUR", "temp": 18.3}])
         result = load_data("smn")
-        assert isinstance(result, list)
-        assert len(result) == 2
-        assert result[0]["station"] == "BER"
+        assert isinstance(result, Page)
+        assert (result.total, result.count, result.has_more, result.next_offset) == (2, 2, False, None)
+        assert result.items[0] == {"station": "BER", "temp": 20.5}
         assert mock_load.call_args.args == ("smn",)
-        assert mock_load.call_args.kwargs["limit"] == 50
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_the_page_is_cut_here_not_by_foehn_load(self, mock_load):
+        """foehn.load parses every matching row anyway, so slicing here is free and gives a total."""
+        mock_load.return_value = _make_df([{"x": 1}])
+        load_data("smn", limit=10)
+        assert "limit" not in mock_load.call_args.kwargs
 
     @patch("foehn.mcp_server.foehn.load")
     def test_with_all_kwargs(self, mock_load):
         mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}])
         result = load_data("smn", station=["BER"], frequency="d", time_slice="recent", limit=10)
-        assert len(result) == 1
+        assert result.count == 1
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["station"] == ["BER"]
         assert mock_load.call_args.kwargs["frequency"] == "d"
         assert mock_load.call_args.kwargs["time_slice"] == "recent"
-        assert mock_load.call_args.kwargs["limit"] == 10
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_pages_through_rows(self, mock_load):
+        mock_load.return_value = _make_df([{"station": "BER", "n": i} for i in range(120)])
+
+        first = load_data("smn")
+        assert (first.total, first.count, first.has_more, first.next_offset) == (120, 50, True, 50)
+        assert first.items[0]["n"] == 0
+
+        third = load_data("smn", offset=100)
+        assert [row["n"] for row in third.items] == list(range(100, 120))
+        assert (third.has_more, third.next_offset) == (False, None)
 
     @patch("foehn.mcp_server.foehn.load")
     def test_limit_caps_at_500(self, mock_load):
-        # foehn.load applies the limit; mock pre-slices to mirror real behavior.
-        rows = [{"station": f"S{i}", "temp": float(i)} for i in range(500)]
-        mock_load.return_value = _make_df(rows)
+        mock_load.return_value = _make_df([{"station": f"S{i}", "temp": float(i)} for i in range(600)])
         result = load_data("smn", limit=9999)
-        assert len(result) == 500
-        assert mock_load.call_args.args == ("smn",)
-        assert mock_load.call_args.kwargs["limit"] == 500
+        assert (result.count, result.total, result.next_offset) == (500, 600, 500)
 
     @patch("foehn.mcp_server.foehn.load")
     def test_limit_minimum_is_1(self, mock_load):
-        mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}])
-        result = load_data("smn", limit=-5)
-        assert len(result) == 1
-        assert mock_load.call_args.args == ("smn",)
-        assert mock_load.call_args.kwargs["limit"] == 1
+        mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}, {"station": "ZUR", "temp": 1.0}])
+        assert load_data("smn", limit=-5).count == 1
 
     @patch("foehn.mcp_server.foehn.load")
     def test_default_limit_is_50(self, mock_load):
-        rows = [{"station": f"S{i}", "temp": float(i)} for i in range(50)]
-        mock_load.return_value = _make_df(rows)
-        result = load_data("smn")
-        assert len(result) == 50
-        assert mock_load.call_args.args == ("smn",)
-        assert mock_load.call_args.kwargs["limit"] == 50
+        mock_load.return_value = _make_df([{"station": f"S{i}", "temp": float(i)} for i in range(80)])
+        assert load_data("smn").count == 50
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_a_single_station_or_column_need_not_be_a_list(self, mock_load):
+        mock_load.return_value = _make_df([{"x": 1}])
+        load_data("smn", station="BER", columns="tre200s0", year=2025, month=7)
+        kwargs = mock_load.call_args.kwargs
+        assert (kwargs["station"], kwargs["columns"], kwargs["year"], kwargs["month"]) == ("BER", ["tre200s0"], 2025, 7)
 
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
@@ -324,15 +338,11 @@ class TestLoadData:
         mock_load.return_value = _make_df([{"x": 1}])
         load_data("smn", station=None, frequency=None, time_slice=None)
         assert mock_load.call_args.args == ("smn",)
-        assert mock_load.call_args.kwargs["limit"] == 50
 
     @patch("foehn.mcp_server.foehn.load")
-    def test_returns_list_of_dicts(self, mock_load):
+    def test_rows_are_dicts(self, mock_load):
         mock_load.return_value = _make_df([{"station": "BER", "temp": 20.5}])
-        result = load_data("smn")
-        assert isinstance(result, list)
-        assert isinstance(result[0], dict)
-        assert "station" in result[0]
+        assert load_data("smn").items == [{"station": "BER", "temp": 20.5}]
 
     @patch("foehn.mcp_server.foehn.load")
     def test_year_filter_passed_to_load(self, mock_load):
@@ -342,7 +352,6 @@ class TestLoadData:
         load_data("smn", year=[2025], limit=500)
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["year"] == [2025]
-        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_month_filter_passed_to_load(self, mock_load):
@@ -352,7 +361,6 @@ class TestLoadData:
         load_data("smn", month=[6, 7], limit=500)
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["month"] == [6, 7]
-        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_date_range_passed_to_load(self, mock_load):
@@ -363,7 +371,6 @@ class TestLoadData:
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["date_from"] == "2025-06-01"
         assert mock_load.call_args.kwargs["date_to"] == "2025-08-31"
-        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_columns_passed_to_load(self, mock_load):
@@ -373,7 +380,6 @@ class TestLoadData:
         load_data("smn", columns=["temp"], limit=500)
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["columns"] == ["temp"]
-        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_drop_null_passed_to_load(self, mock_load):
@@ -383,7 +389,6 @@ class TestLoadData:
         load_data("smn", drop_null="hail", limit=500)
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["drop_null"] == "hail"
-        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_sort_passed_to_load(self, mock_load):
@@ -393,7 +398,6 @@ class TestLoadData:
         load_data("smn", sort="desc", limit=500)
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["sort"] == "desc"
-        assert mock_load.call_args.kwargs["limit"] == 500
 
     @patch("foehn.mcp_server.foehn.load")
     def test_all_filters_combined_passed_to_load(self, mock_load):
@@ -422,7 +426,6 @@ class TestLoadData:
                 "month": [7],
                 "columns": ["temp"],
                 "sort": "desc",
-                "limit": 500,
             }
             == mock_load.call_args.kwargs
         )
@@ -433,8 +436,7 @@ class TestLoadData:
 
     @patch("foehn.mcp_server.foehn.load")
     def test_sort_desc_with_limit(self, mock_load):
-        """sort=desc + limit gets the most recent rows. limit is now applied inside
-        foehn.load, so the mock returns the already-sliced 2 rows to mirror real behavior."""
+        """sort=desc + limit gets the most recent rows: foehn.load sorts, this layer slices."""
         mock_load.return_value = pl.DataFrame(
             {
                 "station_abbr": ["BER", "BER"],
@@ -442,13 +444,11 @@ class TestLoadData:
                 "temp": [-1.0, 15.0],
             }
         )
-        result = load_data("smn", sort="desc", limit=2)
-        assert len(result) == 2
-        assert result[0]["temp"] == -1.0  # December
-        assert result[1]["temp"] == 15.0  # September
+        result = load_data("smn", sort="desc", limit=1)
+        assert [row["temp"] for row in result.items] == [-1.0]  # December
+        assert mock_load.call_args.kwargs["sort"] == "desc"
         assert mock_load.call_args.args == ("smn",)
         assert mock_load.call_args.kwargs["sort"] == "desc"
-        assert mock_load.call_args.kwargs["limit"] == 2
 
 
 # ── describe_data ────────────────────────────────────────────────────────────
@@ -811,17 +811,40 @@ class TestGetPoints:
     def test_returns_every_point_without_a_query(self, mock_points):
         mock_points.return_value = self._points()
         result = get_points("forecast_local")
-        assert [point.point_id for point in result] == [78, 301100, 641]
-        assert result[1].abbr is None
+        assert [point.point_id for point in result.items] == [78, 301100, 641]
+        assert result.items[1].abbr is None
+        assert (result.total, result.has_more, result.next_offset) == (3, False, None)
         mock_points.assert_called_once_with("forecast_local")
 
     @patch("foehn.mcp_server.foehn.points")
     def test_query_matches_name_abbreviation_or_postal_code(self, mock_points):
         mock_points.return_value = self._points()
-        assert [p.point_id for p in get_points("forecast_local", query="bern")] == [78, 301100]
-        assert [p.point_id for p in get_points("forecast_local", query="ber")] == [78, 301100]
-        assert [p.point_id for p in get_points("forecast_local", query="3011")] == [301100]
-        assert get_points("forecast_local", query="zermatt") == []
+
+        def ids(query):
+            return [p.point_id for p in get_points("forecast_local", query=query).items]
+
+        assert ids("bern") == [78, 301100]
+        assert ids("ber") == [78, 301100]
+        assert ids("3011") == [301100]
+        assert ids("zermatt") == []
+
+    @patch("foehn.mcp_server.foehn.points")
+    def test_pages_through_points(self, mock_points):
+        mock_points.return_value = self._points()
+
+        first = get_points("forecast_local", limit=2)
+        assert [p.point_id for p in first.items] == [78, 301100]
+        assert (first.total, first.count, first.has_more, first.next_offset) == (3, 2, True, 2)
+
+        second = get_points("forecast_local", limit=2, offset=first.next_offset)
+        assert [p.point_id for p in second.items] == [641]
+        assert (second.offset, second.has_more, second.next_offset) == (2, False, None)
+
+    @patch("foehn.mcp_server.foehn.points")
+    def test_paging_counts_matches_not_all_points(self, mock_points):
+        mock_points.return_value = self._points()
+        result = get_points("forecast_local", query="bern", limit=1)
+        assert (result.total, result.next_offset) == (2, 1)
 
 
 # ── get_inventory ────────────────────────────────────────────────────────────
@@ -840,11 +863,72 @@ class TestGetInventory:
             }
         )
         result = get_inventory("smn")
-        assert len(result) == 1
-        assert isinstance(result[0], InventoryEntry)
-        assert result[0].station == "BER"
-        assert result[0].parameter == "tre200d0"
+        assert result.total == 1
+        assert isinstance(result.items[0], InventoryEntry)
+        assert result.items[0].station == "BER"
+        assert result.items[0].parameter == "tre200d0"
         mock_inv.assert_called_once_with("smn")
+
+    @staticmethod
+    def _inventory():
+        return pl.DataFrame(
+            {
+                "station": ["BER", "BER", "GVE", "ZUR"],
+                "parameter": ["tre200d0", "rre150d0", "tre200d0", "tre200d0"],
+                "data_since": ["1864-01-01"] * 4,
+                "data_till": ["2024-12-31"] * 4,
+                "owner": ["MeteoSchweiz"] * 4,
+            }
+        )
+
+    @patch("foehn.mcp_server.foehn.inventory")
+    def test_filters_by_station_and_parameter_case_insensitively(self, mock_inv):
+        mock_inv.return_value = self._inventory()
+
+        by_station = get_inventory("smn", station=["ber"])
+        assert [(e.station, e.parameter) for e in by_station.items] == [("BER", "tre200d0"), ("BER", "rre150d0")]
+
+        by_parameter = get_inventory("smn", parameter=["TRE200D0"])
+        assert [e.station for e in by_parameter.items] == ["BER", "GVE", "ZUR"]
+
+        both = get_inventory("smn", station=["GVE", "ZUR"], parameter=["tre200d0"])
+        assert both.total == 2
+
+    @patch("foehn.mcp_server.foehn.inventory")
+    def test_pages_through_the_inventory(self, mock_inv):
+        mock_inv.return_value = self._inventory()
+
+        first = get_inventory("smn", limit=3)
+        assert (first.count, first.total, first.has_more, first.next_offset) == (3, 4, True, 3)
+
+        last = get_inventory("smn", limit=3, offset=3)
+        assert [e.station for e in last.items] == ["ZUR"]
+        assert (last.has_more, last.next_offset) == (False, None)
+
+        past_the_end = get_inventory("smn", offset=10)
+        assert (past_the_end.items, past_the_end.has_more, past_the_end.total) == ([], False, 4)
+
+    @patch("foehn.mcp_server.foehn.inventory")
+    def test_page_size_is_capped_and_defaulted(self, mock_inv):
+        rows = 600
+        mock_inv.return_value = pl.DataFrame(
+            {
+                "station": ["BER"] * rows,
+                "parameter": [f"p{i}" for i in range(rows)],
+                "data_since": ["1864-01-01"] * rows,
+                "data_till": ["2024-12-31"] * rows,
+                "owner": ["MeteoSchweiz"] * rows,
+            }
+        )
+        assert get_inventory("smn").count == 100
+        assert get_inventory("smn", limit=10_000).count == 500
+        assert get_inventory("smn", limit=0).count == 1
+
+    @patch("foehn.mcp_server.foehn.inventory")
+    def test_negative_offset_raises(self, mock_inv):
+        mock_inv.return_value = self._inventory()
+        with pytest.raises(ValueError, match="Invalid offset"):
+            get_inventory("smn", offset=-1)
 
     @patch("foehn.mcp_server.foehn.inventory")
     def test_preserves_an_open_ended_range(self, mock_inv):
@@ -861,7 +945,7 @@ class TestGetInventory:
 
         result = get_inventory("smn")
 
-        assert result[0].data_till is None
+        assert result.items[0].data_till is None
 
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
@@ -1058,6 +1142,87 @@ class TestMCPInstance:
         assert result.is_error
         assert "private server value" not in result.content[0].text
         assert "Error executing tool" in result.content[0].text
+
+
+# ── Published input schemas ──────────────────────────────────────────────────
+
+
+def _schemas() -> dict[str, dict]:
+    async def list_tools():
+        return await mcp.list_tools()
+
+    return {tool.name: tool.input_schema["properties"] for tool in asyncio.run(list_tools())}
+
+
+def _call(tool: str, arguments: dict):
+    from mcp import Client
+
+    async def call_tool():
+        async with Client(mcp) as client:
+            return await client.call_tool(tool, arguments)
+
+    return asyncio.run(call_tool())
+
+
+def _arm(prop: dict, schema_type: str) -> dict:
+    """The arm of a (possibly nullable) parameter schema with this JSON type."""
+    return next(arm for arm in prop.get("anyOf", [prop]) if arm.get("type") == schema_type)
+
+
+class TestInputSchemas:
+    def test_every_parameter_carries_its_docstring_description(self):
+        """Some clients flatten a nullable parameter's anyOf away; the description survives that."""
+        missing = [
+            f"{tool}.{name}"
+            for tool, props in _schemas().items()
+            for name, prop in props.items()
+            if not prop.get("description")
+        ]
+        assert missing == []
+
+    def test_descriptions_are_the_docstring_text(self):
+        description = _schemas()["load_data"]["station"]["description"]
+        assert description.startswith("Station abbreviation(s)")
+        assert "get_stations()" in description  # a continuation line, joined
+
+    def test_vocabularies_are_enumerated_from_their_tables(self):
+        props = _schemas()
+        assert _arm(props["load_data"]["frequency"], "string")["enum"] == list(GRANULARITY_LABELS)
+        assert _arm(props["describe_data"]["time_slice"], "string")["enum"] == list(TIME_SLICE_LABELS)
+        assert _arm(props["load_data"]["sort"], "string")["enum"] == ["asc", "desc"]
+        assert _arm(props["list_datasets"]["category"], "string")["enum"] == sorted(CATEGORIES)
+
+    def test_ranges_are_declared(self):
+        props = _schemas()
+        for tool in ("load_data", "get_inventory", "get_points"):
+            assert (props[tool]["limit"]["minimum"], props[tool]["limit"]["maximum"]) == (1, 500)
+            assert props[tool]["offset"]["minimum"] == 0
+        month = _arm(props["load_data"]["month"], "integer")
+        assert (month["minimum"], month["maximum"]) == (1, 12)
+
+    @pytest.mark.parametrize(
+        ("tool", "arguments"),
+        [
+            ("load_data", {"dataset": "smn", "limit": 9999}),
+            ("load_data", {"dataset": "smn", "offset": -1}),
+            ("load_data", {"dataset": "smn", "month": [13]}),
+            ("get_inventory", {"dataset": "smn", "limit": 0}),
+        ],
+    )
+    def test_out_of_range_values_are_refused_not_clamped(self, tool, arguments):
+        with patch("foehn.mcp_server.foehn.load") as mock_load, patch("foehn.mcp_server.foehn.inventory"):
+            result = _call(tool, arguments)
+        assert result.is_error
+        mock_load.assert_not_called()
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_a_lone_station_string_is_accepted_over_the_protocol(self, mock_load):
+        mock_load.return_value = _make_df([{"station_abbr": "BER", "x": 1}])
+        result = _call("load_data", {"dataset": "smn", "station": "BER", "columns": "x"})
+        assert not result.is_error
+        assert mock_load.call_args.kwargs["station"] == "BER"
+        assert mock_load.call_args.kwargs["columns"] == ["x"]
+        assert result.structured_content["total"] == 1
 
 
 # ── run() ────────────────────────────────────────────────────────────────────

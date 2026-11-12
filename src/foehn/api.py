@@ -499,7 +499,7 @@ def to_zarr(
     workspace = Workspace.resolve(data_dir)
     # Where the default store lands, and how ``match`` is spelled into its name,
     # are the workspace's layout rather than facts stated here.
-    store_path = Path(store) if store is not None else workspace.zarr(dataset, match)
+    store_path = Path(store).expanduser() if store is not None else workspace.zarr(dataset, match)
 
     # Which method writes it — cube or single — is the kind's row, not a branch
     # here. So is whether the dataset has a Zarr path at all, which is what makes

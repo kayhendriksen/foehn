@@ -843,6 +843,21 @@ def test_load_output_with_an_unknown_suffix_names_the_ones_it_knows(tmp_path, ca
     assert not (tmp_path / "out.xlsx").exists()
 
 
+def test_load_output_expands_a_leading_tilde(tmp_path, capsys, monkeypatch):
+    """``-o=~/x.csv`` and a quoted ``'~/x.csv'`` reach foehn with the tilde intact."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+    fake_df = pl.DataFrame({"a": [1, 2]})
+    with patch("foehn.api.load", return_value=fake_df):
+        code, _, _ = _main(["load", "smn", "-o", "~/out.csv"], capsys)
+
+    assert code == 0
+    assert pl.read_csv(home / "out.csv").equals(fake_df)
+    assert not (tmp_path / "~").exists()
+
+
 @pytest.mark.parametrize("output_format", ["csv", "json", "ndjson"])
 def test_metadata_writes_a_machine_format(capsys, output_format):
     fake_df = pl.DataFrame({"shortname": ["tre200d0"], "unit": ["°C"]})

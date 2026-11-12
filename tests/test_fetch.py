@@ -412,6 +412,24 @@ def test_validate_stac_url_rejects_untrusted_urls():
             validate_stac_url(bad)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example\\@data.geo.admin.ch/x.csv",
+        "https://evil.example\n@data.geo.admin.ch/x.csv",
+        "https://evil.example\t@data.geo.admin.ch/x.csv",
+        "https://data.geo.admin.ch/x y.csv",
+    ],
+)
+def test_urls_the_transport_could_read_differently_are_refused(url):
+    from foehn._urls import validate_download_href
+
+    with pytest.raises(ValueError, match="Untrusted STAC URL"):
+        validate_stac_url(url)
+    with pytest.raises(ValueError, match="Untrusted download URL"):
+        validate_download_href(url)
+
+
 # --- Redirects ---
 
 
