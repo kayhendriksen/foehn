@@ -2014,8 +2014,21 @@ def test_conversion_releases_every_source_revision(fetcher, tmp_path, monkeypatc
         if outcome == "success":
             to_zarr("surface_derived_grid", data_dir=tmp_path, **options)
         else:
-            with pytest.raises((OSError, ImportError, KeyError)):
+            with pytest.raises((OSError, ImportError, ValueError)):
                 to_zarr("surface_derived_grid", data_dir=tmp_path, **options)
 
         assert not list(base.glob(".foehn-snapshot-*"))
         assert any(ds is opened[-1] for ds in closed)
+
+
+def test_an_unknown_variable_is_named_with_the_ones_the_dataset_has():
+    """xarray's bare KeyError said neither what was wrong nor what would be right."""
+    xr = pytest.importorskip("xarray")
+    closed = []
+    ds = xr.Dataset({"TabsD": ("x", [1.0]), "RhiresD": ("x", [2.0])})
+    ds.set_close(lambda: closed.append(True))
+
+    with pytest.raises(ValueError, match=r"Unknown variable\(s\) \['tabsd'\].*RhiresD, TabsD"):
+        grids.select_variables(ds, ["TabsD", "tabsd"])
+
+    assert closed == [True]

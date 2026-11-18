@@ -16,14 +16,13 @@ from __future__ import annotations
 import logging
 import re
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from foehn import coherence
 from foehn.assets import Asset, assets_of, other_extensions
 from foehn.collections import COLLECTIONS
-from foehn.fetch import Fetcher, FetchError
+from foehn.fetch import Fetcher, FetchError, worker_pool
 from foehn.transfer import already_current, fetch_all
 from foehn.workspace import Workspace
 
@@ -125,7 +124,7 @@ def _list_by_window(collection_id: str, fetcher: Fetcher, *, cache: bool = True)
     def _window(window: str) -> list[dict]:
         return fetcher.items(collection_id, cache=cache, datetime_filter=window)
 
-    with ThreadPoolExecutor(max_workers=min(_LISTING_WORKERS, len(windows))) as pool:
+    with worker_pool(min(_LISTING_WORKERS, len(windows))) as pool:
         pages = list(pool.map(_window, windows))
 
     seen: set[object] = set()

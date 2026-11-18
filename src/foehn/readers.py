@@ -24,7 +24,6 @@ import re
 import threading
 import zipfile
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -35,7 +34,7 @@ from foehn._urls import asset_filename
 from foehn.archives import check_zip_size
 from foehn.assets import assets_of, collection_assets, hrefs, select
 from foehn.collections import COLLECTIONS, DEFAULT_TIME_SLICE, forecast_parameter_from_filename
-from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.fetch import DEFAULT_WORKERS, Fetcher, worker_pool
 from foehn.meteocsv import (
     decode_meteoswiss_csv,
     derive_timestamp,
@@ -360,7 +359,7 @@ def _fetch_frames(fetch_one: Callable[[str], pl.DataFrame], targets: list[str], 
     """
     if len(targets) == 1 or workers <= 1:
         return [fetch_one(t) for t in targets]
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with worker_pool(workers) as pool:
         return list(pool.map(fetch_one, targets))
 
 

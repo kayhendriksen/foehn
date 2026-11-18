@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -60,6 +61,26 @@ _LISTING_CACHE_MAX_ENTRIES = 1024
 # foehn's traffic apart from any other ``python-requests`` client — and know
 # where to report a problem with it — as uv and pip identify themselves.
 USER_AGENT = f"foehn/{__version__} (+https://github.com/kayhendriksen/foehn) python-requests/{requests.__version__}"
+
+
+@contextlib.contextmanager
+def worker_pool(max_workers: int) -> Generator[ThreadPoolExecutor]:
+    """A thread pool that drops its queued work when the block is left by an exception.
+
+    ``with ThreadPoolExecutor()`` waits for everything submitted, whatever ended
+    the block. So Ctrl-C during a download of a thousand files did nothing until
+    the thousandth had landed, and a read that had already failed still fetched
+    the rest of its set. ``BaseException``, not ``Exception``: a
+    KeyboardInterrupt is the case this is for. Transfers already running are
+    waited for, so nothing is still writing once the caller sees the exception.
+    """
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield pool
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
 
 
 class FetchError(Exception):

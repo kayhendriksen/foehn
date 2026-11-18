@@ -47,6 +47,20 @@ changes**. The same notes are published with each
   directory whenever no shell expanded the tilde first: a quoted path,
   `--option=~/...`, a Python string, or `FOEHN_DATA_DIR` set in an MCP client
   config.
+- **Ctrl-C stops a download.** An interrupt used to wait for every queued file
+  before it surfaced, so `foehn download` kept running until the batch was
+  done. Queued transfers are now dropped; only those already in flight finish.
+  A `load()` or grid read that has already failed stops fetching the same way.
+- **An unknown `variables=` name is a `ValueError` listing the dataset's
+  variables**, as an unknown `columns=` already was, instead of xarray's bare
+  `KeyError`. `foehn open`/`foehn to-zarr` report it, and any Polars error, as
+  one `error:` line rather than a traceback; the MCP tools return its message.
+- **Metadata tables infer their types from every row.** Only the first 100 were
+  read, so a decimal altitude further down a column of whole numbers failed
+  `stations()` and `points()` outright.
+- **`load()`'s `limit` documentation no longer says `year` and
+  `date_from`/`date_to` reduce what is downloaded.** They trim rows afterwards;
+  `station`, `frequency` and `time_slice` decide the download.
 
 ## 0.5.1 (2026-11-08)
 
