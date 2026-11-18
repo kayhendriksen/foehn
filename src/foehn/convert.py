@@ -43,6 +43,17 @@ _ParquetCompression = Literal["zstd", "snappy"]
 
 # The footer key naming the Bronze files an output was built from.
 _SOURCES_KEY = "foehn_sources"
+_PARAMETER_TYPES_KEY = "foehn_parameter_types"
+
+
+@dataclass(frozen=True)
+class ConversionGroup:
+    """One Parquet output and the source files it is built from."""
+
+    out_path: Path
+    sources: list[Path]
+    parameter_types: str | None = None
+    """Canonical JSON of the declared CSV types. None for converters that do not use them."""
 
 
 def _source_names(sources: Iterable[Path]) -> list[str]:
@@ -51,12 +62,10 @@ def _source_names(sources: Iterable[Path]) -> list[str]:
 
 def _write_parquet_atomic(
     frame: pl.LazyFrame | pl.DataFrame,
-    path: Path,
+    group: ConversionGroup,
     compression: _ParquetCompression = "zstd",
-    *,
-    sources: list[Path],
 ) -> None:
-    """Write a frame to *path* via a sibling temp file + Path.replace.
+    """Write a frame to the group's output via a sibling temp file + Path.replace.
 
     A write that dies part-way (disk full, a source read error, OOM mid-stream)
     creates the output file before it fails. Writing straight to the final path
@@ -69,37 +78,36 @@ def _write_parquet_atomic(
     deleted from Bronze is noticed: every one left behind is older than the
     output, and by mtime alone the stale table was current.
     """
-    metadata = {_SOURCES_KEY: json.dumps(_source_names(sources))}
-    with staged(path) as tmp:
+    metadata = {_SOURCES_KEY: json.dumps(_source_names(group.sources))}
+    if group.parameter_types is not None:
+        metadata[_PARAMETER_TYPES_KEY] = group.parameter_types
+    with staged(group.out_path) as tmp:
         if isinstance(frame, pl.LazyFrame):
             frame.sink_parquet(tmp, compression=compression, metadata=metadata)
         else:
             frame.write_parquet(tmp, compression=compression, metadata=metadata)
 
 
-@dataclass(frozen=True)
-class ConversionGroup:
-    """One Parquet output and the source files it is built from."""
-
-    out_path: Path
-    sources: list[Path]
-
-
 ConvertOne = Callable[[ConversionGroup], int]
 
 
-def _built_from(path: Path, sources: list[Path]) -> bool:
-    """Whether the output at *path* was built from exactly *sources*."""
+def _built_from(group: ConversionGroup) -> bool:
+    """Whether the footer agrees with the current input files and declared types."""
     try:
-        recorded = pl.read_parquet_metadata(path).get(_SOURCES_KEY)
+        metadata = pl.read_parquet_metadata(group.out_path)
     except Exception:  # noqa: BLE001 - an unreadable footer is a reason to rebuild, never to fail
         return False
+    if group.parameter_types is not None and metadata.get(_PARAMETER_TYPES_KEY) != group.parameter_types:
+        # An older CSV output does not say which declarations it used. Even
+        # an empty mapping today may mean a previous float override was removed.
+        return False
+    recorded = metadata.get(_SOURCES_KEY)
     if recorded is None:
-        # Written before outputs recorded their sources. The mtime rule is all
-        # there is; judging these stale would reconvert every table on upgrade.
-        return True
+        # Only a converter without declared types can accept an mtime-only
+        # legacy output. A current CSV footer must also identify its sources.
+        return group.parameter_types is None
     try:
-        return json.loads(recorded) == _source_names(sources)
+        return json.loads(recorded) == _source_names(group.sources)
     except json.JSONDecodeError:
         return False
 
@@ -111,7 +119,7 @@ def _is_up_to_date(group: ConversionGroup) -> bool:
     out_mtime = group.out_path.stat().st_mtime
     if not all(f.stat().st_mtime <= out_mtime for f in group.sources):
         return False
-    return _built_from(group.out_path, group.sources)
+    return _built_from(group)
 
 
 def run_conversions(groups: Iterable[ConversionGroup], convert_one: ConvertOne, *, label: str) -> int:
@@ -204,7 +212,7 @@ def _convert_standard_group(collection_key: str, metadata_types: dict[str, type[
                 lazy_frames = [scan_standard_csv(f, schema_overrides=overrides) for f in group.sources]
                 combined = combine_frames(lazy_frames, collection_key)
                 combined = derive_timestamp(combined, collection_key)
-                _write_parquet_atomic(combined, group.out_path, sources=group.sources)
+                _write_parquet_atomic(combined, group)
                 break
             except (pl.exceptions.ComputeError, pl.exceptions.SchemaError) as e:
                 col = column_from_dtype_error(str(e))
@@ -247,15 +255,16 @@ def convert_to_parquet(dataset: str, workspace: Workspace) -> int:
     out_dir = workspace.parquet(dataset)
     failed = _retire_parquet(dataset, workspace)
 
-    groups = [
-        ConversionGroup(out_dir / _group_out_name(dataset, group_key), files)
-        for group_key, files in group_csv_files(csv_dir, dataset).items()
-    ]
-    if not groups:
+    files_by_group = group_csv_files(csv_dir, dataset)
+    if not files_by_group:
         return failed
 
-    # Load parameter type info from metadata once for the whole collection.
     metadata_types = load_metadata_types(csv_dir)
+    parameter_types = json.dumps({name: dtype.__name__ for name, dtype in metadata_types.items()}, sort_keys=True)
+    groups = [
+        ConversionGroup(out_dir / _group_out_name(dataset, group_key), files, parameter_types)
+        for group_key, files in files_by_group.items()
+    ]
     return failed + run_conversions(groups, _convert_standard_group(dataset, metadata_types), label=dataset)
 
 
@@ -283,7 +292,7 @@ def convert_indoor_to_parquet(dataset: str, workspace: Workspace) -> int:
             frames.append(scan_indoor_csv(f))
         if not frames:
             return 0
-        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path, sources=group.sources)
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group)
         logger.info("  Done: wrote %s (%d files, %d non-data skipped)", group.out_path.name, len(frames), skipped)
         return 0
 
@@ -322,7 +331,7 @@ def convert_preamble_to_parquet(dataset: str, workspace: Workspace) -> int:
                 len(group.sources),
             )
             return failed
-        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group.out_path, sources=group.sources)
+        _write_parquet_atomic(pl.concat(frames, how="diagonal_relaxed"), group)
         logger.info("  Done: wrote %s (%d files)", group.out_path.name, len(frames))
         return failed
 
@@ -343,7 +352,7 @@ def convert_normals_to_parquet(dataset: str, workspace: Workspace) -> int:
     def convert_one(group: ConversionGroup) -> int:
         source = group.sources[0]
         df = read_normals_txt(source)
-        _write_parquet_atomic(df, group.out_path, compression="snappy", sources=group.sources)
+        _write_parquet_atomic(df, group, compression="snappy")
         logger.info("  %s... Converted", source.name)
         return 0
 

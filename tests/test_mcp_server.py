@@ -645,6 +645,7 @@ class TestAggregateData:
         # A null is a missing reading: counted as a row, not as a value.
         zur_2025 = result.items[3]
         assert (zur_2025["rows"], zur_2025["temp_count"], zur_2025["temp_max"]) == (1, 0, None)
+        assert zur_2025["temp_sum"] is None
 
     @patch("foehn.mcp_server.foehn.load")
     def test_time_parts_are_derived_from_the_timestamp(self, mock_load):
@@ -672,6 +673,16 @@ class TestAggregateData:
         )
         assert [row["temp_max"] for row in result.items] == [30.0, 24.0]
         assert (result.total, result.next_offset) == (5, 2)
+
+    @patch("foehn.mcp_server.foehn.load")
+    def test_paging_uses_full_precision_and_preserves_numeric_group_keys(self, mock_load):
+        mock_load.return_value = pl.DataFrame({"x": [2.0001, 2.0004]})
+        pages = [
+            aggregate_data("smn", "x", group_by="x", order_by="x_mean", sort="desc", limit=1, offset=offset)
+            for offset in (0, 1)
+        ]
+        assert [page.items[0]["x"] for page in pages] == [2.0004, 2.0001]
+        assert [page.items[0]["x_mean"] for page in pages] == [2.0, 2.0]
 
     @patch("foehn.mcp_server.foehn.load")
     def test_ties_in_order_by_break_on_the_group_keys(self, mock_load):
@@ -737,8 +748,20 @@ class TestAggregateData:
             date_from="2024-01-01",
             date_to="2024-12-31",
             columns=["temp"],
+            drop_null=None,
             max_bytes=_LOAD_BUDGET_BYTES,
         )
+
+    def test_drop_null_filters_on_an_unprojected_column_through_the_protocol(self, fetcher):
+        href = "https://data.geo.admin.ch/smn/ogd-smn_ber_d_recent.csv"
+        fetcher.any_collection = {"assets": {}}
+        fetcher.any_items = [{"id": "ber", "assets": {"data": {"href": href}}}]
+        fetcher.add_body(
+            href, "station_abbr;reference_timestamp;temp;rain\nBER;2025-01-01;15.0;\nBER;2025-01-02;25.0;1\n"
+        )
+        response = _call("aggregate_data", {"dataset": "smn", "columns": "temp", "drop_null": "rain"})
+        assert not response.is_error
+        assert response.structured_content["items"] == [{"station_abbr": "BER", "rows": 1, "temp_mean": 25.0}]
 
     @patch("foehn.mcp_server.foehn.load")
     def test_float_results_are_rounded(self, mock_load):

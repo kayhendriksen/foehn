@@ -29,7 +29,7 @@ from typing import TextIO
 
 import polars as pl
 
-from foehn import __version__, registry
+from foehn import __version__, coherence, registry
 from foehn.api import METADATA_TABLES, list_datasets, metadata
 from foehn.collections import CATEGORIES, CATEGORY_LABELS, COLLECTIONS, DEFAULT_TIME_SLICE, suggest_dataset
 from foehn.fetch import DEFAULT_WORKERS, FetchError, default_fetcher
@@ -356,16 +356,18 @@ def cmd_download(args: argparse.Namespace) -> None:
         since = None if full_refresh else load_cursor(workspace, ds, time_slices)
         console.status(f"  {ds}: {f'changes since {since}' if since else 'full listing'}")
         try:
-            ds_download_failures = registry.download(
-                ds,
-                workspace,
-                time_slice=time_slices,
-                since=since,
-                workers=args.workers,
-                force=full_refresh,
-                fetcher=fetcher,
-            ).failed
-            ds_failures = 0 if args.no_parquet else registry.convert(ds, workspace)
+            # Convert exactly the Bronze generation this download completed.
+            with coherence.refresh_lock(workspace.bronze(ds)):
+                ds_download_failures = registry.download(
+                    ds,
+                    workspace,
+                    time_slice=time_slices,
+                    since=since,
+                    workers=args.workers,
+                    force=full_refresh,
+                    fetcher=fetcher,
+                ).failed
+                ds_failures = 0 if ds_download_failures or args.no_parquet else registry.convert(ds, workspace)
         except Exception as exc:  # noqa: BLE001 - one Dataset's failure is reported, not allowed to stop the rest
             # A listing that failed after its retries used to end the whole run:
             # every Dataset after it went undownloaded, and a scheduled ingest

@@ -1083,11 +1083,57 @@ def test_concurrent_csv_refreshes_of_one_dataset_cannot_split_file_and_etag(tmp_
     assert (body, load_etags(workspace)[url]) == (b"value\nnew\n", '"new"')
 
 
-def test_no_cursor_keeps_every_item():
-    from foehn.downloads import _updated_since
+def test_asset_revision_after_cursor_refreshes_radar_with_unchanged_parent(tmp_path):
+    url = "https://data.geo.admin.ch/rzc26130000000.h5"
+    item = _stac_item(url, updated="2026-01-01T00:00:00Z")
+    fake = _fake([item], body=b"original")
+    workspace = Workspace(tmp_path)
+    registry.download("radar_precip", workspace, fetcher=fake)
 
-    items = [{"id": "a", "properties": {"updated": "2020-01-01T00:00:00Z"}}]
-    assert _updated_since(items, None) == items
+    item["assets"]["data"]["updated"] = "2026-01-03T00:00:00Z"
+    fake.default_body = b"corrected"
+    result = registry.download("radar_precip", workspace, since="2026-01-02T00:00:00Z", fetcher=fake)
+
+    assert result.downloaded == 1
+    assert (workspace.bronze("radar_precip") / "rzc26130000000.h5").read_bytes() == b"corrected"
+
+
+def test_older_listing_cannot_prune_a_concurrent_download(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from foehn import coherence
+    from foehn._locking import is_held
+
+    listed, resume = Event(), Event()
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("smn")
+    ber = f"{_SMN}/ogd-smn_ber_d_recent.csv"
+    zur = f"{_SMN}/ogd-smn_zur_d_recent.csv"
+
+    class HeldListing(InMemoryFetcher):
+        def items(self, *args, **kwargs):
+            items = super().items(*args, **kwargs)
+            listed.set()
+            assert resume.wait(5)
+            return items
+
+    older = HeldListing(items={"ch.meteoschweiz.ogd-smn": [stac_item("ber", ber)]})
+    older.any_collection = {}
+    older.default_body = b"value\n1\n"
+    newer = _fake([stac_item("ber", ber), stac_item("zur", zur)])
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(registry.download, "smn", workspace, fetcher=older)
+        try:
+            assert listed.wait(5)
+            # The first run owns the listing it will use to prune.
+            assert is_held(coherence._lock_path(bronze))
+            second = pool.submit(registry.download, "smn", workspace, fetcher=newer)
+        finally:
+            resume.set()
+        assert first.result().failed == second.result().failed == 0
+
+    assert (bronze / "ogd-smn_zur_d_recent.csv").is_file()
 
 
 def test_cli_incremental_retry_repairs_a_failed_forced_csv(tmp_path, fetcher):

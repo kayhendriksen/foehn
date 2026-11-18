@@ -14,6 +14,7 @@ touches the network — one file in, one Dataset out.
 from __future__ import annotations
 
 import contextlib
+import io
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,18 @@ def _attr(group: h5py.Group | h5py.Dataset, key: str, default: object = None) ->
     """Read an HDF5 attribute, decoding bytes to str."""
     val = group.attrs.get(key, default)
     return val.decode() if isinstance(val, bytes) else val
+
+
+def _quantity(dwhat: h5py.Group) -> str:
+    return str(_attr(dwhat, "quantity", "data"))
+
+
+def composite_variable(data: bytes) -> str:
+    """Read the data variable's name from a composite header without decoding the raster."""
+    import h5py
+
+    with h5py.File(io.BytesIO(data), "r") as f:
+        return _quantity(f["dataset1/data1/what"]).lower()
 
 
 # How far a computed grid origin may sit from a whole number of cells and still
@@ -57,8 +70,6 @@ def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> 
     detected) to 0, and turn the ``/where`` projection metadata into LV95 x/y
     coordinates via pyproj so the result lines up with the NetCDF Swiss grids.
     """
-    import io
-
     import h5py
     import numpy as np
     import pyproj
@@ -78,7 +89,7 @@ def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> 
         offset = float(_attr(dwhat, "offset", 0.0))
         nodata = float(_attr(dwhat, "nodata", np.nan))
         undetect = float(_attr(dwhat, "undetect", np.nan))
-        quantity = str(_attr(dwhat, "quantity", "data"))
+        quantity = _quantity(dwhat)
         # Not ODIM, but MeteoSwiss states it (``mm`` for CombiPrecip and MESHS).
         unit = _attr(dwhat, "unit", "")
         raw = node["data"][:].astype("float64")
@@ -130,4 +141,4 @@ def open_composite(xr: ModuleType, path: Path, *, data: bytes | None = None) -> 
     return ds
 
 
-__all__ = ["open_composite"]
+__all__ = ["composite_variable", "open_composite"]

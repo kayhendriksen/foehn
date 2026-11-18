@@ -916,15 +916,9 @@ _ZARR_MODES = ("w", "w-", "a", "a-", "r+")
 ZarrMode = Literal["w", "w-", "a", "a-", "r+"]
 
 
-def _source_fingerprint(path: Path) -> str:
-    """Identify the exact revision of a source file, by its contents.
-
-    Size and mtime are metadata a restatement can reproduce exactly — same
-    length, mtime restored — and then the revised values never reach the cube.
-    Radar composites are a few hundred KB, so reading one to hash it costs
-    less than the open and decode that follows it.
-    """
-    return hashlib.blake2b(path.read_bytes(), digest_size=16).hexdigest()
+def _source_fingerprint(data: bytes) -> str:
+    """Identify the exact source bytes, including the composite's observation time."""
+    return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
 def _cube_times(xr: ModuleType, store: Path) -> frozenset:
@@ -1031,20 +1025,6 @@ def _record_sources(store: Path, recorded: dict[str, str]) -> None:
         logger.debug("Could not record source fingerprints in %s (%s)", store, exc)
 
 
-def _open_composite_snapshot(xr: ModuleType, path: Path) -> tuple[xr.Dataset, str]:
-    """Decode a composite and the fingerprint of the exact bytes decoded.
-
-    Read once, then hashed and decoded from that one copy. Hashing the path on
-    both sides of the decode looked equivalent and is not: a source that goes
-    A -> B -> A while it is being read matches on both hashes, so B's values are
-    stored under A's fingerprint and every later append skips the correction for
-    good. Bytes already in hand cannot change underneath us.
-    """
-    data = path.read_bytes()
-    digest = hashlib.blake2b(data, digest_size=16).hexdigest()
-    return odim.open_composite(xr, path, data=data), digest
-
-
 # Radar composites are named product, observation time, then a per-product code:
 # CPCyyjjjHHMMQ_nnnnn.XYZ.h5 for CombiPrecip, where Q is a quality code from 0 to
 # 9 (9 best), and e.g. RZCyyjjjHHMMKK.XYZ.h5 elsewhere, where KK is reserved and
@@ -1123,6 +1103,11 @@ def cube_radar(
         _refuse_a_duplicated_axis(xr, store)
     stored_times = _cube_times(xr, store) if extending else frozenset()
     stored_sources = _stored_sources(store) if extending else {}
+    # An exact file fingerprint also identifies the timestamp inside its header.
+    # Ignore orphaned records for timestamps the current store no longer holds.
+    known_times = {stored_sources[key]: key for key in map(str, stored_times) if key in stored_sources}
+    requested = {variables} if isinstance(variables, str) else set(variables or ())
+    requested_fields = requested - {"time", "x", "y"}
 
     written = 0
     # Collected and written once at the end: xarray restates the group's
@@ -1130,7 +1115,16 @@ def cube_radar(
     recorded: dict[str, str] = {}
     # Radar filenames embed a zero-padded timestamp, so lexical order is chronological.
     for path in _one_file_per_observation(files):
-        ds, fingerprint = _open_composite_snapshot(xr, path)
+        data = path.read_bytes()
+        fingerprint = _source_fingerprint(data)
+        known_time = known_times.get(fingerprint)
+        # A previous file in this call may already have revised this timestamp.
+        unchanged = known_time is not None and stored_sources[known_time] == fingerprint
+        # Each composite has one data variable. Let xarray resolve other names,
+        # including virtual coordinates such as time.year.
+        if unchanged and (not requested_fields or requested_fields == {odim.composite_variable(data)}):
+            continue
+        ds = odim.open_composite(xr, path, data=data)
         if "time" not in ds.coords:
             raise ValueError(f"{path.name}: no time coordinate — cannot stack along time.")
         # Narrowed per file rather than once at the end: only one timestep is ever

@@ -268,12 +268,11 @@ temporary disk usage proportional to the new data instead of copying the entire
 store first. Like other in-place append APIs, an interrupted append is not rolled
 back automatically.
 
-An append re-reads the listing for its `match`, and that listing is cumulative —
-it returns everything published under the match, not only what is new. Timesteps
-the store already holds are therefore skipped rather than written a second time,
-so appending the same window twice is a no-op instead of a cube with duplicate
-entries on its time axis. `mode="a"` against a destination that does not exist
-yet simply creates it.
+A radar append checks each source file in the cumulative listing for its `match`.
+It hashes the compressed bytes and skips grid decoding for observations whose
+fingerprints match the store. A revised observation replaces the previous values
+at the same timestamp. New timestamps extend the cube. With `mode="a"`, a
+missing destination is created on the first write.
 
 ---
 

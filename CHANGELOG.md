@@ -24,6 +24,9 @@ changes**. The same notes are published with each
 
 ### Improvements
 
+- Repeating a radar Zarr append skips grid decoding for previously stored
+  observations whose source bytes match. Corrections still update the cube.
+
 - **New MCP tool `aggregate_data`.** It computes means, extremes, totals,
   medians, standard deviations and counts on the server, grouped by station,
   year, month, date, hour or any column, and returns one row per group, sorted by
@@ -40,6 +43,20 @@ changes**. The same notes are published with each
   `variables`, `parameter`, `year` and `month` take `"BER"` as well as `["BER"]`.
 
 ### Bug fixes
+
+- `foehn download` keeps the previous Parquet output when a dataset refresh
+  fails. Overlapping refreshes of one dataset now acquire their listings in
+  order, and incremental downloads pick up corrections dated on individual
+  assets even when the parent item's timestamp is older.
+- Station and local forecast Parquet outputs rebuild when parameter type
+  declarations change. Existing outputs from these datasets rebuild once to
+  record the declarations they used.
+- Climate normals Delta ingestion reads every parameter table from one archive
+  generation, including when a download replaces the archive concurrently.
+- MCP `aggregate_data` honors `drop_null`, ranks with full precision and
+  preserves numeric grouping keys. A sum over entirely missing values returns
+  `null`. A measured zero still contributes to the total.
+
 
 - **A leading `~` in a path now means the home directory.** `--data-dir`,
   `$FOEHN_DATA_DIR`, `foehn load --output` and `to_zarr(store=...)` /

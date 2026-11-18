@@ -1090,7 +1090,8 @@ def test_a_restated_observation_is_rewritten_rather_than_skipped(tmp_path):
     assert revised.sizes["time"] == 1  # rewritten in place, not appended alongside
 
 
-def test_an_unchanged_source_is_still_skipped_on_append(tmp_path):
+@pytest.mark.parametrize("variables", [None, "acrr", ["y", "time", "acrr"], ["x"]])
+def test_an_unchanged_source_is_still_skipped_on_append(tmp_path, variables):
     """The common re-run: same listing, same files, nothing to do."""
     pytest.importorskip("xarray")
     pytest.importorskip("h5py")
@@ -1101,11 +1102,23 @@ def test_an_unchanged_source_is_still_skipped_on_append(tmp_path):
     from foehn.grids import cube_radar
 
     store, files = _radar_cube(tmp_path)
-    cube_radar(files, store, mode="a")
+    with patch("foehn.odim.open_composite") as decode:
+        cube_radar(files, store, mode="a", variables=variables)
+    decode.assert_not_called()
 
     appended = xr.open_zarr(store)
     assert appended.sizes["time"] == 2
     assert len(set(appended.time.values.tolist())) == 2
+
+
+def test_unchanged_composites_still_validate_variables_against_the_source(tmp_path):
+    _radar_stack_deps()
+    from foehn.grids import cube_radar
+
+    store, files = _radar_cube(tmp_path)
+    with pytest.raises(KeyError, match="missing"):
+        cube_radar(files, store, mode="a", variables=["x", "missing"])
+    cube_radar(files, store, mode="a", variables="time.year")
 
 
 def test_source_fingerprints_survive_in_the_store(tmp_path):
@@ -1237,16 +1250,18 @@ def test_the_fingerprint_always_describes_the_values_that_were_decoded(tmp_path)
     pytest.importorskip("xarray")
     pytest.importorskip("h5py")
     pytest.importorskip("pyproj")
+    pytest.importorskip("zarr")
     import hashlib
 
     import xarray as xr
 
     from foehn import odim
-    from foehn.grids import _open_composite_snapshot
+    from foehn.grids import _stored_sources, cube_radar
 
     source = tmp_path / "cpc2613000000.h5"
     write_odim_composite(source, time="000000", values=[[0.0, 1.5, 9.0], [9.0, 2.0, 3.0]])
     original_bytes = source.read_bytes()
+    store = tmp_path / "cube.zarr"
 
     real_open = odim.open_composite
 
@@ -1257,12 +1272,13 @@ def test_the_fingerprint_always_describes_the_values_that_were_decoded(tmp_path)
         return opened
 
     with patch.object(odim, "open_composite", replace_during_decode):
-        ds, fingerprint = _open_composite_snapshot(xr, source)
+        cube_radar([source], store)
 
     # The fingerprint names the revision the values actually came from, not
     # whatever happens to be at the path now.
-    assert fingerprint == hashlib.blake2b(original_bytes, digest_size=16).hexdigest()
-    assert float(ds["acrr"].values.ravel()[1]) == 1.5
+    assert list(_stored_sources(store).values()) == [hashlib.blake2b(original_bytes, digest_size=16).hexdigest()]
+    with xr.open_zarr(store) as ds:
+        assert float(ds["acrr"].values.ravel()[1]) == 1.5
     assert source.read_bytes() != original_bytes  # the path really did move on
 
 
@@ -1691,21 +1707,14 @@ def test_a_file_that_vanishes_before_snapshotting_does_not_break_reuse(tmp_path)
     assert _inode_key(tmp_path, [tmp_path / "missing.nc"]) is None
 
 
-def test_the_source_fingerprint_is_the_file_contents(tmp_path):
+def test_the_source_fingerprint_is_the_file_contents():
     """Two files with identical bytes fingerprint alike; a changed byte does not."""
     import hashlib
 
     from foehn.grids import _source_fingerprint
 
-    first, second = tmp_path / "a.h5", tmp_path / "b.h5"
-    first.write_bytes(b"generation one")
-    second.write_bytes(b"generation one")
-
-    assert _source_fingerprint(first) == _source_fingerprint(second)
-    assert _source_fingerprint(first) == hashlib.blake2b(b"generation one", digest_size=16).hexdigest()
-
-    second.write_bytes(b"generation two")
-    assert _source_fingerprint(first) != _source_fingerprint(second)
+    assert _source_fingerprint(b"generation one") == hashlib.blake2b(b"generation one", digest_size=16).hexdigest()
+    assert _source_fingerprint(b"generation one") != _source_fingerprint(b"generation two")
 
 
 def test_the_time_index_of_a_store_that_is_not_there_is_empty(tmp_path):

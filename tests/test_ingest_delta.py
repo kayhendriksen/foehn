@@ -629,6 +629,38 @@ def test_climate_normals_only_rebuild_touches_no_other_dataset(climate_normals_b
     assert [call.args[2] for call in write.call_args_list] == ["`main`.`meteoswiss`.`climate_normals`"]
 
 
+@pytest.mark.parametrize("arguments", [[], ["--climate-normals-only"]], ids=["daily", "normals-only"])
+def test_normals_ingestion_holds_the_refresh_lock_while_reading(climate_normals_bronze_dir, arguments):
+    from foehn import coherence
+    from foehn._locking import is_held
+    from foehn.meteocsv import read_normals_txt
+    from foehn.workspace import Workspace
+
+    workspace = Workspace(climate_normals_bronze_dir / "volume")
+    target = workspace.bronze("climate_normals")
+    # A downloader interrupted between the publication renames left its
+    # complete archive in the backup. Listing before acquiring the lock would
+    # skip the table altogether.
+    shutil.copytree(climate_normals_bronze_dir / "climate_normals", target.with_name(".foehn-previous-climate_normals"))
+    held = []
+
+    def read(path, *, with_identity):
+        held.append(is_held(coherence._lock_path(target)))
+        return read_normals_txt(path, with_identity=with_identity)
+
+    with (
+        patch.dict("sys.modules", {"pyspark.sql": MagicMock()}),
+        patch("scripts.ingest_delta.Workspace", return_value=workspace),
+        patch("scripts.ingest_delta.read_normals_txt", side_effect=read),
+        patch("scripts.ingest_delta._write_to_delta") as write,
+        patch("sys.argv", ["ingest_delta.py", *arguments]),
+    ):
+        main()
+
+    assert held == [True]
+    write.assert_called_once()
+
+
 def test_climate_normals_only_rebuild_refuses_missing_input(tmp_path):
     from foehn.workspace import Workspace
 
