@@ -5,9 +5,11 @@ what is here is grouping into outputs, the up-to-date skip, the atomic write and
 the per-kind converters.
 """
 
+import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import polars as pl
 import pytest
@@ -187,15 +189,56 @@ def test_locally_missing_sources_without_a_listing_keep_the_output(tmp_path):
     assert (workspace.parquet("smn") / "smn_d_recent.parquet").exists()
 
 
-def test_an_output_written_before_sources_were_recorded_is_judged_by_mtime(tmp_path):
-    """A workspace from an older foehn is not reconverted wholesale on upgrade."""
-    workspace = _two_station_bronze(tmp_path)
+@pytest.mark.parametrize("with_source_footer", [False, True])
+def test_legacy_csv_outputs_rebuild_once_without_a_type_record(tmp_path, with_source_footer):
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("smn")
+    bronze.mkdir(parents=True)
+    source = bronze / "ogd-smn_aaa_d_recent.csv"
+    source.write_text("tre200d0\n1\n")
     out = workspace.parquet("smn") / "smn_d_recent.parquet"
     out.parent.mkdir(parents=True)
-    pl.DataFrame({"legacy": [1]}).write_parquet(out)
+    # The old output may reflect a float declaration that was later removed.
+    footer = {"foehn_sources": json.dumps([source.name])} if with_source_footer else None
+    pl.DataFrame({"tre200d0": [1.0]}).write_parquet(out, metadata=footer)
 
     assert convert_to_parquet("smn", workspace) == 0
+    assert pl.read_parquet_schema(out)["tre200d0"] == pl.Int64
+    with patch.object(pl.LazyFrame, "sink_parquet", side_effect=AssertionError("unexpected rewrite")):
+        assert convert_to_parquet("smn", workspace) == 0
 
+
+def test_parameter_type_changes_alone_invalidate_the_parquet(tmp_path):
+    workspace = Workspace(tmp_path)
+    bronze = workspace.bronze("smn")
+    bronze.mkdir(parents=True)
+    (bronze / "ogd-smn_ber_d_recent.csv").write_text("tre200d0;rre150d0\n1;2\n")
+    metadata = bronze / "ogd-smn_meta_parameters.csv"
+    header = "parameter_shortname;parameter_datatype;description\n"
+    output = workspace.parquet("smn") / "smn_d_recent.parquet"
+
+    assert convert_to_parquet("smn", workspace) == 0
+    assert pl.read_parquet_schema(output)["tre200d0"] == pl.Int64
+
+    metadata.write_text(header + "tre200d0;Float;temperature\nrre150d0;Integer;rain\n")
+    assert convert_to_parquet("smn", workspace) == 0
+    assert pl.read_parquet_schema(output)["tre200d0"] == pl.Float64
+
+    # Non-type changes, case and row order leave the effective schema unchanged.
+    metadata.write_text(header + "rre150d0;integer;rainfall\ntre200d0;float;temperature\n")
+    with patch.object(pl.LazyFrame, "sink_parquet", side_effect=AssertionError("unexpected rewrite")):
+        assert convert_to_parquet("smn", workspace) == 0
+
+    metadata.unlink()
+    assert convert_to_parquet("smn", workspace) == 0
+    assert pl.read_parquet_schema(output)["tre200d0"] == pl.Int64
+
+
+def test_a_legacy_normals_output_without_type_inputs_still_uses_mtime(climate_normals_workspace):
+    out = climate_normals_workspace.parquet("climate_normals") / "sample.parquet"
+    out.parent.mkdir(parents=True)
+    pl.DataFrame({"legacy": [1]}).write_parquet(out)
+    assert convert_normals_to_parquet("climate_normals", climate_normals_workspace) == 0
     assert pl.read_parquet(out).columns == ["legacy"]
 
 
@@ -257,9 +300,9 @@ def test_conversion_holds_the_lock_downloads_publish_under(smn_workspace, monkey
     held = []
     write = convert._write_parquet_atomic
 
-    def recording(frame, path, compression="zstd", *, sources):
+    def recording(frame, group, compression="zstd"):
         held.append(is_held(coherence._lock_path(smn_workspace.bronze("smn"))))
-        write(frame, path, compression, sources=sources)
+        write(frame, group, compression)
 
     monkeypatch.setattr(convert, "_write_parquet_atomic", recording)
 
@@ -697,7 +740,9 @@ def test_an_output_whose_recorded_sources_are_garbled_is_rebuilt(tmp_path):
     workspace = _two_station_bronze(tmp_path)
     out = workspace.parquet("smn") / "smn_d_recent.parquet"
     out.parent.mkdir(parents=True)
-    pl.DataFrame({"legacy": [1]}).write_parquet(out, metadata={"foehn_sources": "not json"})
+    pl.DataFrame({"legacy": [1]}).write_parquet(
+        out, metadata={"foehn_sources": "not json", "foehn_parameter_types": "{}"}
+    )
 
     assert convert_to_parquet("smn", workspace) == 0
 

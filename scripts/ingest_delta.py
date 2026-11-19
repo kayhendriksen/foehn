@@ -447,23 +447,25 @@ def _ingest_climate_normals(spark: SparkSession, bronze_base: Path, catalog: str
     the published one, matching the other curated metadata tables.
     """
     txt_dir = bronze_base / "climate_normals"
-    if not txt_dir.exists():
+    if not bronze_base.is_dir():
         print("  --  climate_normals           skipped (no data)", flush=True)
-        return Tally(skipped=1)
-
-    txt_files = sorted(txt_dir.glob("*.txt"))
-    if not txt_files:
-        print("  --  climate_normals           skipped (no TXT files)", flush=True)
         return Tally(skipped=1)
 
     table = f"{catalog}.{schema}.`climate_normals`"
     try:
-        english_files = [path for path in txt_files if path.name.endswith("_en.txt")]
-        if not english_files:
-            raise ValueError("No English climate-normal TXT tables found; the existing table is kept.")
-        # scan_csv doesn't support encoding="latin1", so use eager read_csv.
-        frames = [read_normals_txt(txt_path, with_identity=True) for txt_path in english_files]
-        _write_to_delta(spark, pl.concat(frames, how="diagonal_relaxed"), table)
+        # Archive refreshes replace the entire directory. List and read it
+        # under one lock, including the gap between the two publication renames.
+        with coherence.refresh_lock(txt_dir):
+            txt_files = sorted(txt_dir.glob("*.txt"))
+            if not txt_files:
+                print("  --  climate_normals           skipped (no TXT files)", flush=True)
+                return Tally(skipped=1)
+            english_files = [path for path in txt_files if path.name.endswith("_en.txt")]
+            if not english_files:
+                raise ValueError("No English climate-normal TXT tables found; the existing table is kept.")
+            # scan_csv doesn't support encoding="latin1", so use eager read_csv.
+            frames = [read_normals_txt(txt_path, with_identity=True) for txt_path in english_files]
+            _write_to_delta(spark, pl.concat(frames, how="diagonal_relaxed"), table)
     except Exception as e:  # noqa: BLE001 - any failure fails this table and is reported, never the run
         _report_failure("climate_normals", e)
         return Tally(failed=1)

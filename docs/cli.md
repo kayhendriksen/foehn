@@ -149,9 +149,10 @@ published lead by lead over more than an hour, so one still arriving is passed
 over for the run before it. The ensemble members are left out (a whole ICON run
 is 85–145 GB); fetch one with `foehn open --match`.
 
-Each dataset is attempted even when one before it fails; a failed dataset is
-reported, its cursor is held back so the next run retries it, and the command
-exits 1.
+If any asset fails to download, the command skips Parquet conversion for that
+dataset and retries it on the next run. Previously published Parquet stays
+available. The command attempts the remaining datasets and exits 1 after
+reporting failures.
 
 After a clean run, the station datasets delete what Bronze no longer needs: a
 `recent` or `now` CSV the collection has stopped listing (a station MeteoSwiss

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -67,26 +66,10 @@ def _since_instant(since: str | None) -> datetime | None:
     return cutoff
 
 
-def _updated_since(items: list[dict], since: str | None) -> list[dict]:
-    """Keep only the items MeteoSwiss restated after *since*.
-
-    Written out verbatim in three of the four download paths, along with its two
-    log lines. What ``since`` means is one rule. Compared as instants: as strings,
-    ``10:30:00Z`` sorted before ``11:00:00+01:00`` and a change half an hour
-    after the cursor was skipped. An Item whose ``updated`` cannot be read is
-    kept — a redundant fetch is cheaper than a silent skip.
-    """
-    cutoff = _since_instant(since)
-    if cutoff is None:
-        return items
-
-    def changed(item: dict) -> bool:
-        updated = parse_instant(item.get("properties", {}).get("updated", ""))
-        return updated is None or updated > cutoff
-
-    kept = [item for item in items if changed(item)]
-    logger.info("  %d items updated since last run", len(kept))
-    return kept
+def _changed_since(updated: str, cutoff: datetime) -> bool:
+    """Compare STAC timestamps as instants, retaining files of unknown age."""
+    revision = parse_instant(updated)
+    return revision is None or revision > cutoff
 
 
 # --- What Bronze keeps ---
@@ -169,20 +152,25 @@ def _skip_except(skip: SkipRule | None, forced: set[str]) -> SkipRule:
 
 
 def _after_cursor(
-    wanted: list[Asset], items: list[dict], since: str | None, out_dir: Path, pending: set[str]
+    wanted: list[Asset], items: list[dict], cutoff: datetime | None, out_dir: Path, pending: set[str]
 ) -> list[Asset]:
     """Narrow an incremental run without dropping missing files or pending repairs.
 
     Called with the Dataset lock held: a forced refresh can invalidate a file
     even when its upstream timestamp is older than the committed cursor.
     """
-    if not since:
+    if cutoff is None:
         return wanted
-    changed = {item.get("id", "") for item in _updated_since(items, since)}
+    changed_items = {
+        item.get("id", "") for item in items if _changed_since(item.get("properties", {}).get("updated", ""), cutoff)
+    }
     return [
         asset
         for asset in wanted
-        if asset.item_id in changed or asset.name in pending or not (out_dir / asset.name).exists()
+        if asset.item_id in changed_items
+        or _changed_since(asset.updated, cutoff)
+        or asset.name in pending
+        or not (out_dir / asset.name).exists()
     ]
 
 
@@ -275,53 +263,43 @@ def stac_download(
         force: bool = False,
         fetcher: Fetcher,
     ) -> DownloadResult:
-        _since_instant(since)
+        cutoff = _since_instant(since)
         collection_id = COLLECTIONS[dataset]
         out_dir = workspace.bronze(dataset)
-        # Listed here rather than inside the metadata pass: the data pass's
-        # ETag prune below has to know these hrefs, or it drops their ETags as
-        # "no longer listed" and every run downloads the metadata in full.
-        metadata = metadata_assets(dataset, fetcher=fetcher) if with_metadata else []
-        result = (
-            _download_metadata_assets(metadata, dataset, workspace, workers=workers, force=force, fetcher=fetcher)
-            if metadata
-            else DownloadResult()
-        )
-        _banner(f"{title}: {collection_id}", out_dir)
+        # Pruning acts on this listing. Take it under the same lock as publication
+        # so an older walk cannot delete a file another refresh has just added.
+        with coherence.refresh_lock(out_dir):
+            # Listed here rather than inside the metadata pass: the data pass's
+            # ETag prune below has to know these hrefs, or it drops their ETags as
+            # "no longer listed" and every run downloads the metadata in full.
+            metadata = metadata_assets(dataset, fetcher=fetcher) if with_metadata else []
+            result = (
+                _download_metadata_assets(metadata, dataset, workspace, workers=workers, force=force, fetcher=fetcher)
+                if metadata
+                else DownloadResult()
+            )
+            _banner(f"{title}: {collection_id}", out_dir)
 
-        items = fetcher.items(collection_id) if list_items is None else list_items(collection_id, fetcher)
-        logger.info("  Found %d items", len(items))
+            items = fetcher.items(collection_id) if list_items is None else list_items(collection_id, fetcher)
+            logger.info("  Found %d items", len(items))
 
-        # ``every`` is the full pre-filter set — the prune universe below, so
-        # ETags for slices outside this run's time_slice are kept.
-        every = assets_of(items, suffixes=suffixes, excludes=excludes)
-        wanted = select(
-            every,
-            time_slices=time_slice if time_sliced else None,
-            latest_run=latest_run,
-        )
-        if latest_run and (run := latest_run_of(every)) is not None:
-            available = len({a.forecast_run for a in every if a.forecast_run is not None})
-            logger.info("  Newest complete forecast run: %s (of %d listed)", run, available)
+            # ``every`` is the full pre-filter set — the prune universe below, so
+            # ETags for slices outside this run's time_slice are kept.
+            every = assets_of(items, suffixes=suffixes, excludes=excludes)
+            wanted = select(
+                every,
+                time_slices=time_slice if time_sliced else None,
+                latest_run=latest_run,
+            )
+            if latest_run and (run := latest_run_of(every)) is not None:
+                available = len({a.forecast_run for a in every if a.forecast_run is not None})
+                logger.info("  Newest complete forecast run: %s (of %d listed)", run, available)
 
-        # The same coherence protocol the read path speaks. This writes into the
-        # very directory a grid read opens from, and replacing several files one
-        # at a time has a middle — so a download running beside a read used to
-        # produce a mixed set with nothing on disk to say so. Grid kinds only:
-        # the CSV kinds are converted before anything reads them, and there is no
-        # set whose members have to agree.
-        #
-        # The ETag kinds hold the same per-Dataset lock from the ETag snapshot to
-        # its commit. Run state merges were locked but publication was not: an
-        # older response could replace a newer file and the newer run then commit
-        # its ETag, so every later refresh got a 304 and kept the stale bytes.
-        # Per Dataset, so unrelated Datasets still download side by side.
-        with coherence.refresh_lock(out_dir) if coherent or etags else nullcontext():
             # Retry state precedes the cursor filter. Otherwise an invalidated
             # file that still exists looks unchanged forever after a failed
             # forced refresh, even though its ETag was correctly discarded.
             forced = coherence.blocked(out_dir, [asset.name for asset in wanted]) if coherent or etags else set()
-            wanted = _after_cursor(wanted, items, since, out_dir, forced)
+            wanted = _after_cursor(wanted, items, cutoff, out_dir, forced)
             if since and not wanted:
                 logger.info("  Nothing changed — skipping")
                 if result.failed == 0:

@@ -79,6 +79,9 @@ It takes the same filters and download budget as `load_data`, reduces the rows
 on the server with the chosen `stats` (mean, min, max, sum, median, std, count),
 grouped by `station`, a time part (`year`, `month`, `date`, `hour`) or any column,
 and returns one row per group, sortable by any result column (`order_by`, `sort`).
+Use `drop_null="column"` to require an observation in that column before grouping.
+A sum with no observed values is `null`. Rankings use the full precision of each
+statistic before rounding the displayed result.
 
 `load_data`, `aggregate_data`, `get_inventory` and `get_points` return one page at a time — at
 most 500 rows, 50 by default for `load_data` and 100 for the other two — with

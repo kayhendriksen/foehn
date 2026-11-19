@@ -386,6 +386,33 @@ def test_cursor_held_back_on_download_failure(tmp_path, capsys):
     assert "not advancing the _last_run.json cursor" in err
 
 
+def test_failed_refresh_keeps_previous_parquet_until_retry(tmp_path, fetcher):
+    from foehn.workspace import Workspace
+    from tests.fakes import stac_item
+
+    ber = "https://data.geo.admin.ch/ogd-smn_ber_d_recent.csv"
+    zur = "https://data.geo.admin.ch/ogd-smn_zur_d_recent.csv"
+    fetcher.any_collection = {}
+    fetcher.any_items = [stac_item("ber", ber), stac_item("zur", zur)]
+    args = ["download", "smn", "--full-refresh", "--data-dir", str(tmp_path)]
+    output = Workspace(tmp_path).parquet("smn") / "smn_d_recent.parquet"
+
+    fetcher.default_body = b"value\n1\n"
+    main(args)
+    original = output.read_bytes()
+
+    fetcher.default_body = b"value\n2\n"
+    fetcher.fail(zur)
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+    assert exc.value.code == 1
+    assert output.read_bytes() == original
+
+    fetcher.errors.clear()
+    main(args)
+    assert pl.read_parquet(output)["value"].to_list() == [2, 2]
+
+
 def test_a_dataset_that_fails_outright_does_not_stop_the_rest(tmp_path, capsys):
     """A listing that still failed after its retries used to end the whole run.
 

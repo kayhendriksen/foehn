@@ -684,6 +684,7 @@ def aggregate_data(
     sort: _Sort | None = None,
     limit: _PageLimit = _PAGE_DEFAULT,
     offset: _Offset = 0,
+    drop_null: str | None = None,
 ) -> Page[dict[str, Any]]:
     """Compute means, extremes, totals and counts on the server, grouped as asked.
 
@@ -715,7 +716,8 @@ def aggregate_data(
         columns: Column(s) to aggregate (e.g. ["tre200d0", "rre150d0"]). Must be
             numeric. Use get_parameters() to find column names.
         stats: Statistic(s) to compute for every column. Options: $stats.
-            "count" counts non-null values. Defaults to "mean".
+            "count" counts non-null values. "sum" returns null when there are no
+            observations in the group. Defaults to "mean".
         group_by: What each result row is for, in order. "station" (the station,
             or the forecast point for "forecast_local"), a time part derived from
             the timestamp ($time_groups — "month" is the month of the year, so
@@ -731,6 +733,7 @@ def aggregate_data(
         month: Only these month(s) (1-12).
         date_from: Start date (inclusive), ISO format "YYYY-MM-DD".
         date_to: End date (inclusive), ISO format "YYYY-MM-DD".
+        drop_null: Only aggregate rows where this column has a value.
         order_by: Result column to sort by (e.g. "tre200d0_mean" or "year").
             Defaults to the group keys.
         sort: "asc" or "desc" for order_by. Defaults to "asc". Use "desc" with a
@@ -761,17 +764,22 @@ def aggregate_data(
         date_from=date_from,
         date_to=date_to,
         columns=list(dict.fromkeys([*metrics, *passthrough])),
+        drop_null=drop_null,
         max_bytes=_LOAD_BUDGET_BYTES,
     )
     if non_numeric := [c for c in metrics if not df.schema[c].is_numeric()]:
         raise ValueError(f"Only numeric columns can be aggregated: {non_numeric} are not.")
 
-    aggs = [pl.len().alias("rows")] + [
-        getattr(pl.col(c), stat)().alias(f"{c}_{stat}") for c in metrics for stat in stat_list
-    ]
+    aggs = [pl.len().alias("rows")]
+    for metric in metrics:
+        column = pl.col(metric)
+        for stat in stat_list:
+            value = getattr(column, stat)()
+            if stat == "sum":
+                value = pl.when(column.count() > 0).then(value)
+            aggs.append(value.alias(f"{metric}_{stat}"))
     keys = _group_expressions(df, groups)
     result = df.group_by(keys).agg(aggs) if keys else df.select(aggs)
-    result = result.with_columns(pl.col(pl.Float32, pl.Float64).round(_AGGREGATE_DECIMALS))
 
     # group_by returns groups in no particular order, so the keys always break
     # ties: without them a page boundary could fall differently on every call.
@@ -786,6 +794,8 @@ def aggregate_data(
         )
     elif key_names:
         result = result.sort(key_names, descending=(sort == "desc"), nulls_last=True)
+    # Preserve group identities and rank by the full-precision statistics.
+    result = result.with_columns(pl.col(pl.Float32, pl.Float64).exclude(key_names).round(_AGGREGATE_DECIMALS))
     return _page(result, limit, offset)
 
 
