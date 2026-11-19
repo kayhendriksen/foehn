@@ -720,6 +720,19 @@ def write_zarr(
         _write_zarr(ds, store, mode, rechunk=rechunk, append_dim=append_dim)
 
 
+def _unknown_variables(ds: xr.Dataset, wanted: list[str]) -> list[str]:
+    """Identify failed selectors without counting virtual coordinates as missing."""
+    missing = []
+    for name in wanted:
+        if name in ds.variables:
+            continue
+        try:
+            ds[[name]]
+        except (KeyError, AttributeError):
+            missing.append(name)
+    return missing
+
+
 def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Dataset:
     """Restrict a Dataset to the requested data variable(s), or return it whole.
 
@@ -729,21 +742,21 @@ def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Da
     if variables is None:
         return ds
     wanted = [variables] if isinstance(variables, str) else list(variables)
-    # Named, as the tabular path names an unknown column: xarray's bare
-    # ``KeyError: 'tabsd'`` says neither what was wrong nor what would be right.
-    if missing := [name for name in wanted if name not in ds.variables]:
-        available = ", ".join(sorted(str(name) for name in ds.data_vars))
-        ds.close()
-        raise ValueError(f"Unknown variable(s) {missing} in variables=. This dataset has: {available}")
-    try:
-        selected = ds[wanted]
-    except BaseException:
-        ds.close()
-        raise
-    # A selection is a new Dataset, and xarray does not hand it the source's
-    # closer: closing it, or leaving a ``with`` block, kept the file open.
-    selected.set_close(ds.close)
-    return selected
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(ds.close)
+        try:
+            selected = ds[wanted]
+        except (KeyError, AttributeError) as exc:
+            # xarray resolves implicit dimensions and derived fields such as
+            # time.year. Only check names individually after selection fails.
+            if not (missing := _unknown_variables(ds, wanted)):
+                raise
+            available = ", ".join(sorted(str(name) for name in ds.data_vars))
+            raise ValueError(f"Unknown variable(s) {missing} in variables=. This dataset has: {available}") from exc
+        # xarray does not transfer the source's closer to the selected Dataset.
+        selected.set_close(ds.close)
+        cleanup.pop_all()
+        return selected
 
 
 # --- xarray-backed opens ---------------------------------------------------

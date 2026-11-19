@@ -494,6 +494,14 @@ def test_selecting_variables_keeps_the_closer():
     assert closed == [True]
 
 
+def test_selecting_an_implicit_dimension_returns_its_coordinates():
+    xr = pytest.importorskip("xarray")
+    ds = xr.Dataset({"rain": ("cell", [3.0, 5.0])})
+
+    with grids.select_variables(ds, "cell") as selected:
+        assert selected["cell"].values.tolist() == [0, 1]
+
+
 def test_open_netcdf_combines_despite_conflicting_global_attrs(tmp_path):
     """Differing global attrs (history/source) must not block an otherwise-clean combine."""
     xr = pytest.importorskip("xarray")
@@ -1116,7 +1124,7 @@ def test_unchanged_composites_still_validate_variables_against_the_source(tmp_pa
     from foehn.grids import cube_radar
 
     store, files = _radar_cube(tmp_path)
-    with pytest.raises(KeyError, match="missing"):
+    with pytest.raises(ValueError, match=r"Unknown variable\(s\) \['missing'\].*acrr"):
         cube_radar(files, store, mode="a", variables=["x", "missing"])
     cube_radar(files, store, mode="a", variables="time.year")
 
@@ -2033,11 +2041,13 @@ def test_conversion_releases_every_source_revision(fetcher, tmp_path, monkeypatc
 def test_an_unknown_variable_is_named_with_the_ones_the_dataset_has():
     """xarray's bare KeyError said neither what was wrong nor what would be right."""
     xr = pytest.importorskip("xarray")
+    import numpy as np
+
     closed = []
-    ds = xr.Dataset({"TabsD": ("x", [1.0]), "RhiresD": ("x", [2.0])})
+    ds = xr.Dataset({"TabsD": ("x", [1.0]), "RhiresD": ("x", [2.0])}, coords={"time": np.datetime64("2026-11-19")})
     ds.set_close(lambda: closed.append(True))
 
-    with pytest.raises(ValueError, match=r"Unknown variable\(s\) \['tabsd'\].*RhiresD, TabsD"):
-        grids.select_variables(ds, ["TabsD", "tabsd"])
+    with pytest.raises(ValueError, match=r"Unknown variable\(s\) \['time.typo', 'tabsd'\].*RhiresD, TabsD"):
+        grids.select_variables(ds, ["TabsD", "time.year", "time.typo", "tabsd"])
 
     assert closed == [True]
