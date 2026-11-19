@@ -843,11 +843,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         # OSError below, which it is a kind of.
         _silence_stdout()
         sys.exit(EXIT_BROKEN_PIPE)
-    except (ValueError, FetchError, ImportError, OSError) as exc:
+    except (ValueError, FetchError, ImportError, OSError, pl.exceptions.PolarsError) as exc:
         # The messages foehn raises for these name the fix already; a traceback
         # under them only buries it. An OSError — a data directory that cannot
         # be written, a full disk — names the path and the reason, which is all
-        # a traceback would have added.
+        # a traceback would have added. A Polars error names the column or the
+        # value it could not handle, which is likewise the whole of the news.
         console.error(str(exc))
         sys.exit(EXIT_FAILURE)
     except KeyboardInterrupt:

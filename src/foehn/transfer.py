@@ -27,7 +27,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,7 +37,7 @@ from foehn import atomicwrite
 from foehn._urls import redact_urls, safe_url
 from foehn.archives import safe_extract
 from foehn.assets import Asset
-from foehn.fetch import DEFAULT_WORKERS, Fetcher
+from foehn.fetch import DEFAULT_WORKERS, Fetcher, worker_pool
 from foehn.meteocsv import utf8_meteoswiss_csv
 
 logger = logging.getLogger(__name__)
@@ -376,7 +376,7 @@ def fetch_all(
 
     if total:
         logger.info("  %d %s(s) to process", total, label)
-        with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+        with worker_pool(min(workers, total)) as pool:
             # ETags are read here, on the main thread, and written below as
             # results arrive — also on the main thread. The store is never
             # touched from a worker.
@@ -390,10 +390,8 @@ def fetch_all(
                     outcome = fut.result()
                 except Exception as exc:
                     if on_error == "raise":
-                        # Leaving the ``with`` waits for every queued transfer,
-                        # so a read that is already lost would still fetch the
-                        # rest of its set. Drop what has not started.
-                        pool.shutdown(cancel_futures=True)
+                        # The pool drops what has not started: a read that is
+                        # already lost must not fetch the rest of its set.
                         raise
                     failed += 1
                     logger.warning("  [%d/%d] FAILED: %s — %s", i, total, safe_url(asset.href), redact_urls(str(exc)))

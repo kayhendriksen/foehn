@@ -258,8 +258,9 @@ def load(
         limit: Cap the returned DataFrame to N rows. Applied after sort/columns.
             NOTE: this only bounds the returned shape — it does not reduce
             network bytes, since CSVs are per-station and not pre-bucketed by
-            row count. To reduce wire volume, narrow with ``time_slice="now"``,
-            ``year``, or ``date_from/date_to``.
+            row count. To reduce wire volume, narrow which files are fetched
+            with ``station``, ``frequency`` and ``time_slice``; ``year`` and
+            ``date_from/date_to`` trim rows only after the download.
         workers: Concurrent CSV downloads (default $default_workers). The CSV fetches are
             parallelised via a ThreadPoolExecutor; metadata fetch stays serial.
         max_bytes: Refuse the query with a ValueError once its data files have
@@ -384,8 +385,9 @@ def open_dataset(
     Raises:
         ValueError: If the dataset is unknown, tabular (CSV), a GRIB2/radar
             collection opened without a single-file ``match``, if the match
-            selects more files than the kind will open at once, or if its files
-            cannot be combined into a single Dataset (narrow it with ``match``).
+            selects more files than the kind will open at once, if its files
+            cannot be combined into a single Dataset (narrow it with ``match``),
+            or if ``variables`` names one the dataset does not have.
         OSError: If one of the matched files cannot be read — a corrupt entry in
             the local cache. The message names the file; delete it and retry.
         ImportError: If the optional 'grids' dependencies are not installed.

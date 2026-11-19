@@ -578,3 +578,45 @@ def test_http_errors_keep_the_status_without_the_raw_request_text():
     with pytest.raises(FetchError, match=r"HTTP 503") as caught:
         fetcher.get(CSV_URL)
     assert "review-query" not in str(caught.value)
+
+
+def test_a_worker_pool_drops_its_queued_work_when_the_block_is_interrupted():
+    """Ctrl-C used to wait for every queued transfer before it surfaced."""
+    from foehn.fetch import worker_pool
+
+    release = threading.Event()
+    started = threading.Event()
+    ran = []
+
+    def work(i):
+        started.set()
+        release.wait(5)
+        ran.append(i)
+
+    futures = []
+
+    def run_until_interrupted():
+        with worker_pool(1) as pool:
+            futures.extend(pool.submit(work, i) for i in range(20))
+            started.wait(5)
+            # Released only after the interrupt has had time to cancel the
+            # queue: set before raising, the worker could start the next item
+            # in the gap and the count below would depend on scheduling.
+            threading.Timer(0.2, release.set).start()
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_until_interrupted()
+
+    # The transfer in flight finished; nothing behind it was started.
+    assert ran == [0]
+    assert all(f.cancelled() for f in futures[1:])
+
+
+def test_a_worker_pool_finishes_everything_when_the_block_completes():
+    from foehn.fetch import worker_pool
+
+    with worker_pool(2) as pool:
+        futures = [pool.submit(lambda i=i: i * 2) for i in range(10)]
+
+    assert [f.result() for f in futures] == [i * 2 for i in range(10)]
