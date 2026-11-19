@@ -184,3 +184,20 @@ def test_a_compressed_metadata_table_is_refused():
 
     with pytest.raises(ValueError, match="compressed data"):
         fetch_table("smn", "parameters", fetcher=fake)
+
+
+def test_a_decimal_past_the_inference_window_does_not_end_the_table():
+    """Altitude is ``int | float`` and left to inference, which read only the first 100 rows."""
+    header = (
+        "station_abbr;station_name;station_canton;station_height_masl;station_coordinates_lv95_east;"
+        "station_coordinates_lv95_north;station_coordinates_wgs84_lat;station_coordinates_wgs84_lon;"
+        "station_data_since\n"
+    )
+    rows = [f"S{i};Name {i};BE;{500 + i};2600000.0;1200000.0;46.9;7.4;01.01.1990\n" for i in range(150)]
+    rows.append("TOP;Summit;VS;1538.5;2600000.0;1200000.0;46.9;7.4;01.01.1990\n")
+    fake = _fake("https://data.geo.admin.ch/x/ogd-smn_meta_stations.csv", body=header + "".join(rows))
+
+    df = fetch_table("smn", "stations", fetcher=fake)
+
+    assert df.height == 151
+    assert df["altitude"].to_list()[-1] == 1538.5

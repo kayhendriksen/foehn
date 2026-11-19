@@ -42,6 +42,7 @@ _OFFERS = [
     (foehn.download, (TIME_SLICE_LABELS,)),
     (mcp_server.load_data, (GRANULARITY_LABELS, TIME_SLICE_LABELS)),
     (mcp_server.describe_data, (GRANULARITY_LABELS, TIME_SLICE_LABELS)),
+    (mcp_server.aggregate_data, (GRANULARITY_LABELS, TIME_SLICE_LABELS)),
     (mcp_server.list_datasets, (CATEGORY_LABELS,)),
 ]
 

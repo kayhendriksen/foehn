@@ -728,8 +728,15 @@ def select_variables(ds: xr.Dataset, variables: str | list[str] | None) -> xr.Da
     """
     if variables is None:
         return ds
+    wanted = [variables] if isinstance(variables, str) else list(variables)
+    # Named, as the tabular path names an unknown column: xarray's bare
+    # ``KeyError: 'tabsd'`` says neither what was wrong nor what would be right.
+    if missing := [name for name in wanted if name not in ds.variables]:
+        available = ", ".join(sorted(str(name) for name in ds.data_vars))
+        ds.close()
+        raise ValueError(f"Unknown variable(s) {missing} in variables=. This dataset has: {available}")
     try:
-        selected = ds[[variables] if isinstance(variables, str) else list(variables)]
+        selected = ds[wanted]
     except BaseException:
         ds.close()
         raise
