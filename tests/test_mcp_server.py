@@ -1307,6 +1307,20 @@ class TestMCPInstance:
         assert result.is_error
         assert "private implementation detail" not in result.content[0].text
 
+    def test_a_polars_error_names_what_the_query_tripped_on(self):
+        import polars as pl
+        from mcp import Client
+
+        async def call_tool():
+            async with Client(mcp) as client:
+                return await client.call_tool("load_data", {"dataset": "smn"})
+
+        failure = pl.exceptions.ColumnNotFoundError("reference_timestamp")
+        with patch("foehn.mcp_server.foehn.load", side_effect=failure):
+            result = asyncio.run(call_tool())
+        assert result.is_error
+        assert "reference_timestamp" in result.content[0].text
+
     def test_missing_grid_dependencies_explain_the_install_to_protocol_clients(self):
         from mcp import Client
 

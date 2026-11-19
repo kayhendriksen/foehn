@@ -9,6 +9,7 @@ bookkeeping, and destination collisions.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
@@ -397,3 +398,26 @@ def test_asset_filenames_do_not_publish_url_fragments(tmp_path):
 
     assert result.filenames == ["same.nc"]
     assert (tmp_path / "same.nc").read_bytes() == b"data"
+
+
+def test_an_interrupt_stops_the_batch_instead_of_finishing_it(tmp_path):
+    """A KeyboardInterrupt is not an asset failure to count: the queued assets are dropped."""
+    from foehn.transfer import WriteResult
+
+    written = []
+
+    def write(_fetcher, item, _path, _etag):
+        if not written:
+            written.append(item.name)
+            raise KeyboardInterrupt
+        # Slow enough that the main thread always sees the interrupt long
+        # before an uncancelled queue could drain (50 x 20 ms).
+        time.sleep(0.02)
+        written.append(item.name)
+        return WriteResult(downloaded=True)
+
+    assets = [asset(f"f{i}.nc") for i in range(50)]
+    with pytest.raises(KeyboardInterrupt):
+        fetch_all(assets, tmp_path, fetcher=InMemoryFetcher(), workers=1, write=write)
+
+    assert len(written) < 10

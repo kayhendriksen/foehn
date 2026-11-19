@@ -1131,3 +1131,19 @@ def test_python_dash_m_runs_the_cli():
     result = subprocess.run([sys.executable, "-m", "foehn", "--version"], capture_output=True, text=True, check=True)
 
     assert result.stdout.strip() == f"foehn {foehn.__version__}"
+
+
+def test_a_polars_error_is_one_line_not_a_traceback(capsys):
+    import polars as pl
+
+    with (
+        patch("foehn.api.load", side_effect=pl.exceptions.ColumnNotFoundError("reference_timestamp")),
+        patch("sys.argv", ["foehn", "load", "smn"]),
+        pytest.raises(SystemExit) as exc,
+    ):
+        main()
+
+    err = capsys.readouterr().err
+    assert exc.value.code == 1
+    assert "foehn: error: reference_timestamp" in err
+    assert "Traceback" not in err

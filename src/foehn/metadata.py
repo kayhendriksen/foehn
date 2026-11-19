@@ -218,7 +218,15 @@ def fetch_table(dataset: str, table: str, *, fetcher: Fetcher) -> pl.DataFrame:
         if spec.suffix not in asset.name:
             continue
         content = decode_meteoswiss_csv(fetcher.get(asset.href, timeout=60).body)
-        df = pl.read_csv(content.encode("utf-8"), separator=";", schema_overrides=spec.schema_overrides)
+        # Every row, not the default first 100: the union-typed fields are left
+        # to inference, and an altitude of ``1538.5`` on row 101 of a column
+        # that had read as integers ended the whole table. They are small.
+        df = pl.read_csv(
+            content.encode("utf-8"),
+            separator=";",
+            schema_overrides=spec.schema_overrides,
+            infer_schema_length=None,
+        )
         return df.select(pl.col(field.source).alias(field.published) for field in spec.fields)
 
     available = [name for name, other in TABLES.items() if any(other.suffix in a.name for a in csv_assets)]

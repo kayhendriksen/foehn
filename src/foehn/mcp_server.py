@@ -414,7 +414,8 @@ def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P,
     """Translate anticipated library failures at the MCP protocol boundary.
 
     Keep the Python functions' exception contract. Only the registered tool
-    translates validation and network failures; unexpected failures retain the
+    translates validation, network and Polars failures — the last names the
+    column or value a query tripped on; unexpected failures retain the
     SDK's masking. In particular, response-model ValidationError subclasses
     ValueError but describes an implementation/data problem, not a bad query.
     """
@@ -424,7 +425,7 @@ def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P,
         def invoke(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             try:
                 return fn(*args, **kwargs)
-            except (ValueError, FetchError, ImportError) as exc:
+            except (ValueError, FetchError, ImportError, pl.exceptions.PolarsError) as exc:
                 if isinstance(exc, ValueError) and type(exc) is not ValueError:
                     raise
                 raise ToolError(redact_urls(str(exc))) from None
