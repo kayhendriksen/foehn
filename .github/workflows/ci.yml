@@ -39,10 +39,10 @@ jobs:
       # the highest-risk file in the repo.
       # Via env rather than expanding ${{ }} straight into the run block, which
       # is the template-injection shape zizmor flags.
-      - run: uvx "ruff@${RUFF_PIN}" check src/ tests/ scripts/
+      - run: uvx "ruff@${RUFF_PIN}" check src/ tests/ scripts/ fuzz/
         env:
           RUFF_PIN: ${{ steps.ruff.outputs.version }}
-      - run: uvx "ruff@${RUFF_PIN}" format --check src/ tests/ scripts/
+      - run: uvx "ruff@${RUFF_PIN}" format --check src/ tests/ scripts/ fuzz/
         env:
           RUFF_PIN: ${{ steps.ruff.outputs.version }}
 
