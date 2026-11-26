@@ -430,7 +430,7 @@ def _tool(*, title: str, annotations: ToolAnnotations) -> Callable[[Callable[_P,
                     raise
                 raise ToolError(redact_urls(str(exc))) from None
 
-        invoke.__signature__ = _described(fn)  # ty: ignore[unresolved-attribute]
+        invoke.__signature__ = _described(fn)  # ty: ignore[missing-attribute]
         mcp.tool(title=title, annotations=annotations)(invoke)
         return fn
 
